@@ -1,0 +1,11 @@
+---
+- name: Provision the application
+  gather_facts: yes
+  hosts: localhost
+  become: no
+  vars_files:
+    - vars/common.yaml
+    - vars/phylum_vars.yaml
+    - vars/umbrella.yaml
+  roles:
+    - role: umbrella

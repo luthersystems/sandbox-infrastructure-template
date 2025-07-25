@@ -1,0 +1,6 @@
+phylum_version: "{{app_version}}"
+
+substrate_chaincode_version: "{{substrate_version}}"
+shiroclient_cli_substrate_version: "{{substrate_version}}"
+shiroclient_cli_version: "{{substrate_version}}"
+shiroclient_gateway_version: "{{substrate_version}}"

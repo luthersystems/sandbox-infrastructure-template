@@ -1,0 +1,11 @@
+---
+phylum_name: app
+shiro_phylum_init_substrate_version: "{{ substrate_chaincode_version }}"
+shiro_phylum_init_version: "{{ phylum_version }}"
+shiroclient_cli_phylum_version: "{{ phylum_version }}"
+shiroclient_cli_phylum_name: "{{ phylum_name }}"
+
+app_phylum_zip_base64: "{{lookup('file', 'phyla/app-' + phylum_version + '.zip') | b64encode}}"
+app_bootstrap_yaml:
+  environment: "{{ luther_env }}"
+  project_id: "{{ project_id }}"

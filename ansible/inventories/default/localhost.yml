@@ -1,0 +1,8 @@
+all:
+  hosts:
+    localhost:
+      ansible_host: localhost
+  children:
+    tag_Component_bastion:
+      hosts:
+        localhost:

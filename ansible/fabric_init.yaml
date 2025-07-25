@@ -1,0 +1,31 @@
+---
+- name: Provision the fabric channel and chaincode
+  gather_facts: true
+  hosts: tag_Component_bastion
+  become: no
+  become_user: root
+  vars_files:
+    - vars/common.yaml
+    - vars/fabric_network_vars.yaml
+    - vars/phylum_vars.yaml
+  roles:
+    - role: k8s_fabric_channel
+      k8s_fabric_channel_orgs:
+        - name: org1
+          msp: Org1MSP
+    - role: k8s_fabric_chaincode
+      k8s_fabric_chaincode_name: com_luthersystems_chaincode_substrate01
+      k8s_fabric_chaincode_version: "{{substrate_chaincode_version}}"
+      k8s_fabric_chaincode_endorsement_policy: "OR('Org1MSP.member')"
+      k8s_fabric_chaincode_ccaas: yes
+      k8s_fabric_chaincode_orgs:
+        - name: org1
+          msp: Org1MSP
+          peers: 1
+      k8s_fabric_chaincode_azs: "{{k8s_fabric_network_azs}}"
+    - role: shiroclient_cli
+      shiroclient_cli_license: "{{substrate_license}}"
+      shiroclient_cli_crypto_config: "{{k8s_fabric_crypto_config}}"
+      shiroclient_cli_bootstrap_yaml: "{{app_bootstrap_yaml}}"
+      shiroclient_cli_phylum_zip_base64: "{{app_phylum_zip_base64}}"
+    - role: shiro_phylum_init

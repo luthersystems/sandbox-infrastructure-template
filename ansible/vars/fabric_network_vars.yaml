@@ -1,0 +1,14 @@
+---
+k8s_fabric_orderer_cluster_size: "{{ num_orderers }}"
+k8s_fabric_orderer_cli: true
+
+k8s_fabric_peer_org_names: "{{ org_names }}"
+k8s_fabric_peer_org_size: "{{ num_peers }}"
+
+k8s_fabric_network_azs: "{{ eks_cluster_azs }}"
+
+#k8s_fabric_network_hcs: false
+#k8s_fabric_network_hcs_operator_id: !!null
+#k8s_fabric_network_hcs_operator_private_key: !!null
+
+k8s_fabric_peer_chaincode_invoke_timeout: 5s

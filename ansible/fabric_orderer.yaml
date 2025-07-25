@@ -1,0 +1,45 @@
+---
+- name: Provision the fabric-orderer servers
+  gather_facts: true
+  hosts: tag_Component_bastion
+  become: no
+  become_user: root
+  vars_files:
+    - vars/common.yaml
+    - vars/fabric_network_vars.yaml
+  vars:
+    is_fabric_upgrade: false
+  roles:
+    - role: k8s_fabric_orderer
+      k8s_fabric_orderer_separate_pvc: true
+      k8s_fabric_orderer_azs: "{{k8s_fabric_network_azs}}"
+      k8s_fabric_orderer_crypto_config: "{{k8s_fabric_crypto_config}}"
+      k8s_fabric_orderer_crypto_config_secret_name: fabric-crypto-config
+      k8s_fabric_orderer_channel_artifacts: "{{k8s_fabric_channel_artifacts}}"
+      k8s_fabric_orderer_channel_artifacts_configmap_name: fabric-channel-artifacts
+
+- name: Provision the fabric-cli pods
+  gather_facts: true
+  hosts: tag_Component_bastion
+  become: no
+  become_user: root
+  vars_files:
+    - vars/common.yaml
+    - vars/fabric_network_vars.yaml
+  vars:
+    is_fabric_upgrade: false
+  roles:
+    - role: k8s_fabric_cli
+      k8s_fabric_cli_org: orderer
+      k8s_fabric_cli_msp: OrdererMSP
+      k8s_fabric_cli_org_size: "{{k8s_fabric_orderer_cluster_size}}"
+      k8s_fabric_cli_docker_socket: ""
+      k8s_fabric_cli_azs: "{{k8s_fabric_network_azs}}"
+      k8s_fabric_cli_chaincode_external: yes
+      k8s_fabric_cli_chaincode_docker: no
+      k8s_fabric_cli_crypto_config: "{{k8s_fabric_crypto_config}}"
+      k8s_fabric_cli_crypto_config_secret_name: fabric-crypto-config
+      k8s_fabric_cli_channel_artifacts: "{{k8s_fabric_channel_artifacts}}"
+      k8s_fabric_cli_channel_artifacts_configmap_name: fabric-channel-artifacts
+      k8s_fabric_cli_collections: "{{k8s_fabric_collections}}"
+      k8s_fabric_cli_collections_configmap_name: fabric-collections

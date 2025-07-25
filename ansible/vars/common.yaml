@@ -1,0 +1,4 @@
+kubectl_aws_role_arn: "{{ luther_ansible_role }}"
+kubectl_configure: yes
+kubectl_setup: yes
+helm_setup: yes # runs within mars where helm is already installed

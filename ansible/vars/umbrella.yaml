@@ -1,0 +1,77 @@
+umbrella_namespace: "{{ luther_project_name }}"
+umbrella_release_name: umbrella
+
+umbrella_org_name: luther
+umbrella_fabric_domain: "{{ k8s_fabric_network_domain_root }}"
+umbrella_oracle_app_name: "sandbox" # TODO replace?
+
+umbrella_connectorhub_separate_pvc: true # TODO
+
+umbrella_charts:
+  - ingress
+  - shiroclient
+  - connectorhub
+  - oracle
+
+umbrella_values:
+  global:
+    orgName: "{{ umbrella_org_name }}"
+    projectEnv: "{{ luther_env }}"
+    partOf: "{{ luther_project_name }}"
+  ingress:
+    matchHost: "app.{{ domain }}"
+    loadBalancer:
+      certificateARN: "{{ frontend_certificate_arn }}"
+    serviceRoutes:
+      - path: /v1/ch
+        service: connectorhub
+        port: 80
+      - path: "/v1/{{ umbrella_oracle_app_name }}"
+        service: oracle
+        port: 80
+  shiroclient:
+    runMode: gateway
+    image:
+      tag: "{{shiroclient_gateway_version}}"
+    substrate:
+      version: "{{ substrate_chaincode_version }}"
+      license: "{{ substrate_license }}"
+    phylum:
+      name: "{{ phylum_name }}"
+      version: "{{ phylum_version }}"
+    dlt:
+      organization: org1
+      domain: "{{ umbrella_fabric_domain }}"
+      cryptoConfigSecret: "{{k8s_fabric_crypto_config}}"
+    verbose: true
+  connectorhub:
+    image:
+      tag: "{{connectorhub_version}}"
+    dlt:
+      organization: org1
+      domain: "{{ umbrella_fabric_domain }}"
+      cryptoConfigSecret: "{{k8s_fabric_crypto_config}}"
+    serviceAccount:
+      create: true
+      annotations:
+        eks.amazonaws.com/role-arn: "{{connectorhub_service_account_iam_role_arn}}"
+    persistentVolume:
+      create: "{{not umbrella_connectorhub_separate_pvc}}"
+      storageSize: "{{umbrella_connectorhub_storage_size}}"
+      storageClassName: "{{umbrella_connectorhub_storage_class}}"
+      typeOverride: "{{umbrella_connectorhub_volume_type_override}}"
+    verbose: true
+  oracle:
+    image:
+      repository: "{{ oracle_image_repo }}"
+      tag: "{{ app_version }}"
+      pullPolicy: Always
+    app:
+      name: "{{ umbrella_oracle_app_name }}" # used for healthcheck path
+    serviceAccount:
+      create: true
+      annotations:
+        eks.amazonaws.com/role-arn: "{{oracle_service_account_iam_role_arn}}"
+    env:
+      # TODO: this will be a different prefix for customer
+      SANDBOX_ORACLE_GATEWAY_ENDPOINT: http://{{umbrella_release_name}}-shiroclient

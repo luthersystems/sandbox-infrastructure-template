@@ -1,0 +1,4 @@
+- import_playbook: fabric_orderer.yaml
+- import_playbook: fabric_ca.yaml
+- import_playbook: fabric_peer.yaml
+- import_playbook: fabric_init.yaml

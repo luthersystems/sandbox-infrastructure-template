@@ -1,0 +1,20 @@
+---
+- name: k8s provision
+  gather_facts: yes
+  hosts: localhost
+  become: no
+  vars_files:
+    - vars/common.yaml
+    - vars/k8s_init_vars.yaml
+  roles:
+    - role: eks_cluster_init
+      eks_cluster_init_volume_reclaim_policy: Retain
+      eks_cluster_init_configure_aws_auth: no
+    - aws_lb_controller
+    - role: k8s_external_dns
+      k8s_external_dns_public_service_account_iam_role_arn: "{{ externaldns_public_service_account_iam_role_arn }}"
+      k8s_external_dns_private_service_account_iam_role_arn: "{{ externaldns_private_service_account_iam_role_arn }}"
+    - role: fluentbit
+      k8s_fluentbit_iam_arn: "{{fluentbit_service_account_iam_role_arn}}"
+      k8s_fluentbit_region: "{{env_region}}"
+      k8s_fluentbit_log_group_name: "{{fluentbit_log_group_name}}"
