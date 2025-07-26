@@ -35,30 +35,58 @@ mustGetAnsibleField() {
   echo "$val"
 }
 
+has_git_repo() {
+  [ -e "$MARS_PROJECT_ROOT/.git" ]
+}
+
+ensure_git_identity() {
+  # if no identity set, give it a CI-friendly default
+  if [ -z "$(git config user.email 2>/dev/null)" ]; then
+    git config user.email "devbot@luthersystems.com"
+  fi
+  if [ -z "$(git config user.name 2>/dev/null)" ]; then
+    git config user.name "Luther DevBot"
+  fi
+}
+
 # gitCommit [message]
 gitCommit() {
-  # skip if there's no .git at the root
-  if [ ! -e "$MARS_PROJECT_ROOT/.git" ]; then
-    echo "Skipping git commit: no .git found at repo root: $MARS_PROJECT_ROOT"
+  if ! has_git_repo; then
+    echo "Skipping git commit: no .git at repo root: $MARS_PROJECT_ROOT"
     ls -lta "$MARS_PROJECT_ROOT"
     return 0
   fi
 
-  # ensure we have a user.identity
-  if ! git -C "$MARS_PROJECT_ROOT" config user.email >/dev/null; then
-    git -C "$MARS_PROJECT_ROOT" config user.email "devbot@luthersystems.com"
-  fi
-  if ! git -C "$MARS_PROJECT_ROOT" config user.name >/dev/null; then
-    git -C "$MARS_PROJECT_ROOT" config user.name "Luther Devbot"
-  fi
+  ensure_git_identity
 
-  msg="${1:-"auto-commit: infrastructure changes [ci skip]"}"
-  git -C "$MARS_PROJECT_ROOT" add -A
+  local msg="${1:-auto-commit: infrastructure changes [ci skip]}"
+  git add -A
 
-  if ! git -C "$MARS_PROJECT_ROOT" diff --cached --quiet; then
-    git -C "$MARS_PROJECT_ROOT" commit -m "$msg"
+  if ! git diff --cached --quiet; then
+    git commit -m "$msg"
     echo "✅ Git commit created."
   else
     echo "No changes to commit."
+  fi
+}
+
+gitMergeOriginMain() {
+  if ! has_git_repo; then
+    echo "Skipping git merge: no .git at repo root: $MARS_PROJECT_ROOT"
+    ls -lta "$MARS_PROJECT_ROOT"
+    return 0
+  fi
+
+  ensure_git_identity
+
+  echo "🔄 Fetching origin/main…"
+  git fetch origin main
+
+  echo "🔀 Merging (no‐ff, auto‐edit) origin/main…"
+  if git merge origin/main --no-ff --no-edit; then
+    echo "✅ Merge commit created."
+  else
+    echo "⚠️  Merge failed or conflicts detected." >&2
+    return 1
   fi
 }
