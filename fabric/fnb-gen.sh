@@ -66,3 +66,5 @@ echo "k8s_fabric_crypto_config: $FABRIC_CRYPTO_ZIP_B64" >>"$ANSIBLE_FABRIC_ARTIF
 echo "" >>"$ANSIBLE_FABRIC_ARTIFACTS"
 
 log "fnb-gen: generated fabric artifacts [done]"
+
+gitCommit "fabric: auto-commit fabric artifacts [ci skip]"
