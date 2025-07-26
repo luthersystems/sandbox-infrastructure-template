@@ -52,6 +52,3 @@ fi
 
 # Otherwise, generate or overwrite
 generate_license
-
-# Optionally auto-commit the change (call this if desired)
-gitCommit "license: auto-commit after license update [ci skip]"
