@@ -5,3 +5,4 @@ set -euo pipefail
 
 tfInit
 tfDestroy
+gitCommit

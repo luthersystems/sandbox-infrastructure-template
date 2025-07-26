@@ -51,3 +51,20 @@ tfApply() {
 tfDestroy() {
   $MARS ${tf_workspace} destroy --approve
 }
+
+gitCommit() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "Skipping git commit: not inside a git repo."
+    return 0
+  fi
+
+  local msg="${1:-"terraform: auto-commit after apply [ci skip]"}"
+  git add . # Stages all new and modified files (respects .gitignore)
+
+  if ! git diff --cached --quiet; then
+    git commit -m "$msg"
+    echo "✅ Git commit created."
+  else
+    echo "No changes to commit."
+  fi
+}
