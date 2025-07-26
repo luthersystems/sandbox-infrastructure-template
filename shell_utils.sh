@@ -44,6 +44,14 @@ gitCommit() {
     return 0
   fi
 
+  # ensure we have a user.identity
+  if ! git -C "$MARS_PROJECT_ROOT" config user.email >/dev/null; then
+    git -C "$MARS_PROJECT_ROOT" config user.email "devbot@luthersystems.com"
+  fi
+  if ! git -C "$MARS_PROJECT_ROOT" config user.name >/dev/null; then
+    git -C "$MARS_PROJECT_ROOT" config user.name "Luther Devbot"
+  fi
+
   msg="${1:-"auto-commit: infrastructure changes [ci skip]"}"
   git -C "$MARS_PROJECT_ROOT" add -A
 
