@@ -38,7 +38,7 @@ mustGetAnsibleField() {
 # gitCommit [message]
 gitCommit() {
   # Always run from the repo root for reliability
-  if ! git -C "$MARS_PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! git -C "$MARS_PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Skipping git commit: not inside a git repo: ${MARS_PROJECT_ROOT}"
     ls -lta ${MARS_PROJECT_ROOT}
     return 0
