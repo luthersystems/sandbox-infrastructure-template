@@ -40,7 +40,14 @@ gitCommit() {
   # Always run from the repo root for reliability
   if ! git -C "$MARS_PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     echo "Skipping git commit: not inside a git repo: ${MARS_PROJECT_ROOT}"
-    ls -lta ${MARS_PROJECT_ROOT}
+    echo "─── $MARS_PROJECT_ROOT ───────────────────────────────────"
+    ls -lta "${MARS_PROJECT_ROOT}"
+    if [ -e "${MARS_PROJECT_ROOT}/.git" ]; then
+      echo "─── ${MARS_PROJECT_ROOT}/.git ─────────────────────────────"
+      ls -lta "${MARS_PROJECT_ROOT}/.git"
+    else
+      echo "No .git directory/file found under ${MARS_PROJECT_ROOT}"
+    fi
     return 0
   fi
 
