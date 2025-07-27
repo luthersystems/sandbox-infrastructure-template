@@ -35,3 +35,7 @@ variable "create_dns" {
   default = true
 }
 
+variable "github_token" {
+  description = "GitHub API token with repo-creation scope"
+  type        = string
+}

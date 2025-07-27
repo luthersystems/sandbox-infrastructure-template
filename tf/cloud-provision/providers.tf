@@ -10,3 +10,8 @@ provider "aws" {
   alias  = "platform-account"
   region = var.aws_region
 }
+
+provider "github" {
+  token = var.github_token
+  owner = "luthersystems"
+}

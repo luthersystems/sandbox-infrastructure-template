@@ -40,31 +40,46 @@ has_git_repo() {
 }
 
 ensure_git_identity() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
   git config --local user.email >/dev/null 2>&1 ||
     git config --local user.email "devbot@luthersystems.com"
   git config --local user.name >/dev/null 2>&1 ||
     git config --local user.name "Luther DevBot"
-  popd >/dev/null
 }
 
 disable_filemode() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
   git config --local core.fileMode false
+}
+
+configure_deploy_ssh() {
+  local KEY="$MARS_PROJECT_ROOT/secrets/infra_deploy_key.pem"
+  if [ ! -f "$KEY" ]; then
+    echo "Skipping SSH config: no deploy key at $KEY"
+    return 0
+  fi
+
+  git config --local core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
+}
+
+configure_git() {
+  if ! has_git_repo; then
+    echo "⚠️  configure_git: no .git at $MARS_PROJECT_ROOT"
+    return 1
+  fi
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  ensure_git_identity
+  disable_filemode
+  configure_deploy_ssh
   popd >/dev/null
 }
 
 gitCommit() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
-  if ! has_git_repo; then
-    echo "Skipping git commit: no repo here: $MARS_PROJECT_ROOT"
+  if ! configure_git; then
+    echo "⚠️  configure_git failed, skipping commit."
     popd >/dev/null
     return 0
   fi
-
-  ensure_git_identity
-  disable_filemode
 
   msg="${1:-auto-commit: infrastructure changes [ci skip]}"
   git add -A
@@ -82,13 +97,11 @@ gitCommit() {
 gitMergeOriginMain() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
-  if ! has_git_repo; then
-    echo "Skipping git merge: no repo here: $MARS_PROJECT_ROOT"
+  if ! configure_git; then
+    echo "⚠️  configure_git failed, skipping git merge."
     popd >/dev/null
     return 0
   fi
-
-  ensure_git_identity
 
   echo "🔄 Fetching origin/main…"
   git fetch origin main
