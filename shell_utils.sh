@@ -40,40 +40,51 @@ has_git_repo() {
 }
 
 ensure_git_identity() {
-  # if no identity set, give it a CI-friendly default
-  if [ -z "$(git config user.email 2>/dev/null)" ]; then
-    git config user.email "devbot@luthersystems.com"
-  fi
-  if [ -z "$(git config user.name 2>/dev/null)" ]; then
-    git config user.name "Luther DevBot"
-  fi
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  git config --local user.email >/dev/null 2>&1 ||
+    git config --local user.email "devbot@luthersystems.com"
+  git config --local user.name >/dev/null 2>&1 ||
+    git config --local user.name "Luther DevBot"
+  popd >/dev/null
 }
 
-# gitCommit [message]
+disable_filemode() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  git config --local core.fileMode false
+  popd >/dev/null
+}
+
 gitCommit() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+
   if ! has_git_repo; then
-    echo "Skipping git commit: no .git at repo root: $MARS_PROJECT_ROOT"
-    ls -lta "$MARS_PROJECT_ROOT"
+    echo "Skipping git commit: no repo here: $MARS_PROJECT_ROOT"
+    popd >/dev/null
     return 0
   fi
 
   ensure_git_identity
+  disable_filemode
 
-  local msg="${1:-auto-commit: infrastructure changes [ci skip]}"
+  msg="${1:-auto-commit: infrastructure changes [ci skip]}"
   git add -A
 
-  if ! git diff --cached --quiet; then
+  if git diff --cached --quiet; then
+    echo "No changes to commit."
+  else
     git commit -m "$msg"
     echo "✅ Git commit created."
-  else
-    echo "No changes to commit."
   fi
+
+  popd >/dev/null
 }
 
 gitMergeOriginMain() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+
   if ! has_git_repo; then
-    echo "Skipping git merge: no .git at repo root: $MARS_PROJECT_ROOT"
-    ls -lta "$MARS_PROJECT_ROOT"
+    echo "Skipping git merge: no repo here: $MARS_PROJECT_ROOT"
+    popd >/dev/null
     return 0
   fi
 
@@ -86,7 +97,10 @@ gitMergeOriginMain() {
   if git merge origin/main --no-ff --no-edit; then
     echo "✅ Merge commit created."
   else
-    echo "⚠️  Merge failed or conflicts detected." >&2
+    echo_error "⚠️  Merge failed or conflicts detected."
+    popd >/dev/null
     return 1
   fi
+
+  popd >/dev/null
 }
