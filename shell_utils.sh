@@ -35,6 +35,47 @@ mustGetAnsibleField() {
   echo "$val"
 }
 
+AUTO_VARS_DIR="${MARS_PROJECT_ROOT}/tf/auto-vars"
+
+# getTfVar VAR_NAME
+#   Print the value of VAR_NAME from any JSON file in auto-vars/ or empty string if not found
+getTfVar() {
+  local key="$1"
+
+  if [[ ! -d "$AUTO_VARS_DIR" ]]; then
+    echo "ERROR: Terraform auto vars directory '$AUTO_VARS_DIR' not found" >&2
+    echo ""
+    exit 1
+  fi
+
+  # jq filter to get the variable from any JSON file in the directory, first match wins
+  local result=""
+  for file in "$AUTO_VARS_DIR"/*.json; do
+    # skip if no matching files
+    [[ -e "$file" ]] || continue
+
+    val=$(jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' "$file" 2>/dev/null || echo "")
+    if [[ -n "$val" ]]; then
+      result="$val"
+      break
+    fi
+  done
+
+  echo "${result:-}"
+}
+
+# mustGetTfVar VAR_NAME
+#   Print the value of VAR_NAME from auto-vars or exit if not set/empty
+mustGetTfVar() {
+  local val
+  val="$(getTfVar "$1")"
+  if [[ -z "$val" || "$val" == "null" ]]; then
+    echo "ERROR: required terraform variable '$1' missing or empty in $AUTO_VARS_DIR" >&2
+    exit 1
+  fi
+  echo "$val"
+}
+
 has_git_repo() {
   [ -e "$MARS_PROJECT_ROOT/.git" ]
 }
@@ -60,6 +101,19 @@ configure_deploy_ssh() {
   git config --local core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
 }
 
+ensure_infra_remote() {
+  # repo_clone_ssh_url should be set via terraform auto-vars
+  url=$(getTfVar "repo_clone_ssh_url")
+  if [ -n "$url" ]; then
+    if git remote get-url infra >/dev/null 2>&1; then
+      git remote set-url infra "$url"
+    else
+      git remote add infra "$url"
+    fi
+    echo "🔧 infra remote configured → $url"
+  fi
+}
+
 configure_git() {
   if ! has_git_repo; then
     echo "⚠️  configure_git: no .git at $MARS_PROJECT_ROOT"
@@ -69,6 +123,7 @@ configure_git() {
   ensure_git_identity
   disable_filemode
   configure_deploy_ssh
+  ensure_infra_remote
   popd >/dev/null
 }
 
@@ -115,5 +170,16 @@ gitMergeOriginMain() {
     return 1
   fi
 
+  popd >/dev/null
+}
+
+gitPushInfra() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  if git remote get-url infra >/dev/null 2>&1; then
+    echo "🚀 Pushing to infra…"
+    git push infra HEAD
+  else
+    echo "Skipping gitPushInfra: no infra remote configured"
+  fi
   popd >/dev/null
 }
