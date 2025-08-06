@@ -7,6 +7,7 @@ if [ -z "${MARS_PROJECT_ROOT:-}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   MARS_PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
+export MARS_PROJECT_ROOT
 
 ANSIBLE_ENV_FILE="$MARS_PROJECT_ROOT/ansible/inventories/default/group_vars/all/env.yaml"
 
