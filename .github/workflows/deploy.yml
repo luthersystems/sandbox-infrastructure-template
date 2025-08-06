@@ -1,0 +1,80 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/ansible/inventories/default/group_vars/all/version.yaml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        description: Deploy env
+        default: default
+        type: choice
+        options:
+          - default
+      playbook:
+        required: true
+        description: Run ansible playbook
+        default: app.yaml
+        type: choice
+        options:
+          - app.yaml
+          - site.yaml
+          - k8s-setup.yaml
+          - dlt-provision.yaml
+          - substrate_upgrade.yaml
+          - fabric_upgrade.yaml
+      check_mode:
+        required: true
+        description: Use check mode
+        default: false
+        type: choice
+        options:
+          - "true"
+          - "false"
+      verbosity:
+        required: true
+        description: Verbosity
+        default: 0
+        type: choice
+        options:
+          - "0"
+          - "1"
+          - "2"
+          - "3"
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    environment:
+      name: ${{ github.event.inputs.environment || 'default' }}
+    env:
+      PLAYBOOK: ${{ github.event.inputs.playbook || 'app.yaml' }}
+      ENVIRONMENT: ${{ github.event.inputs.environment || 'default' }}
+      CHECK_MODE: ${{ github.event.inputs.check_mode || 'false' }}
+      VERBOSITY: ${{ github.event.inputs.verbosity || '0' }}
+    permissions:
+      id-token: write # Required for OIDC authentication
+      contents: read # This is required for actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          path: runs/${{ github.run_number }}
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }} # Read AWS role from repository variable
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }} # Read AWS region from repository variable
+          role-session-name: GitHubActionsSession
+      - name: Deploy
+        run: |
+          cd runs/${{ github.run_number }}
+          bash run-ansible.sh $PLAYBOOK $ENVIRONMENT $CHECK_MODE $VERBOSITY
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf runs/${{ github.run_number }}

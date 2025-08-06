@@ -1,0 +1,3 @@
+---
+- import_playbook: fabric_peer.yaml
+- import_playbook: app.yaml

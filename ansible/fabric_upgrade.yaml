@@ -1,0 +1,10 @@
+# upgrade the fabric network
+---
+- import_playbook: fabric_orderer.yaml
+  vars:
+    is_fabric_upgrade: true
+- import_playbook: fabric_ca.yaml
+- import_playbook: fabric_peer.yaml
+  vars:
+    is_fabric_upgrade: true
+- import_playbook: fabric_init.yaml
