@@ -35,7 +35,7 @@ variable "create_dns" {
   default = true
 }
 
-variable "github_owner" {
+variable "repo_org" {
   type    = string
   default = "luthersystems"
 }

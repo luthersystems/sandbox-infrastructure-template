@@ -44,7 +44,7 @@ resource "local_file" "git_repo_tfvars" {
   content = jsonencode({
     repo_clone_ssh_url = github_repository.infra.ssh_clone_url
     repo_name          = github_repository.infra.name
-    repo_org           = var.github_owner
+    repo_org           = var.repo_org
   })
 }
 

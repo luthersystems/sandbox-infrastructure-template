@@ -80,3 +80,13 @@ variable "parent_ou_name" {
   type    = string
   default = ""
 }
+
+variable "repo_clone_ssh_url" {
+  type    = string
+  default = ""
+}
+
+variable "repo_name" {
+  type    = string
+  default = ""
+}
