@@ -34,3 +34,8 @@ variable "create_dns" {
   type    = bool
   default = true
 }
+
+variable "github_owner" {
+  type    = string
+  default = "luthersystems"
+}

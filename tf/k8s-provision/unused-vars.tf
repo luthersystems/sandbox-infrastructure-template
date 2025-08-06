@@ -90,3 +90,18 @@ variable "terraform_sa_role" {
   type    = string
   default = ""
 }
+
+variable "repo_clone_ssh_url" {
+  type    = string
+  default = ""
+}
+
+variable "repo_name" {
+  type    = string
+  default = ""
+}
+
+variable "repo_org" {
+  type    = string
+  default = ""
+}

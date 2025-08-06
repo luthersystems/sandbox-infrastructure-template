@@ -12,5 +12,5 @@ provider "aws" {
 }
 
 provider "github" {
-  owner = "luthersystems"
+  owner = var.github_owner
 }

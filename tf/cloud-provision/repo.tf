@@ -1,5 +1,9 @@
+locals {
+  repo_name = "${var.short_project_id}-infra"
+}
+
 resource "github_repository" "infra" {
-  name        = "${var.short_project_id}-infra"
+  name        = local.repo_name
   description = "Infrastructure repo for ${var.short_project_id}"
   visibility  = "private"
 
@@ -35,9 +39,17 @@ output "repo_clone_ssh_url" {
 }
 
 resource "local_file" "git_repo_tfvars" {
-  content = templatefile("${path.module}/git_repo.auto.tfvars.json.tftpl", {
-    repo_clone_ssh_url = github_repository.infra.ssh_clone_url
-  })
-
   filename = "${path.module}/../auto-vars/git_repo.auto.tfvars.json"
+
+  content = jsonencode({
+    repo_clone_ssh_url = github_repository.infra.ssh_clone_url
+    repo_name          = github_repository.infra.name
+    repo_org           = var.github_owner
+  })
+}
+
+resource "github_actions_variable" "aws_region" {
+  repository    = github_repository.infra.name
+  variable_name = "AWS_REGION"
+  value         = var.aws_region != "" ? var.aws_region : "us-west-2"
 }

@@ -14,3 +14,7 @@ provider "aws" {
     role_arn = local.terraform_role_arn
   }
 }
+
+provider "github" {
+  owner = var.repo_org
+}

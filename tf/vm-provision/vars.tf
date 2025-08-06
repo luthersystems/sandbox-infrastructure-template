@@ -50,3 +50,11 @@ variable "luther_project_name" {
   type    = string
   default = "app"
 }
+
+variable "repo_name" {
+  type = string
+}
+
+variable "repo_org" {
+  type = string
+}

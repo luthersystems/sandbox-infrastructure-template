@@ -4,14 +4,13 @@ module "storage" {
   luther_project = var.short_project_id
   luther_env     = var.luther_env
 
-  ci_github_repos = [] # TODO:
-  #ci_github_repos = [
-  #  {
-  #    org  = "luthersystems"
-  #    repo = local.domain # TODO: this should be a parameter, test env has test. prefix
-  #    env  = "prod"
-  #  }
-  #]
+  ci_github_repos = [
+    {
+      org  = var.repo_org
+      repo = var.repo_name
+      env  = "default"
+    }
+  ]
 
   providers = {
     aws    = aws
