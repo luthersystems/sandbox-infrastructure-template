@@ -1,12 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_ROOT=../
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+: "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Source helpers
+. "$MARS_PROJECT_ROOT/shell_utils.sh"
 
 # Source shared terraform helpers
-source "${SCRIPT_DIR}/../tf_helpers.sh"
+source "${SCRIPT_DIR}/../../shell_utils.sh"
 
 tfBootstrap() {
   # if we’ve already-generated a backend file, skip
