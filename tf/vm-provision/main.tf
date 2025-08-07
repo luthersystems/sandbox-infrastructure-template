@@ -5,6 +5,7 @@ module "storage" {
   luther_env     = var.luther_env
 
   has_github = true
+  has_vault  = true
 
   ci_github_repos = [
     {
