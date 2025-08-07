@@ -86,6 +86,6 @@ resource "local_file" "vault_ref" {
     aws_region       = var.aws_region
     aws_role_arn     = module.storage.env_admin_role_arn
   })
-
-  filename = "${path.module}/../../ansible/vars/${var.luther_env}/vault-ref"
+  file_permission = "0755"
+  filename        = "${path.module}/../../ansible/vars/${var.luther_env}/vault-ref"
 }

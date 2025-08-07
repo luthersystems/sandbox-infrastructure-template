@@ -1,0 +1,114 @@
+#!/bin/bash
+
+set -eo pipefail
+
+DEV_MOUNTS=''
+if [[ "$MARS_DEV" == "true" ]]; then
+  DEFAULT_MARS_DEV_ROOT="$(dirname $(greadlink -f $(which mars)))"
+  MARS_DEV_ROOT=${MARS_DEV_ROOT:-DEFAULT_MARS_DEV_ROOT}
+  DEV_MOUNTS="-v ${MARS_DEV_ROOT}/scripts:/opt/mars:ro \
+                -v ${MARS_DEV_ROOT}/ansible-roles:/opt/ansible/roles:ro \
+                -v ${MARS_DEV_ROOT}/ansible-plugins:/opt/ansible/plugins:ro"
+fi
+
+if [[ "$MARS_DEBUG" == "true" ]]; then
+  set -x
+fi
+
+fullpath() {
+  cd "$1" && pwd
+}
+
+getroot() {
+  GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -z "$PROJECT_PATH"]; then
+    if [ -n "$GIT_ROOT" ]; then
+      PROJECT_PATH="$GIT_ROOT"
+    fi
+  fi
+}
+
+CLONE_DIR=${CLONE_DIR:-$HOME}
+
+# NOTE:  ANSIBLE_INVENTORY_CACHE_MOUNT is a property of the ec2.py configuration
+# (in ec2.ini) which defaults to ~/.ansible (/opt/home/.ansible in the
+# container).  So it is possible for an inventory configuration to fail by
+# changing the property from its default value.
+# NOTE2:  Because Docker Desktop on macos is not able to mount unix sockets the
+# inventory cache directory is persisted through a docker-native volume,
+# ANSIBLE_INVENTORY_CACHE_VOL.
+ANSIBLE_INVENTORY_CACHE_VOL=mars_ansible_inventory_cache
+ANSIBLE_INVENTORY_CACHE_MOUNT="/opt/home/.ansible"
+
+TFENV_CACHE_PATH="$CLONE_DIR/.mars/tfenv/versions"
+
+# Cache directory for provider plugins
+TF_PLUGIN_CACHE_DIR="$CLONE_DIR/.mars/tf-plugin-cache"
+
+ANSIBLE_HYPERLEDGER_DIR="$CLONE_DIR/.mars/hyperledger"
+ANSIBLE_CHARTS_DIR="$CLONE_DIR/.mars/helmcharts"
+
+DOCKER_IMAGE=luthersystems/mars
+DOCKER_PROJECT_PATH=/marsproject
+getroot
+PROJECT_PATH=$(fullpath ${PROJECT_PATH:-$(pwd)})
+WORK_REL_PATH="${PWD#$PROJECT_PATH}" # Includes leading dir separator
+DOCKER_WORK_DIR="$DOCKER_PROJECT_PATH$WORK_REL_PATH"
+
+AZ_MOUNTS=''
+if [[ "$MARS_AZ" == "true" ]]; then
+  # TODO: clean up these mount paths to re-use existing helm and ansible mounts
+  AZ_MOUNTS="-v ${PROJECT_PATH}/az-helm-charts:/opt/helm-charts:ro \
+  -v /home/ubuntu/.kube:/root/.kube:ro \
+  -v ${PROJECT_PATH}/az-fabric-scripts:/opt/fabric-scripts:ro"
+fi
+
+MARS_VERSION=latest
+if [ -f "$PROJECT_PATH/.mars-version" ]; then
+  MARS_VERSION=$(cat $PROJECT_PATH/.mars-version)
+elif [ -f "$GIT_ROOT/.mars-version" ]; then
+  MARS_VERSION=$(cat $GIT_ROOT/.mars-version)
+fi
+
+ENV_VARS=
+if [ -n "${TF_LOG+x}" ]; then
+  # TF_LOG has been set.  Forward it to the docker env.
+  ENV_VARS="-e TF_LOG=$TF_LOG $ENV_VARS"
+fi
+
+DOCKER_TERM_VARS=-i
+if [ -t 1 -a ! -p /dev/stdin ]; then
+  DOCKER_TERM_VARS=-it
+fi
+
+SHELL_OPTS=
+if [[ "$MARS_SHELL" == "true" ]]; then
+  SHELL_OPTS="--entrypoint /bin/bash"
+fi
+
+mkdir -p $TFENV_CACHE_PATH
+mkdir -p $TF_PLUGIN_CACHE_DIR
+mkdir -p $ANSIBLE_HYPERLEDGER_DIR
+mkdir -p $ANSIBLE_CHARTS_DIR
+
+docker run --rm $DOCKER_TERM_VARS \
+  --network host \
+  -e USER_ID=0 \
+  -e GROUP_ID=0 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  -e TF_PLUGIN_CACHE_DIR=/opt/tf-plugin-cache-dir \
+  $ENV_VARS \
+  $AZ_MOUNTS \
+  $DEV_MOUNTS \
+  -v "$TFENV_CACHE_PATH:/opt/tfenv/versions" \
+  -v "$TF_PLUGIN_CACHE_DIR:/opt/tf-plugin-cache-dir" \
+  -v "$ANSIBLE_HYPERLEDGER_DIR:/opt/hyperledger" \
+  -v "$ANSIBLE_CHARTS_DIR:/opt/k8s/helmcharts" \
+  -v "$PROJECT_PATH:$DOCKER_PROJECT_PATH" \
+  -w "$DOCKER_WORK_DIR" \
+  -e ANSIBLE_LOAD_CALLBACK_PLUGINS=yes \
+  -e ANSIBLE_STDOUT_CALLBACK=yaml \
+  -e ANSIBLE_TRANSPORT=local \
+  -e ANSIBLE_FORCE_COLOR=True \
+  $SHELL_OPTS \
+  "$DOCKER_IMAGE:$MARS_VERSION" "$@"
