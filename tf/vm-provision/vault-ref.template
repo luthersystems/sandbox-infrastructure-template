@@ -1,0 +1,3 @@
+AWS_SM_SECRET_ID='${aws_sm_secret_id}'
+AWS_REGION='${aws_region}'
+AWS_ROLE_ARN='${aws_role_arn}'

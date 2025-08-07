@@ -10,7 +10,7 @@ module "storage" {
     {
       org  = var.repo_org
       repo = var.repo_name
-      env  = "default"
+      env  = var.luther_env
     }
   ]
 
@@ -76,4 +76,14 @@ output "eks_worker_role_arn" {
 
 output "eks_worker_count" {
   value = var.eks_worker_count
+}
+
+resource "local_file" "vault_ref" {
+  content = templatefile("vault-ref.template", {
+    aws_sm_secret_id = module.storage.vault_password_secret_arn
+    aws_region       = var.aws_region
+    aws_role_arn     = module.storage.env_admin_role_arn
+  })
+
+  filename = "${path.module}/../ansible/vars/${var.luther_env}/vault-ref"
 }
