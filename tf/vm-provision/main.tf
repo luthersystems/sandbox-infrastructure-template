@@ -4,8 +4,9 @@ module "storage" {
   luther_project = var.short_project_id
   luther_env     = var.luther_env
 
-  has_github = true
-  has_vault  = true
+  has_github    = true
+  has_vault     = true
+  has_env_admin = true
 
   ci_github_repos = [
     {
