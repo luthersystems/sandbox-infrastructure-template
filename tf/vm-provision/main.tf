@@ -87,5 +87,5 @@ resource "local_file" "vault_ref" {
     aws_role_arn     = module.storage.env_admin_role_arn
   })
 
-  filename = "${path.module}/../ansible/vars/${var.luther_env}/vault-ref"
+  filename = "${path.module}/../../ansible/vars/${var.luther_env}/vault-ref"
 }
