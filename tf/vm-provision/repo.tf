@@ -1,5 +1,5 @@
 locals {
-  ci_role_arn = module.storage.kms_key_main_arn
+  ci_role_arn = module.storage.ci_role_arn
 }
 
 output "ci_role_arn" {
