@@ -29,7 +29,10 @@ tfBootstrap() {
 }
 
 tfSetup() {
-  cp -rf auto-vars/* "${workspace}/"
+  mkdir -p "${workspace}"
+  if [ -d "auto-vars" ]; then
+    cp -rf auto-vars/* "${workspace}/" 2>/dev/null || true
+  fi
 }
 
 tfSetup

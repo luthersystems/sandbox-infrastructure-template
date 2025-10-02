@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Where to copy customer TF into:
-TARGET_DIR="tf/custom-stack"
+TARGET_DIR="tf/custom-stack-provision"
 
 # Inputs (override via env in the workflow step)
 CUSTOM_REPO_URL="${CUSTOM_REPO_URL:-https://github.com/luthersystems/reliable-custom-tf-test}"

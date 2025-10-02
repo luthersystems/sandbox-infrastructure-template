@@ -54,5 +54,5 @@ resource "local_file" "k8s_backend_template" {
 
 resource "local_file" "custom_backend_template" {
   content  = templatefile("backend.tf.tftpl", local.state_backend_custom)
-  filename = "${path.module}/../custom-stack/backend.tf"
+  filename = "${path.module}/../custom-stack-provision/backend.tf"
 }
