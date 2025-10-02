@@ -5,7 +5,7 @@ set -euo pipefail
 TARGET_DIR="tf/custom-stack"
 
 # Inputs (override via env in the workflow step)
-CUSTOM_REPO_URL="${CUSTOM_REPO_URL:-https://github.com/luthersystems/reliable-custom-tf-tes}"
+CUSTOM_REPO_URL="${CUSTOM_REPO_URL:-https://github.com/luthersystems/reliable-custom-tf-test}"
 CUSTOM_REF="${CUSTOM_REF:-main}"
 CUSTOM_PATH="${CUSTOM_PATH:-}"               # optional subdir inside repo
 CUSTOM_TFVARS_JSON="${CUSTOM_TFVARS_JSON:-}" # optional raw JSON for auto-vars
