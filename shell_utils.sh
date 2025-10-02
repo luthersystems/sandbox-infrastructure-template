@@ -184,3 +184,33 @@ gitPushInfra() {
   fi
   popd >/dev/null
 }
+
+gitMergeInfraMain() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+
+  if ! configure_git; then
+    echo "⚠️  configure_git failed, skipping git merge."
+    popd >/dev/null
+    return 0
+  fi
+
+  if ! git remote get-url infra >/dev/null 2>&1; then
+    echo "Skipping gitMergeInfraMain: no infra remote configured"
+    popd >/dev/null
+    return 0
+  fi
+
+  echo "🔄 Fetching infra/main…"
+  git fetch infra main
+
+  echo "🔀 Merging (no-ff, auto-edit) infra/main…"
+  if git merge infra/main --no-ff --no-edit; then
+    echo "✅ Merge commit created."
+  else
+    echo_error "⚠️  Merge failed or conflicts detected."
+    popd >/dev/null
+    return 1
+  fi
+
+  popd >/dev/null
+}

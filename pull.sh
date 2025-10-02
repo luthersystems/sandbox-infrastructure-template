@@ -8,3 +8,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # delegate any args through to gitCommit (e.g. custom message)
 gitMergeOriginMain "$@"
+gitMergeInfraMain "$@"
