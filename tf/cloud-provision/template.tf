@@ -23,6 +23,15 @@ locals {
     kms_key_id           = local.state_kms_key_id,
     role_arn             = local.state_role_arn,
   })
+
+  state_workspace_custom = "custom"
+
+  state_backend_custom = merge(local.state, {
+    workspace_key_prefix = local.state_workspace_custom
+    key                  = format("terraform_%s.tfstate", local.state_workspace_custom)
+    kms_key_id           = local.state_kms_key_id,
+    role_arn             = local.state_role_arn,
+  })
 }
 
 output "state_workspace_vm" {
@@ -41,4 +50,9 @@ resource "local_file" "vm_backend_template" {
 resource "local_file" "k8s_backend_template" {
   content  = templatefile("backend.tf.tftpl", local.state_backend_k8s)
   filename = "${path.module}/../k8s-provision/backend.tf"
+}
+
+resource "local_file" "custom_backend_template" {
+  content  = templatefile("backend.tf.tftpl", local.state_backend_custom)
+  filename = "${path.module}/../custom-stack/backend.tf"
 }
