@@ -15,10 +15,9 @@ TARGET_DIR="tf/custom-stack-provision"
 
 # --- Inputs --------------------------------------------------------------------------------------
 # Prefer explicit env vars; otherwise look up from Terraform auto-vars (tf/auto-vars/*.json).
-# Defaults:
-#   - CUSTOM_REF: "main" (if still empty)
-#   - CUSTOM_AUTH: "token" (if still empty)
-#   - CUSTOM_REPO_URL: REQUIRED (error if empty after env+auto-vars)
+# Defaults (when repo path is used):
+#   - CUSTOM_REF: "main"
+#   - CUSTOM_AUTH: "token"
 env_or_tf() {
   local v="${!1:-}"
   [[ -n "$v" ]] && {
@@ -28,23 +27,20 @@ env_or_tf() {
   getTfVar "$2"
 }
 
+# Repo-mode inputs (fallback)
 CUSTOM_REPO_URL="$(env_or_tf CUSTOM_REPO_URL custom_repo_url)"
 CUSTOM_REF="$(env_or_tf CUSTOM_REF custom_ref)"
-CUSTOM_PATH="$(env_or_tf CUSTOM_PATH custom_path)"
-CUSTOM_TFVARS_JSON="$(env_or_tf CUSTOM_TFVARS_JSON custom_tfvars_json)"
 CUSTOM_AUTH="$(env_or_tf CUSTOM_AUTH custom_auth)"
 
-# sane fallbacks
+# Archive-mode input (preferred if present)
+CUSTOM_ARCHIVE_TGZ="$(env_or_tf CUSTOM_ARCHIVE_TGZ custom_archive_tgz)"
+
+# sane fallbacks for repo mode
 CUSTOM_REF="${CUSTOM_REF:-main}"
 CUSTOM_AUTH="${CUSTOM_AUTH:-token}"
 
-if [[ -z "$CUSTOM_REPO_URL" || "$CUSTOM_REPO_URL" == "null" ]]; then
-  log "ERROR: missing CUSTOM_REPO_URL. Set env CUSTOM_REPO_URL or provide 'custom_repo_url' in tf/auto-vars/*.json"
-  exit 2
-fi
-
 # --- Preserve key files in TARGET_DIR ------------------------------------------------------------
-# These files are produced locally and must not be overwritten by the customer repo.
+# These files are produced locally and must not be overwritten by the customer content.
 PRESERVE_PATTERNS=(
   "backend.tf"
   "providers.tf"
@@ -62,16 +58,67 @@ for pat in "${PRESERVE_PATTERNS[@]}"; do
   done
 done
 
-# Clean but leave dir
-rm -rf "${TARGET_DIR:?}/"* || true
-mkdir -p "${TARGET_DIR}"
-
-# restore preserved
-for f in "${tmp_preserve}"/*; do
-  [[ -e "$f" ]] && mv -f "$f" "${TARGET_DIR}/"
+# ensure rsync excludes include preserved files and TF internals
+RSYNC_EXCLUDES=()
+for pat in "${PRESERVE_PATTERNS[@]}"; do
+  RSYNC_EXCLUDES+=(--exclude "$pat")
 done
+RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.lock.hcl')
 
-# --- Git helpers ---------------------------------------------------------------------------------
+# --- Archive-mode (preferred) --------------------------------------------------------------------
+if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
+  log "Inline archive provided; extracting into ${TARGET_DIR}"
+
+  tmp_ar="$(mktemp -d)"
+  ar_file="${tmp_ar}/payload.tgz"
+  # base64 decode archive
+  printf '%s' "$CUSTOM_ARCHIVE_TGZ" | base64 -d >"$ar_file"
+
+  # Safety: reject absolute paths or parent escapes ("tartbomb" protection)
+  while IFS= read -r entry; do
+    case "$entry" in
+    /*)
+      log "ERROR: archive contains absolute path: $entry"
+      exit 2
+      ;;
+    *"../"*)
+      log "ERROR: archive contains parent path escape: $entry"
+      exit 2
+      ;;
+    "../"*)
+      log "ERROR: archive contains parent path escape: $entry"
+      exit 2
+      ;;
+    "") ;;
+    *) ;;
+    esac
+  done < <(tar -tzf "$ar_file")
+
+  # Clean target and restore preserved files after extraction
+  rm -rf "${TARGET_DIR:?}/"* || true
+  mkdir -p "${TARGET_DIR}"
+
+  mkdir -p "$tmp_ar/extract"
+  tar -xzf "$ar_file" -C "$tmp_ar/extract"
+
+  src_path="$tmp_ar/extract" # ALWAYS use archive root
+
+  # restore preserved + rsync
+  for f in "${tmp_preserve}"/*; do
+    [[ -e "$f" ]] && mv -f "$f" "${TARGET_DIR}/"
+  done
+  rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
+
+  log "Prepared ${TARGET_DIR} from inline archive (tar.gz)"
+  exit 0
+fi
+
+# --- Repo-mode (fallback) ------------------------------------------------------------------------
+if [[ -z "$CUSTOM_REPO_URL" || "$CUSTOM_REPO_URL" == "null" ]]; then
+  log "ERROR: missing CUSTOM_REPO_URL. Provide inline archive or set 'custom_repo_url'."
+  exit 2
+fi
+
 git config --global advice.detachedHead false || true
 
 git_clone_with_token() {
@@ -94,7 +141,6 @@ git_clone_with_ssh() {
   GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no' git clone --depth 1 --no-tags --branch "$ref" "$url" "$dest"
 }
 
-# --- Clone the customer repo ---------------------------------------------------------------------
 tmp_dir="$(mktemp -d)"
 case "$CUSTOM_AUTH" in
 token) git_clone_with_token "$CUSTOM_REPO_URL" "$CUSTOM_REF" "$tmp_dir" ;;
@@ -105,31 +151,14 @@ ssh) git_clone_with_ssh "$CUSTOM_REPO_URL" "$CUSTOM_REF" "$tmp_dir" ;;
   ;;
 esac
 
-# Optional subdir inside the repo
-src_path="$tmp_dir"
-if [[ -n "$CUSTOM_PATH" && "$CUSTOM_PATH" != "null" ]]; then
-  src_path="$tmp_dir/$CUSTOM_PATH"
-  [[ -d "$src_path" ]] || {
-    log "ERROR: CUSTOM_PATH '$CUSTOM_PATH' not found in repo"
-    exit 2
-  }
-fi
-
-# --- Copy into TARGET_DIR, respecting preserved files --------------------------------------------
-# Build rsync excludes from PRESERVE_PATTERNS and repo internals
-RSYNC_EXCLUDES=()
-for pat in "${PRESERVE_PATTERNS[@]}"; do
-  RSYNC_EXCLUDES+=(--exclude "$pat")
+# Clean target and restore preserved files, then rsync repo root
+rm -rf "${TARGET_DIR:?}/"* || true
+mkdir -p "${TARGET_DIR}"
+for f in "${tmp_preserve}"/*; do
+  [[ -e "$f" ]] && mv -f "$f" "${TARGET_DIR}/"
 done
-RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.lock.hcl')
 
+src_path="$tmp_dir" # repo root only
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
 
-# --- Optional: write additional auto-vars for this step ------------------------------------------
-if [[ -n "$CUSTOM_TFVARS_JSON" && "$CUSTOM_TFVARS_JSON" != "null" ]]; then
-  mkdir -p tf/auto-vars
-  echo "$CUSTOM_TFVARS_JSON" >tf/auto-vars/custom-stack.auto.tfvars.json
-  log "Wrote tf/auto-vars/custom-stack.auto.tfvars.json"
-fi
-
-log "Prepared ${TARGET_DIR} from ${CUSTOM_REPO_URL}@${CUSTOM_REF}${CUSTOM_PATH:+ path=$CUSTOM_PATH}"
+log "Prepared ${TARGET_DIR} from ${CUSTOM_REPO_URL}@${CUSTOM_REF}"
