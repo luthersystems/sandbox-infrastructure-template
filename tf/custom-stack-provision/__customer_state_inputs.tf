@@ -73,3 +73,41 @@ variable "custom_auth" {
   type        = string
   default     = "token"
 }
+
+variable "custom_archive_tgz" {
+  description = "Base64-encoded custom stack archive (alternative to git clone)"
+  type        = string
+  default     = ""
+}
+
+# ============================================================================
+# Service Account Roles (used by Argo workflows)
+# ============================================================================
+
+variable "terraform_sa_role" {
+  description = "IAM role ARN for Terraform service account"
+  type        = string
+  default     = ""
+}
+
+variable "ansible_sa_role" {
+  description = "IAM role ARN for Ansible service account"
+  type        = string
+  default     = ""
+}
+
+# ============================================================================
+# Additional AWS Variables
+# ============================================================================
+
+variable "create_dns" {
+  description = "Whether to create DNS records (AWS only)"
+  type        = bool
+  default     = false
+}
+
+variable "bootstrap_role" {
+  description = "AWS IAM role ARN for bootstrapping (AWS only)"
+  type        = string
+  default     = ""
+}
