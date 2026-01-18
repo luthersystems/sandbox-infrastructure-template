@@ -1,4 +1,4 @@
-# InsideOut Inspector Role
+# InsideOut Inspector Role (AWS only)
 #
 # This role allows the InsideOut service to inspect deployed AWS resources
 # with read-only access. It trusts the Terraform service account role,
@@ -9,6 +9,8 @@ locals {
 }
 
 data "aws_iam_policy_document" "inspector_assume" {
+  count = local.is_aws ? 1 : 0
+
   statement {
     sid    = "AllowTerraformSAAssume"
     effect = "Allow"
@@ -23,9 +25,11 @@ data "aws_iam_policy_document" "inspector_assume" {
 }
 
 resource "aws_iam_role" "insideout_inspector" {
+  count = local.is_aws ? 1 : 0
+
   name                 = local.inspector_role_name
   description          = "Read-only role for InsideOut infrastructure inspection"
-  assume_role_policy   = data.aws_iam_policy_document.inspector_assume.json
+  assume_role_policy   = data.aws_iam_policy_document.inspector_assume[0].json
   max_session_duration = 3600 # 1 hour
 
   tags = {
@@ -36,18 +40,20 @@ resource "aws_iam_role" "insideout_inspector" {
 }
 
 resource "aws_iam_role_policy_attachment" "inspector_readonly" {
-  role       = aws_iam_role.insideout_inspector.name
+  count = local.is_aws ? 1 : 0
+
+  role       = aws_iam_role.insideout_inspector[0].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
 output "inspector_role_arn" {
-  description = "ARN of the InsideOut inspector role"
-  value       = aws_iam_role.insideout_inspector.arn
+  description = "ARN of the InsideOut inspector role (AWS only)"
+  value       = local.is_aws ? aws_iam_role.insideout_inspector[0].arn : ""
 }
 
 output "inspector_role_name" {
-  description = "Name of the InsideOut inspector role"
-  value       = aws_iam_role.insideout_inspector.name
+  description = "Name of the InsideOut inspector role (AWS only)"
+  value       = local.is_aws ? aws_iam_role.insideout_inspector[0].name : ""
 }
 
 
