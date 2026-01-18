@@ -111,3 +111,69 @@ variable "bootstrap_role" {
   type        = string
   default     = ""
 }
+
+# ============================================================================
+# EKS Variables (AWS defaults, passed but may not be used)
+# ============================================================================
+
+variable "eks_version" {
+  description = "EKS Kubernetes version"
+  type        = string
+  default     = "1.32"
+}
+
+variable "eks_worker_instance_type" {
+  description = "EKS worker node instance type"
+  type        = string
+  default     = "t4g.large"
+}
+
+variable "eks_worker_spot_price" {
+  description = "EKS worker spot price"
+  type        = string
+  default     = "0.07"
+}
+
+variable "eks_worker_count" {
+  description = "EKS worker node count"
+  type        = string
+  default     = "1"
+}
+
+# ============================================================================
+# Organization Variables
+# ============================================================================
+
+variable "luther_env" {
+  description = "Luther environment name"
+  type        = string
+  default     = "default"
+}
+
+variable "org_name" {
+  description = "Organization name"
+  type        = string
+  default     = "luther"
+}
+
+# ============================================================================
+# Git Repository Variables (from cloud-provision output)
+# ============================================================================
+
+variable "repo_clone_ssh_url" {
+  description = "SSH clone URL for the infra repository"
+  type        = string
+  default     = ""
+}
+
+variable "repo_name" {
+  description = "Name of the infra repository"
+  type        = string
+  default     = ""
+}
+
+variable "repo_org" {
+  description = "GitHub organization for the infra repository"
+  type        = string
+  default     = "luthersystems"
+}
