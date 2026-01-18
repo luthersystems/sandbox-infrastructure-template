@@ -51,3 +51,25 @@ variable "gcp_credentials_b64" {
   default     = ""
   sensitive   = true
 }
+
+# ============================================================================
+# Custom Stack Variables (passed by workflow, used by prepare-custom-stack)
+# ============================================================================
+
+variable "custom_repo_url" {
+  description = "Git repository URL for custom stack terraform"
+  type        = string
+  default     = ""
+}
+
+variable "custom_ref" {
+  description = "Git ref (branch/tag) for custom stack terraform"
+  type        = string
+  default     = "main"
+}
+
+variable "custom_auth" {
+  description = "Auth method for git clone (token or ssh)"
+  type        = string
+  default     = "token"
+}
