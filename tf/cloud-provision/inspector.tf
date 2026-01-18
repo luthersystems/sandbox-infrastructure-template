@@ -50,3 +50,4 @@ output "inspector_role_name" {
   value       = aws_iam_role.insideout_inspector.name
 }
 
+
