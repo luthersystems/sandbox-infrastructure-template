@@ -201,6 +201,13 @@ gitMergeInfraMain() {
   fi
 
   echo "🔄 Fetching infra/main…"
+  # Check if main branch exists on remote before fetching
+  if ! git ls-remote --heads infra main | grep -q main; then
+    echo "ℹ️  infra/main does not exist yet (new repo) - skipping merge"
+    popd >/dev/null
+    return 0
+  fi
+
   git fetch infra main
 
   echo "🔀 Merging (no-ff, auto-edit) infra/main…"
