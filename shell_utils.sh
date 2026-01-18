@@ -214,3 +214,158 @@ gitMergeInfraMain() {
 
   popd >/dev/null
 }
+
+# ============================================================================
+# Cloud Provider Detection
+# ============================================================================
+
+# getCloudProvider returns the cloud provider from tfvars
+# Returns: "aws" or "gcp" (defaults to "aws" for backward compatibility)
+getCloudProvider() {
+  local cloud
+  cloud=$(getTfVar "cloud_provider")
+
+  if [[ -z "$cloud" || "$cloud" == "null" ]]; then
+    echo "aws"
+  else
+    echo "$cloud"
+  fi
+}
+
+# isGCP returns true if deploying to GCP
+isGCP() {
+  [[ "$(getCloudProvider)" == "gcp" ]]
+}
+
+# isAWS returns true if deploying to AWS
+isAWS() {
+  [[ "$(getCloudProvider)" == "aws" ]]
+}
+
+# ============================================================================
+# GCP Credential Management
+# ============================================================================
+
+# GCP credential file path (set by setupGCPCredentials)
+_GCP_CREDENTIALS_FILE=""
+
+# setupGCPCredentials decodes the base64-encoded service account key
+# and writes it to a temporary file with secure permissions.
+# Sets GOOGLE_APPLICATION_CREDENTIALS environment variable.
+# Returns: 0 on success, 1 on failure
+setupGCPCredentials() {
+  local creds_b64
+  creds_b64=$(getTfVar "gcp_credentials_b64")
+
+  if [[ -z "$creds_b64" || "$creds_b64" == "null" ]]; then
+    echo_error "ERROR: gcp_credentials_b64 not found in tfvars"
+    return 1
+  fi
+
+  # Create unique temporary file with secure permissions
+  _GCP_CREDENTIALS_FILE=$(mktemp /tmp/gcp-sa-XXXXXX.json)
+  chmod 600 "$_GCP_CREDENTIALS_FILE"
+
+  # Decode and write (avoid logging the content)
+  if ! echo "$creds_b64" | base64 -d > "$_GCP_CREDENTIALS_FILE" 2>/dev/null; then
+    echo_error "ERROR: Failed to decode gcp_credentials_b64"
+    rm -f "$_GCP_CREDENTIALS_FILE"
+    return 1
+  fi
+
+  # Validate it's valid JSON with required fields
+  if ! jq -e '.type == "service_account"' "$_GCP_CREDENTIALS_FILE" >/dev/null 2>&1; then
+    echo_error "ERROR: Invalid service account key format"
+    rm -f "$_GCP_CREDENTIALS_FILE"
+    return 1
+  fi
+
+  export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_CREDENTIALS_FILE"
+  echo "GCP credentials configured: $GOOGLE_APPLICATION_CREDENTIALS"
+  return 0
+}
+
+# cleanupGCPCredentials removes the temporary credential file
+cleanupGCPCredentials() {
+  if [[ -n "$_GCP_CREDENTIALS_FILE" ]] && [[ -f "$_GCP_CREDENTIALS_FILE" ]]; then
+    rm -f "$_GCP_CREDENTIALS_FILE"
+    echo "Cleaned up GCP credentials file"
+  fi
+  _GCP_CREDENTIALS_FILE=""
+  unset GOOGLE_APPLICATION_CREDENTIALS 2>/dev/null || true
+}
+
+# ============================================================================
+# Cloud Environment Setup
+# ============================================================================
+
+# setupCloudEnv configures the environment for the target cloud provider.
+# Call this before running terraform commands.
+# Returns: 0 on success, 1 on failure
+setupCloudEnv() {
+  local cloud
+  cloud=$(getCloudProvider)
+
+  echo "Setting up environment for cloud provider: $cloud"
+
+  case "$cloud" in
+    gcp)
+      # Setup GCP credentials
+      if ! setupGCPCredentials; then
+        return 1
+      fi
+
+      # Export GCP project and region
+      local gcp_project gcp_region
+      gcp_project=$(getTfVar "gcp_project_id")
+      gcp_region=$(getTfVar "gcp_region")
+
+      if [[ -z "$gcp_project" || "$gcp_project" == "null" ]]; then
+        echo_error "ERROR: gcp_project_id not found in tfvars"
+        return 1
+      fi
+
+      if [[ -z "$gcp_region" || "$gcp_region" == "null" ]]; then
+        echo_error "ERROR: gcp_region not found in tfvars"
+        return 1
+      fi
+
+      export GOOGLE_PROJECT="$gcp_project"
+      export GOOGLE_REGION="$gcp_region"
+
+      echo "GCP environment configured:"
+      echo "  GOOGLE_PROJECT=$GOOGLE_PROJECT"
+      echo "  GOOGLE_REGION=$GOOGLE_REGION"
+      echo "  GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+      ;;
+
+    aws)
+      # AWS uses IRSA (IAM Roles for Service Accounts) - no additional setup needed
+      # The pod's service account already has the required IAM role attached
+      echo "AWS environment: using IRSA (no additional setup required)"
+      ;;
+
+    *)
+      echo_error "ERROR: Unknown cloud provider: $cloud"
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+# cleanupCloudEnv cleans up any cloud-specific resources (credential files, etc.)
+# Call this on script exit (typically via trap)
+cleanupCloudEnv() {
+  local cloud
+  cloud=$(getCloudProvider)
+
+  case "$cloud" in
+    gcp)
+      cleanupGCPCredentials
+      ;;
+    aws)
+      # No cleanup needed for AWS
+      ;;
+  esac
+}
