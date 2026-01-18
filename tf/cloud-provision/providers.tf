@@ -1,15 +1,34 @@
+# ============================================================================
+# AWS Providers (used when cloud_provider = aws)
+# ============================================================================
+
 provider "aws" {
-  region = var.aws_region
+  region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
 
   assume_role {
-    role_arn = var.bootstrap_role
+    role_arn = var.cloud_provider == "aws" ? var.bootstrap_role : null
   }
 }
 
 provider "aws" {
   alias  = "platform-account"
-  region = var.aws_region
+  region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
 }
+
+# ============================================================================
+# GCP Provider (used when cloud_provider = gcp)
+# ============================================================================
+
+provider "google" {
+  project = var.cloud_provider == "gcp" ? var.gcp_project_id : null
+  region  = var.cloud_provider == "gcp" ? var.gcp_region : null
+  # Credentials are provided via GOOGLE_APPLICATION_CREDENTIALS env var
+  # set by shell_utils.sh / run-with-creds.sh
+}
+
+# ============================================================================
+# GitHub Provider (used for both clouds)
+# ============================================================================
 
 provider "github" {
   owner = var.repo_org
