@@ -2,6 +2,7 @@ locals {
   repo_name = "${var.short_project_id}-infra"
 }
 
+# GitHub repo is created for both AWS and GCP
 resource "github_repository" "infra" {
   name        = local.repo_name
   description = "Infrastructure repo for ${var.short_project_id}"
@@ -48,8 +49,28 @@ resource "local_file" "git_repo_tfvars" {
   })
 }
 
+# AWS-specific: Set AWS_REGION variable in GitHub Actions
 resource "github_actions_variable" "aws_region" {
+  count = local.is_aws ? 1 : 0
+
   repository    = github_repository.infra.name
   variable_name = "AWS_REGION"
   value         = var.aws_region != "" ? var.aws_region : "us-west-2"
+}
+
+# GCP-specific: Set GCP variables in GitHub Actions
+resource "github_actions_variable" "gcp_project" {
+  count = local.is_gcp ? 1 : 0
+
+  repository    = github_repository.infra.name
+  variable_name = "GCP_PROJECT"
+  value         = var.gcp_project_id
+}
+
+resource "github_actions_variable" "gcp_region" {
+  count = local.is_gcp ? 1 : 0
+
+  repository    = github_repository.infra.name
+  variable_name = "GCP_REGION"
+  value         = var.gcp_region
 }
