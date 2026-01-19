@@ -90,3 +90,24 @@ variable "repo_name" {
   type    = string
   default = ""
 }
+
+# Variables passed for prepare-custom-stack.sh but not used by cloud-provision TF
+variable "custom_repo_url" {
+  type    = string
+  default = ""
+}
+
+variable "custom_ref" {
+  type    = string
+  default = "main"
+}
+
+variable "custom_auth" {
+  type    = string
+  default = "token"
+}
+
+variable "custom_archive_tgz" {
+  type    = string
+  default = ""
+}
