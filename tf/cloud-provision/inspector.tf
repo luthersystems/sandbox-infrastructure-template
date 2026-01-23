@@ -94,6 +94,15 @@ resource "google_project_iam_member" "inspector_secretmanager_viewer" {
   member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
 }
 
+# Grant Cloud Run Viewer for inspecting Cloud Run services
+resource "google_project_iam_member" "inspector_run_viewer" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/run.viewer"
+  member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
+}
+
 # Allow the deployment SA to generate tokens for the inspector SA
 # This enables Oracle to impersonate the inspector SA for read-only access
 resource "google_service_account_iam_member" "inspector_token_creator" {
