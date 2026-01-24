@@ -49,9 +49,20 @@ resource "local_file" "git_repo_tfvars" {
   })
 }
 
+# Wait for repository to be fully ready before creating Actions variables
+# This prevents race conditions where the GitHub API hasn't propagated
+# the repository yet, causing "inconsistent result" errors.
+resource "time_sleep" "wait_for_repo_ready" {
+  depends_on = [github_repository.infra]
+
+  create_duration = "10s"
+}
+
 # AWS-specific: Set AWS_REGION variable in GitHub Actions
 resource "github_actions_variable" "aws_region" {
   count = local.is_aws ? 1 : 0
+
+  depends_on = [time_sleep.wait_for_repo_ready]
 
   repository    = github_repository.infra.name
   variable_name = "AWS_REGION"
@@ -62,6 +73,8 @@ resource "github_actions_variable" "aws_region" {
 resource "github_actions_variable" "gcp_project" {
   count = local.is_gcp ? 1 : 0
 
+  depends_on = [time_sleep.wait_for_repo_ready]
+
   repository    = github_repository.infra.name
   variable_name = "GCP_PROJECT"
   value         = var.gcp_project_id
@@ -69,6 +82,8 @@ resource "github_actions_variable" "gcp_project" {
 
 resource "github_actions_variable" "gcp_region" {
   count = local.is_gcp ? 1 : 0
+
+  depends_on = [time_sleep.wait_for_repo_ready]
 
   repository    = github_repository.infra.name
   variable_name = "GCP_REGION"
