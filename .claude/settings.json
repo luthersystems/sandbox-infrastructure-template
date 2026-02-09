@@ -14,6 +14,8 @@
       "Bash(gh pr checks:*)",
       "Bash(gh issue view:*)",
       "Bash(gh run list:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh api:*)",
       "Bash(bash:*)",
       "Bash(mkdir:*)",
       "Bash(which:*)"
