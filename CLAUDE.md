@@ -111,3 +111,33 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 - Git identity: `Luther DevBot <devbot@luthersystems.com>` for automated commits
 - `secrets/` directory is gitignored; deploy keys go in `secrets/infra_deploy_key.pem`
 - Two git remotes: `origin` (template repo) and `infra` (customer infrastructure repo, configured via `repo_clone_ssh_url` tfvar)
+
+## Skills
+
+Claude Code skills are prescriptive SOPs in `.claude/skills/<name>/SKILL.md`. Invoke with `/<name>`.
+
+| Skill | Purpose |
+|-------|---------|
+| `/implement` | Foundation skill for any code change (TF, scripts, Ansible, docs) |
+| `/verify` | CI gate: bash -n, shellcheck, terraform validate, JSON/YAML validation |
+| `/pr` | Ship workflow: verify, push, create PR with summary and test plan |
+| `/pickup-issue` | Full lifecycle: read issue, implement, verify, PR |
+| `/add-terraform-resource` | Add a TF resource to the correct stage |
+| `/add-cloud-resource` | Add dual-cloud resource pair (AWS + GCP) following inspector.tf pattern |
+| `/terraform-plan` | Run `cd tf/<stage> && bash ../plan.sh` |
+| `/terraform-apply` | Run `cd tf/<stage> && bash ../apply.sh` (plan + apply + commit + push) |
+| `/run-ansible` | Execute a playbook locally or via CI dispatch |
+| `/add-test` | Add integration test following tests/test-prepare-custom-stack.sh pattern |
+| `/release` | Bump version.yaml to trigger CI deploy, monitor deployment |
+
+### Skill Composition
+
+Skills chain together for complex workflows:
+
+```
+/pickup-issue -> /implement -> /verify -> /pr
+/implement -> /add-terraform-resource or /add-cloud-resource (for TF changes)
+/add-cloud-resource extends /add-terraform-resource with dual-cloud pattern
+/release -> /pr -> /verify (then monitors CI)
+/terraform-plan, /terraform-apply, /run-ansible are standalone operations
+```
