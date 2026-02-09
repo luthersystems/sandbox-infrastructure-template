@@ -46,7 +46,6 @@ PRESERVE_PATTERNS=(
   "backend.tf"
   "providers.tf"
   "__customer_*.tf"
-  ".terraform-version"
 )
 
 tmp_preserve="$(mktemp -d)"
@@ -108,11 +107,11 @@ if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
   src_path="$tmp_ar/extract" # ALWAYS use archive root
 
   # restore preserved + rsync
-  shopt -s nullglob
+  shopt -s dotglob nullglob
   for f in "${tmp_preserve}"/*; do
     [[ -e "$f" ]] && mv -f "$f" "${TARGET_DIR}/"
   done
-  shopt -u nullglob
+  shopt -u dotglob nullglob
 
   rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
 
@@ -159,11 +158,11 @@ esac
 # Clean target and restore preserved files, then rsync repo root
 rm -rf "${TARGET_DIR:?}/"* "${TARGET_DIR:?}"/.[!.]* || true
 mkdir -p "${TARGET_DIR}"
-shopt -s nullglob
+shopt -s dotglob nullglob
 for f in "${tmp_preserve}"/*; do
   [[ -e "$f" ]] && mv -f "$f" "${TARGET_DIR}/"
 done
-shopt -u nullglob
+shopt -u dotglob nullglob
 
 src_path="$tmp_dir" # repo root only
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
