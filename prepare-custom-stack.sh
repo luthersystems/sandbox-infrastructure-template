@@ -98,7 +98,7 @@ if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
   done < <(tar -tzf "$ar_file" --warning=no-unknown-keyword)
 
   # Clean target and restore preserved files after extraction
-  rm -rf "${TARGET_DIR:?}/"* || true
+  rm -rf "${TARGET_DIR:?}/"* "${TARGET_DIR:?}"/.[!.]* || true
   mkdir -p "${TARGET_DIR}"
 
   mkdir -p "$tmp_ar/extract"
@@ -157,7 +157,7 @@ ssh) git_clone_with_ssh "$CUSTOM_REPO_URL" "$CUSTOM_REF" "$tmp_dir" ;;
 esac
 
 # Clean target and restore preserved files, then rsync repo root
-rm -rf "${TARGET_DIR:?}/"* || true
+rm -rf "${TARGET_DIR:?}/"* "${TARGET_DIR:?}"/.[!.]* || true
 mkdir -p "${TARGET_DIR}"
 shopt -s nullglob
 for f in "${tmp_preserve}"/*; do
