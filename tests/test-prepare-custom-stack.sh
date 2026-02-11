@@ -3,10 +3,14 @@ set -euo pipefail
 
 # Integration tests for prepare-custom-stack.sh (archive mode + repo mode).
 # Tests:
-#   1. .terraform-version from source archive is copied to target (not excluded)
-#   2. Preserved files (backend.tf, __customer_foo.tf) survive rsync
-#   3. dotglob: dotfile preserve patterns (if any) are restored correctly
-#   4. repo mode: .terraform-version from cloned repo root is copied to target
+#   1. Archive: .terraform-version from source archive is copied to target
+#   2. Archive: preserved files (backend.tf, providers.tf, __customer_*.tf) survive rsync
+#   3. Archive: non-preserved files replaced from archive
+#   4. Repo: .terraform-version from cloned repo root is copied to target
+#   5. Repo: preserved files survive rsync
+#   6. Repo: non-preserved files replaced from repo, stale files removed
+#   7. Repo: error when both archive and repo URL are empty
+#   8. Dotglob: dotfile preserve patterns restored correctly
 
 PASS=0
 FAIL=0
@@ -58,6 +62,7 @@ cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$PROJECT/prepare-custom-stack.sh"
 # --- Pre-populate target with files that should be preserved ---
 TARGET="$PROJECT/tf/custom-stack-provision"
 echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
 echo "existing-customer" > "$TARGET/__customer_foo.tf"
 echo "old-version" > "$TARGET/.terraform-version"
 echo "should-be-replaced" > "$TARGET/main.tf"
@@ -110,6 +115,12 @@ else
   fail "backend.tf not preserved (missing or content changed)"
 fi
 
+if [[ -f "$TARGET/providers.tf" ]] && [[ "$(cat "$TARGET/providers.tf")" == "existing-providers" ]]; then
+  pass "providers.tf preserved"
+else
+  fail "providers.tf not preserved (missing or content changed)"
+fi
+
 if [[ -f "$TARGET/__customer_foo.tf" ]] && [[ "$(cat "$TARGET/__customer_foo.tf")" == "existing-customer" ]]; then
   pass "__customer_foo.tf preserved"
 else
@@ -148,33 +159,33 @@ echo "1.9.0" > "$REPO_SRC/.terraform-version"
 )
 git clone -q --bare "$REPO_SRC" "$REPO_BARE"
 
-# Reset the project target directory for repo-mode run
-rm -rf "$TARGET"/*
+# Reset the project target directory cleanly for repo-mode run
+rm -rf "$TARGET"
 mkdir -p "$TARGET"
 echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
 echo "existing-customer" > "$TARGET/__customer_foo.tf"
 echo "old-version" > "$TARGET/.terraform-version"
 echo "should-be-replaced" > "$TARGET/main.tf"
+echo "stale-content" > "$TARGET/stale-leftover.tf"
 
 echo "Running prepare-custom-stack.sh (repo mode)..."
 (
   cd "$PROJECT"
   export MARS_PROJECT_ROOT="$PROJECT"
   export CUSTOM_ARCHIVE_TGZ=""
-  export CUSTOM_REPO_URL="$REPO_BARE"
-  export CUSTOM_REF="main"
-  export CUSTOM_AUTH="ssh"
-  # Override GIT_SSH_COMMAND to avoid SSH host key issues with local paths
-  export GIT_SSH_COMMAND="echo"
-  # Use file:// protocol so git clone works without SSH
+  # Use file:// protocol with token auth so git clone works locally
   export CUSTOM_REPO_URL="file://$REPO_BARE"
+  export CUSTOM_REF="main"
+  export CUSTOM_AUTH="token"
+  export GITHUB_TOKEN="unused-local-clone"
   bash prepare-custom-stack.sh
 ) 2>&1 | sed 's/^/  | /'
 
 echo ""
 echo "Repo-mode results:"
 
-# 5. .terraform-version should come from the repo (value "1.9.0")
+# 4. .terraform-version should come from the repo (value "1.9.0")
 if [[ -f "$TARGET/.terraform-version" ]]; then
   tv="$(cat "$TARGET/.terraform-version")"
   if [[ "$tv" == "1.9.0" ]]; then
@@ -186,11 +197,17 @@ else
   fail "repo mode: .terraform-version missing from target"
 fi
 
-# 6. Preserved files should still exist with original content
+# 5. Preserved files should still exist with original content
 if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existing-backend" ]]; then
   pass "repo mode: backend.tf preserved"
 else
   fail "repo mode: backend.tf not preserved (missing or content changed)"
+fi
+
+if [[ -f "$TARGET/providers.tf" ]] && [[ "$(cat "$TARGET/providers.tf")" == "existing-providers" ]]; then
+  pass "repo mode: providers.tf preserved"
+else
+  fail "repo mode: providers.tf not preserved (missing or content changed)"
 fi
 
 if [[ -f "$TARGET/__customer_foo.tf" ]] && [[ "$(cat "$TARGET/__customer_foo.tf")" == "existing-customer" ]]; then
@@ -199,14 +216,47 @@ else
   fail "repo mode: __customer_foo.tf not preserved (missing or content changed)"
 fi
 
-# 7. Non-preserved files should come from the repo
+# 6. Non-preserved files should come from the repo; stale files should be removed
 if [[ -f "$TARGET/main.tf" ]] && [[ "$(cat "$TARGET/main.tf")" == "repo-main" ]]; then
   pass "repo mode: main.tf replaced from repo"
 else
   fail "repo mode: main.tf not replaced from repo"
 fi
 
-# 4. Dotglob test: create a scenario with a dotfile in preserve dir
+if [[ -f "$TARGET/variables.tf" ]] && [[ "$(cat "$TARGET/variables.tf")" == "repo-vars" ]]; then
+  pass "repo mode: variables.tf copied from repo"
+else
+  fail "repo mode: variables.tf not copied from repo"
+fi
+
+if [[ ! -f "$TARGET/stale-leftover.tf" ]]; then
+  pass "repo mode: stale file removed by rsync --delete"
+else
+  fail "repo mode: stale file NOT removed (rsync --delete may be broken)"
+fi
+
+# --- Error-path test: missing both archive and repo URL ---
+echo ""
+echo "Error-path test:"
+if err_output="$(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ=""
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh 2>&1
+)"; then
+  fail "expected exit code != 0 when both archive and repo URL are empty"
+else
+  if echo "$err_output" | grep -q "missing CUSTOM_REPO_URL"; then
+    pass "error path: clear error message when both inputs are empty"
+  else
+    fail "error path: unexpected error output: $err_output"
+  fi
+fi
+
+# 8. Dotglob test: create a scenario with a dotfile in preserve dir
 #    We test this by manually simulating what the restore loop does
 echo ""
 echo "Dotglob unit test:"
