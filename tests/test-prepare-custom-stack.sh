@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Quick integration test for prepare-custom-stack.sh (archive mode).
+# Integration tests for prepare-custom-stack.sh (archive mode + repo mode).
 # Tests:
 #   1. .terraform-version from source archive is copied to target (not excluded)
 #   2. Preserved files (backend.tf, __customer_foo.tf) survive rsync
 #   3. dotglob: dotfile preserve patterns (if any) are restored correctly
+#   4. repo mode: .terraform-version from cloned repo root is copied to target
 
 PASS=0
 FAIL=0
@@ -126,6 +127,83 @@ if [[ -f "$TARGET/variables.tf" ]] && [[ "$(cat "$TARGET/variables.tf")" == "new
   pass "variables.tf copied from archive"
 else
   fail "variables.tf not copied from archive"
+fi
+
+# --- Repo-mode test ---
+echo ""
+echo "Setting up repo-mode test..."
+
+# Build a local bare git repo to act as the "custom repo"
+REPO_SRC="$WORKDIR/repo-src"
+REPO_BARE="$WORKDIR/repo-bare.git"
+mkdir -p "$REPO_SRC"
+echo "repo-main" > "$REPO_SRC/main.tf"
+echo "repo-vars" > "$REPO_SRC/variables.tf"
+echo "1.9.0" > "$REPO_SRC/.terraform-version"
+(
+  cd "$REPO_SRC"
+  git init -q
+  git add -A
+  git commit -q -m "init"
+)
+git clone -q --bare "$REPO_SRC" "$REPO_BARE"
+
+# Reset the project target directory for repo-mode run
+rm -rf "$TARGET"/*
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-customer" > "$TARGET/__customer_foo.tf"
+echo "old-version" > "$TARGET/.terraform-version"
+echo "should-be-replaced" > "$TARGET/main.tf"
+
+echo "Running prepare-custom-stack.sh (repo mode)..."
+(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ=""
+  export CUSTOM_REPO_URL="$REPO_BARE"
+  export CUSTOM_REF="main"
+  export CUSTOM_AUTH="ssh"
+  # Override GIT_SSH_COMMAND to avoid SSH host key issues with local paths
+  export GIT_SSH_COMMAND="echo"
+  # Use file:// protocol so git clone works without SSH
+  export CUSTOM_REPO_URL="file://$REPO_BARE"
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+echo ""
+echo "Repo-mode results:"
+
+# 5. .terraform-version should come from the repo (value "1.9.0")
+if [[ -f "$TARGET/.terraform-version" ]]; then
+  tv="$(cat "$TARGET/.terraform-version")"
+  if [[ "$tv" == "1.9.0" ]]; then
+    pass "repo mode: .terraform-version copied from repo (got '1.9.0')"
+  else
+    fail "repo mode: .terraform-version has wrong content: '$tv' (expected '1.9.0')"
+  fi
+else
+  fail "repo mode: .terraform-version missing from target"
+fi
+
+# 6. Preserved files should still exist with original content
+if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existing-backend" ]]; then
+  pass "repo mode: backend.tf preserved"
+else
+  fail "repo mode: backend.tf not preserved (missing or content changed)"
+fi
+
+if [[ -f "$TARGET/__customer_foo.tf" ]] && [[ "$(cat "$TARGET/__customer_foo.tf")" == "existing-customer" ]]; then
+  pass "repo mode: __customer_foo.tf preserved"
+else
+  fail "repo mode: __customer_foo.tf not preserved (missing or content changed)"
+fi
+
+# 7. Non-preserved files should come from the repo
+if [[ -f "$TARGET/main.tf" ]] && [[ "$(cat "$TARGET/main.tf")" == "repo-main" ]]; then
+  pass "repo mode: main.tf replaced from repo"
+else
+  fail "repo mode: main.tf not replaced from repo"
 fi
 
 # 4. Dotglob test: create a scenario with a dotfile in preserve dir
