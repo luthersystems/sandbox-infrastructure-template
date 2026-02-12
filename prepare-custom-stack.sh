@@ -37,47 +37,9 @@ CUSTOM_AUTH="$(env_or_tf CUSTOM_AUTH custom_auth)"
 # Archive-mode input (preferred if present)
 CUSTOM_ARCHIVE_TGZ="$(env_or_tf CUSTOM_ARCHIVE_TGZ custom_archive_tgz)"
 
-# GitHub username for collaborator invite (optional)
-GITHUB_USERNAME="$(env_or_tf GITHUB_USERNAME github_username)"
-
 # sane fallbacks for repo mode
 CUSTOM_REF="${CUSTOM_REF:-main}"
 CUSTOM_AUTH="${CUSTOM_AUTH:-token}"
-
-# --- Invite collaborator (best-effort) -----------------------------------------------------------
-invite_collaborator() {
-  if [[ -z "${GITHUB_USERNAME:-}" || "${GITHUB_USERNAME}" == "null" ]]; then
-    return 0
-  fi
-
-  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    log "WARN: GITHUB_TOKEN not set; skipping collaborator invite for ${GITHUB_USERNAME}"
-    return 0
-  fi
-
-  local repo_org repo_name
-  repo_org="$(getTfVar repo_org)"
-  repo_name="$(getTfVar repo_name)"
-
-  if [[ -z "${repo_org:-}" || "${repo_org}" == "null" || -z "${repo_name:-}" || "${repo_name}" == "null" ]]; then
-    log "WARN: repo_org/repo_name not available; skipping collaborator invite"
-    return 0
-  fi
-
-  log "Inviting ${GITHUB_USERNAME} as collaborator on ${repo_org}/${repo_name}..."
-  local http_code
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' \
-    -X PUT \
-    -H "Authorization: token ${GITHUB_TOKEN}" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/${repo_org}/${repo_name}/collaborators/${GITHUB_USERNAME}")" || true
-
-  case "${http_code}" in
-    201) log "Collaborator invite sent to ${GITHUB_USERNAME}" ;;
-    204) log "${GITHUB_USERNAME} is already a collaborator" ;;
-    *)   log "WARN: collaborator invite returned HTTP ${http_code} (non-fatal)" ;;
-  esac
-}
 
 # --- Preserve key files in TARGET_DIR ------------------------------------------------------------
 PRESERVE_PATTERNS=(
@@ -154,7 +116,6 @@ if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
   rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
 
   log "Prepared ${TARGET_DIR} from inline archive (tar.gz)"
-  invite_collaborator
   exit 0
 fi
 
@@ -207,4 +168,3 @@ src_path="$tmp_dir" # repo root only
 rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$src_path"/ "$TARGET_DIR"/
 
 log "Prepared ${TARGET_DIR} from ${CUSTOM_REPO_URL}@${CUSTOM_REF}"
-invite_collaborator
