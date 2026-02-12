@@ -111,3 +111,8 @@ variable "custom_archive_tgz" {
   type    = string
   default = ""
 }
+
+variable "github_username" {
+  type    = string
+  default = ""
+}

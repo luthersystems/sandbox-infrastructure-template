@@ -80,6 +80,12 @@ variable "custom_archive_tgz" {
   default     = ""
 }
 
+variable "github_username" {
+  description = "GitHub username to invite as collaborator on the infra repo"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # Service Account Roles (used by Argo workflows)
 # ============================================================================

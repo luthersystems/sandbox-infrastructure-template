@@ -284,6 +284,103 @@ fi
 
 rm -rf "$dottest_dir" "$restore_dir"
 
+# --- Collaborator invite tests -------------------------------------------------------------------
+echo ""
+echo "Collaborator invite tests:"
+
+# 9. Invite skipped when GITHUB_USERNAME is empty (archive mode succeeds without error)
+rm -rf "$TARGET"
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
+echo "existing-customer" > "$TARGET/__customer_foo.tf"
+
+invite_output="$(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$ARCHIVE_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  export GITHUB_USERNAME=""
+  bash prepare-custom-stack.sh 2>&1
+)"
+if [[ $? -eq 0 ]] && ! echo "$invite_output" | grep -qi "inviting.*collaborator"; then
+  pass "collaborator invite skipped when GITHUB_USERNAME is empty"
+else
+  fail "collaborator invite should be skipped when GITHUB_USERNAME is empty"
+fi
+
+# 10. Invite attempted when GITHUB_USERNAME is set (curl stub records call)
+CURL_STUB_DIR="$WORKDIR/curl-stub"
+CURL_LOG="$WORKDIR/curl-stub-log"
+mkdir -p "$CURL_STUB_DIR"
+cat > "$CURL_STUB_DIR/curl" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "${CURL_LOG}"
+# Simulate 201 Created
+echo "201"
+STUB
+chmod +x "$CURL_STUB_DIR/curl"
+
+rm -rf "$TARGET"
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
+echo "existing-customer" > "$TARGET/__customer_foo.tf"
+
+# Write repo_org and repo_name into auto-vars so getTfVar can find them
+cat > "$PROJECT/tf/auto-vars/git_repo.auto.tfvars.json" <<'EOF'
+{"repo_org": "testorg", "repo_name": "testrepo"}
+EOF
+
+rm -f "$CURL_LOG"
+invite_output="$(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$ARCHIVE_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  export GITHUB_USERNAME="testuser"
+  export GITHUB_TOKEN="fake-token-123"
+  export CURL_LOG="$CURL_LOG"
+  export PATH="$CURL_STUB_DIR:$PATH"
+  bash prepare-custom-stack.sh 2>&1
+)"
+if [[ -f "$CURL_LOG" ]] && grep -q "repos/testorg/testrepo/collaborators/testuser" "$CURL_LOG"; then
+  pass "collaborator invite API called with correct URL"
+else
+  fail "collaborator invite API not called correctly (log: $(cat "$CURL_LOG" 2>/dev/null || echo 'missing'))"
+fi
+
+# Clean up auto-vars for next tests
+rm -f "$PROJECT/tf/auto-vars/git_repo.auto.tfvars.json"
+
+# 11. Invite skipped gracefully when GITHUB_TOKEN is missing
+rm -rf "$TARGET"
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
+echo "existing-customer" > "$TARGET/__customer_foo.tf"
+
+invite_output="$(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$ARCHIVE_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  export GITHUB_USERNAME="testuser"
+  unset GITHUB_TOKEN
+  bash prepare-custom-stack.sh 2>&1
+)"
+if [[ $? -eq 0 ]] && echo "$invite_output" | grep -q "GITHUB_TOKEN not set"; then
+  pass "collaborator invite skipped with warning when GITHUB_TOKEN missing"
+else
+  fail "collaborator invite should warn and skip when GITHUB_TOKEN is missing (output: $invite_output)"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
