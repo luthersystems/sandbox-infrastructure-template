@@ -89,3 +89,14 @@ resource "github_actions_variable" "gcp_region" {
   variable_name = "GCP_REGION"
   value         = var.gcp_region
 }
+
+# Invite the deploying user as a collaborator on the new repo
+resource "github_repository_collaborator" "user" {
+  count = var.github_username != "" ? 1 : 0
+
+  depends_on = [time_sleep.wait_for_repo_ready]
+
+  repository = github_repository.infra.name
+  username   = var.github_username
+  permission = "push"
+}

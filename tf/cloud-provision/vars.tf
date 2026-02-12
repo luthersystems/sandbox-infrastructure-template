@@ -54,6 +54,12 @@ variable "repo_org" {
   default = "luthersystems"
 }
 
+variable "github_username" {
+  description = "GitHub username to invite as collaborator on the infra repo"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # AWS Variables (required when cloud_provider = aws)
 # ============================================================================

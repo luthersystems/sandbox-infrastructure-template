@@ -11,6 +11,8 @@ set -euo pipefail
 #   6. Repo: non-preserved files replaced from repo, stale files removed
 #   7. Repo: error when both archive and repo URL are empty
 #   8. Dotglob: dotfile preserve patterns restored correctly
+# Note: Collaborator invites are now handled declaratively via Terraform
+# (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
 PASS=0
 FAIL=0
