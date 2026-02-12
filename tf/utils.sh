@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # figure out where this script lives
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

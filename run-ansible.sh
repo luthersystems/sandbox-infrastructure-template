@@ -30,6 +30,7 @@ fi
 
 cd ansible
 
+# shellcheck source=/dev/null
 source "vars/${ENV}/vault-ref"
 
 bash ../mars "$ENV" ansible-playbook \
