@@ -91,5 +91,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@luthersystems.com"
+          git config --global user.name "CI"
+
       - name: Run tests
         run: bash tests/test-prepare-custom-stack.sh
