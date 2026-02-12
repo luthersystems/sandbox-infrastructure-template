@@ -1,0 +1,100 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  terraform-validate:
+    name: "terraform validate (${{ matrix.dir }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - account-provision
+          - account-setup
+          - cloud-provision
+          - vm-provision
+          - k8s-provision
+          - custom-stack-provision
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Init
+        run: terraform init -backend=false -input=false
+        working-directory: tf/${{ matrix.dir }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: tf/${{ matrix.dir }}
+
+  terraform-fmt:
+    name: terraform fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: tf
+
+  shell-lint:
+    name: shell lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: |
+          shopt -s globstar
+          status=0
+          for f in **/*.sh; do
+            [[ "$f" == .terraform/* || "$f" == .tmp/* ]] && continue
+            if ! bash -n "$f"; then
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: ShellCheck
+        run: |
+          shopt -s globstar
+          files=()
+          for f in **/*.sh; do
+            [[ "$f" == .terraform/* || "$f" == .tmp/* ]] && continue
+            files+=("$f")
+          done
+          shellcheck -x -S warning "${files[@]}"
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@luthersystems.com"
+          git config --global user.name "CI"
+
+      - name: Run tests
+        run: bash tests/test-prepare-custom-stack.sh

@@ -155,7 +155,7 @@ echo "repo-vars" > "$REPO_SRC/variables.tf"
 echo "1.9.0" > "$REPO_SRC/.terraform-version"
 (
   cd "$REPO_SRC"
-  git init -q
+  git init -q -b main
   git add -A
   git commit -q -m "init"
 )

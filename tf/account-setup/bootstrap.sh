@@ -10,4 +10,5 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Source shared terraform helpers
 source "${SCRIPT_DIR}/../../shell_utils.sh"
 
-export JUMP_ROLE_ARN="$(mustGetTfVar "org_creator_role_arn")"
+JUMP_ROLE_ARN="$(mustGetTfVar "org_creator_role_arn")"
+export JUMP_ROLE_ARN

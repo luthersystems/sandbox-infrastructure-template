@@ -87,10 +87,6 @@ if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
       log "ERROR: archive contains parent path escape: $entry"
       exit 2
       ;;
-    "../"*)
-      log "ERROR: archive contains parent path escape: $entry"
-      exit 2
-      ;;
     "") ;;
     *) ;;
     esac

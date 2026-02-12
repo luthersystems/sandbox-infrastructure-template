@@ -15,7 +15,7 @@ data "terraform_remote_state" "cloud_provision" {
 locals {
   # AWS: Get role ARN from remote state
   terraform_role_arn = var.cloud_provider == "aws" ? data.terraform_remote_state.cloud_provision[0].outputs.terraform_role : ""
-  
+
   # Domain is available in both clouds (passed via tfvars)
   domain = var.cloud_provider == "aws" ? data.terraform_remote_state.cloud_provision[0].outputs.domain : var.domain
 }
