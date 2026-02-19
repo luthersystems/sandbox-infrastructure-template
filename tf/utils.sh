@@ -53,5 +53,6 @@ tfApply() {
 }
 
 tfDestroy() {
+  tfInit
   $MARS ${tf_workspace} destroy --approve
 }
