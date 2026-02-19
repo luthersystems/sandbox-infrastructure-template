@@ -97,4 +97,6 @@ jobs:
           git config --global user.name "CI"
 
       - name: Run tests
-        run: bash tests/test-prepare-custom-stack.sh
+        run: |
+          bash tests/test-prepare-custom-stack.sh
+          bash tests/test-tf-destroy-init.sh
