@@ -35,3 +35,9 @@ variable "additional_terraform_sa_roles" {
   type        = list(string)
   default     = []
 }
+
+variable "aws_external_id" {
+  description = "ExternalId for confused-deputy protection when assuming cross-account roles"
+  type        = string
+  default     = ""
+}

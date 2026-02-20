@@ -6,7 +6,8 @@ provider "aws" {
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
 
   assume_role {
-    role_arn = var.cloud_provider == "aws" ? var.bootstrap_role : null
+    role_arn    = var.cloud_provider == "aws" ? var.bootstrap_role : null
+    external_id = var.cloud_provider == "aws" ? var.aws_external_id : null
   }
 }
 

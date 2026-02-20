@@ -2,7 +2,8 @@ provider "aws" {
   region = var.aws_region
 
   assume_role {
-    role_arn = local.terraform_role_arn
+    role_arn    = local.terraform_role_arn
+    external_id = var.aws_external_id != "" ? var.aws_external_id : null
   }
 }
 

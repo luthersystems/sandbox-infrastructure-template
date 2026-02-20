@@ -45,3 +45,9 @@ variable "org_creator_role_arn" {
   description = "ARN of the org-creator role (in root account) to assume when creating new AWS accounts"
   type        = string
 }
+
+variable "aws_external_id" {
+  description = "ExternalId for confused-deputy protection when assuming cross-account roles"
+  type        = string
+  default     = ""
+}

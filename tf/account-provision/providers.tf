@@ -11,5 +11,6 @@ provider "aws" {
   assume_role {
     role_arn     = var.org_creator_role_arn
     session_name = "terraform-org-creator"
+    external_id  = var.aws_external_id != "" ? var.aws_external_id : null
   }
 }
