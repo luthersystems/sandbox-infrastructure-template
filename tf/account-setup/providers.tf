@@ -4,5 +4,6 @@ provider "aws" {
   assume_role {
     role_arn     = "arn:aws:iam::${var.account_id}:role/${var.account_bootstrap_role_name}"
     session_name = "terraform-account-setup"
+    external_id  = var.aws_external_id != "" ? var.aws_external_id : null
   }
 }

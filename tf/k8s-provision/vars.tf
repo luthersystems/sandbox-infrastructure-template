@@ -44,3 +44,9 @@ variable "luther_project_name" {
   type    = string
   default = "app"
 }
+
+variable "aws_external_id" {
+  description = "ExternalId for confused-deputy protection when assuming cross-account roles"
+  type        = string
+  default     = ""
+}

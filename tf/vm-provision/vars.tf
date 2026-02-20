@@ -58,3 +58,9 @@ variable "repo_name" {
 variable "repo_org" {
   type = string
 }
+
+variable "aws_external_id" {
+  description = "ExternalId for confused-deputy protection when assuming cross-account roles"
+  type        = string
+  default     = ""
+}

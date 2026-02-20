@@ -76,6 +76,12 @@ variable "bootstrap_role" {
   default     = ""
 }
 
+variable "aws_external_id" {
+  description = "ExternalId for confused-deputy protection when assuming cross-account roles"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # GCP Variables (required when cloud_provider = gcp)
 # ============================================================================

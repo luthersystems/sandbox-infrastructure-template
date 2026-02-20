@@ -19,7 +19,8 @@ terraform {
 provider "aws" {
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
   assume_role {
-    role_arn = var.cloud_provider == "aws" ? local.terraform_role_arn : null
+    role_arn    = var.cloud_provider == "aws" ? local.terraform_role_arn : null
+    external_id = var.cloud_provider == "aws" ? var.aws_external_id : null
   }
 }
 
@@ -28,7 +29,8 @@ provider "aws" {
   alias  = "us_east_1"
   region = "us-east-1"
   assume_role {
-    role_arn = var.cloud_provider == "aws" ? local.terraform_role_arn : null
+    role_arn    = var.cloud_provider == "aws" ? local.terraform_role_arn : null
+    external_id = var.cloud_provider == "aws" ? var.aws_external_id : null
   }
 }
 
