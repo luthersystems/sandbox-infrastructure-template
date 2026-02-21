@@ -7,7 +7,7 @@ provider "aws" {
 
   assume_role {
     role_arn    = var.cloud_provider == "aws" ? var.bootstrap_role : null
-    external_id = var.cloud_provider == "aws" ? var.aws_external_id : null
+    external_id = var.cloud_provider == "aws" && var.aws_external_id != "" ? var.aws_external_id : null
   }
 }
 
