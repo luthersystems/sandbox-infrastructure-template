@@ -21,7 +21,6 @@ jobs:
           - cloud-provision
           - vm-provision
           - k8s-provision
-          - custom-stack-provision
     steps:
       - name: Checkout
         uses: actions/checkout@v4
