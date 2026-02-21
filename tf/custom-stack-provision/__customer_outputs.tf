@@ -34,7 +34,7 @@ output "private_ip" {
 
 output "ec2_connect_url" {
   description = "EC2 Instance Connect URL for browser-based SSH (empty when module is disabled)"
-  value       = try("https://${var.aws_region}.console.aws.amazon.com/ec2-instance-connect/ssh?region=${var.aws_region}&connType=standard&instanceId=${module.aws_ec2[0].instance_id}&osUser=ubuntu&sshPort=22&addressFamily=ipv4", "")
+  value       = try(module.aws_ec2[0].ec2_instance_connect_url, "")
 }
 
 # ============================================================================
