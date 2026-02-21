@@ -36,26 +36,3 @@ output "ec2_connect_url" {
   description = "EC2 Instance Connect URL for browser-based SSH (empty when module is disabled)"
   value       = try(module.aws_ec2[0].ec2_instance_connect_url, "")
 }
-
-# ============================================================================
-# RDS
-# ============================================================================
-
-output "db_address" {
-  description = "RDS database endpoint address (empty when module is disabled)"
-  value       = try(module.aws_rds[0].db_address, "")
-}
-
-output "db_port" {
-  description = "RDS database port (empty when module is disabled)"
-  value       = try(module.aws_rds[0].db_port, "")
-}
-
-# ============================================================================
-# Secrets Manager
-# ============================================================================
-
-output "secret_arns" {
-  description = "List of Secrets Manager secret ARNs (empty when module is disabled)"
-  value       = try(module.secretsmanager[0].secret_arns, [])
-}
