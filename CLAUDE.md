@@ -115,6 +115,7 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 - Git identity: `Luther DevBot <devbot@luthersystems.com>` for automated commits
 - `secrets/` directory is gitignored; deploy keys go in `secrets/infra_deploy_key.pem`
 - Two git remotes: `origin` (template repo) and `infra` (customer infrastructure repo, configured via `repo_clone_ssh_url` tfvar)
+- **Bash `SCRIPT_DIR`**: Always use `${BASH_SOURCE[0]}` (not `$0`) when computing `SCRIPT_DIR`. Scripts like `bootstrap.sh` are sourced (`. bootstrap.sh`) by `utils.sh`, so `$0` resolves to the *caller* and clobbers the parent's `SCRIPT_DIR`. Correct pattern: `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"`
 
 ## Skills
 
