@@ -31,6 +31,9 @@ export MARS_PROJECT_ROOT
 set -- "$lifecycle"
 . "$SCRIPT_DIR/utils.sh"
 
+setupCloudEnv
+trap 'cleanupCloudEnv' EXIT
+
 # Run terraform init and refresh-only plan
 terraform init -input=false
 terraform plan -refresh-only -out=refresh.tfplan -input=false

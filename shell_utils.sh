@@ -303,6 +303,65 @@ cleanupGCPCredentials() {
 }
 
 # ============================================================================
+# Dummy GCP Credentials (for non-GCP environments)
+# ============================================================================
+
+# Temporary file path for dummy GCP credentials
+_GCP_DUMMY_CREDENTIALS_FILE=""
+
+# _setupDummyGCPCredentials creates a minimal service account JSON so the
+# Google Terraform provider doesn't fail looking for Application Default
+# Credentials.  Only needed when cloud_provider != gcp.
+_setupDummyGCPCredentials() {
+  _GCP_DUMMY_CREDENTIALS_FILE=$(mktemp /tmp/gcp-dummy-XXXXXX.json)
+  chmod 600 "$_GCP_DUMMY_CREDENTIALS_FILE"
+
+  local dummy_key
+  dummy_key=$(head -c 256 /dev/urandom 2>/dev/null | base64 | tr -d '\n' || echo "dW51c2VkCg==")
+
+  cat > "$_GCP_DUMMY_CREDENTIALS_FILE" <<EOFCREDS
+{"type":"service_account","project_id":"unused","private_key_id":"unused","private_key":"-----BEGIN PRIVATE KEY-----\n${dummy_key}\n-----END PRIVATE KEY-----\n","client_email":"unused@unused.iam.gserviceaccount.com","client_id":"0","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}
+EOFCREDS
+
+  export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_DUMMY_CREDENTIALS_FILE"
+  echo "Dummy GCP credentials configured: $GOOGLE_APPLICATION_CREDENTIALS"
+}
+
+# _cleanupDummyGCPCredentials removes the temporary dummy credential file
+_cleanupDummyGCPCredentials() {
+  if [[ -n "$_GCP_DUMMY_CREDENTIALS_FILE" ]] && [[ -f "$_GCP_DUMMY_CREDENTIALS_FILE" ]]; then
+    rm -f "$_GCP_DUMMY_CREDENTIALS_FILE"
+    echo "Cleaned up dummy GCP credentials file"
+  fi
+  _GCP_DUMMY_CREDENTIALS_FILE=""
+}
+
+# ============================================================================
+# AWS Jump Role
+# ============================================================================
+
+# assumeJumpRole assumes the role specified by JUMP_ROLE_ARN (if set).
+# Exports temporary AWS credentials for the assumed role.
+assumeJumpRole() {
+  if [[ -z "${JUMP_ROLE_ARN:-}" ]]; then
+    return 0
+  fi
+
+  echo "Assuming jump role: $JUMP_ROLE_ARN"
+  local creds_json
+  creds_json=$(aws sts assume-role \
+    --role-arn "$JUMP_ROLE_ARN" \
+    --role-session-name "mars-jump-session" \
+    --output json)
+
+  AWS_ACCESS_KEY_ID=$(echo "$creds_json" | jq -r .Credentials.AccessKeyId)
+  AWS_SECRET_ACCESS_KEY=$(echo "$creds_json" | jq -r .Credentials.SecretAccessKey)
+  AWS_SESSION_TOKEN=$(echo "$creds_json" | jq -r .Credentials.SessionToken)
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  echo "Now running under assumed jump role credentials"
+}
+
+# ============================================================================
 # Cloud Environment Setup
 # ============================================================================
 
@@ -347,9 +406,11 @@ setupCloudEnv() {
       ;;
 
     aws)
-      # AWS uses IRSA (IAM Roles for Service Accounts) - no additional setup needed
-      # The pod's service account already has the required IAM role attached
-      echo "AWS environment: using IRSA (no additional setup required)"
+      # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
+      # Create dummy GCP credentials so the Google provider doesn't fail
+      # looking for Application Default Credentials.
+      echo "AWS environment: using IRSA"
+      _setupDummyGCPCredentials
       ;;
 
     *)
@@ -357,6 +418,9 @@ setupCloudEnv() {
       return 1
       ;;
   esac
+
+  # Handle AWS jump role assumption (applies to all providers)
+  assumeJumpRole
 
   return 0
 }
@@ -372,7 +436,7 @@ cleanupCloudEnv() {
       cleanupGCPCredentials
       ;;
     aws)
-      # No cleanup needed for AWS
+      _cleanupDummyGCPCredentials
       ;;
   esac
 }

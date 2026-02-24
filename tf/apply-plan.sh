@@ -58,6 +58,9 @@ export MARS_PROJECT_ROOT
 set -- "$lifecycle"
 . "$SCRIPT_DIR/utils.sh"
 
+setupCloudEnv
+trap 'cleanupCloudEnv' EXIT
+
 plan_file="${plan_id}.tfplan"
 
 if [[ ! -f "$plan_file" ]]; then

@@ -57,6 +57,9 @@ if [[ "$check_drift" == "true" ]]; then
   set -- "$lifecycle"
   . "$SCRIPT_DIR/utils.sh"
 
+  setupCloudEnv
+  trap 'cleanupCloudEnv' EXIT
+
   terraform init -input=false
   terraform plan -out=apply.tfplan -input=false
 
@@ -78,6 +81,9 @@ else
   . "$MARS_PROJECT_ROOT/shell_utils.sh"
   set -- "$lifecycle"
   . "$SCRIPT_DIR/utils.sh"
+
+  setupCloudEnv
+  trap 'cleanupCloudEnv' EXIT
 
   captureOutputs
 fi

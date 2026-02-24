@@ -32,7 +32,7 @@ cat > "$PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
 environment: test
 EOF
 
-echo '{}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+echo '{"cloud_provider": "aws"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 
 # Copy real scripts
 cp "$REPO_ROOT/shell_utils.sh" "$PROJECT/shell_utils.sh"
