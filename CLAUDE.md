@@ -98,6 +98,10 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `shell_utils.sh` | Cloud detection, credential management, git helpers |
 | `tf/utils.sh` | Terraform wrapper functions (init/plan/apply/destroy) |
 | `tf/run-with-creds.sh` | Mars CLI credential injection wrapper |
+| `tf/drift-check.sh` | Check plan file for resource drift, write drift.json |
+| `tf/drift-refresh.sh` | Refresh-only plan + drift check (standalone) |
+| `tf/apply-with-outputs.sh` | Apply + capture terraform outputs (simple or drift-checked) |
+| `tf/apply-plan.sh` | Apply saved .tfplan file + capture outputs |
 | `tf/auto-vars/common.auto.tfvars.json` | Shared Terraform variables across stages |
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
