@@ -56,6 +56,7 @@ if [[ "$drift_count" -eq 0 ]]; then
 fi
 
 echo "Drift detected: $drift_count resource(s) have drifted."
+echo "$drift" | jq -r '.[].address'
 
 # Write drift report
 mkdir -p "$OUTPUTS_DIR"
