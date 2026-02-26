@@ -60,6 +60,18 @@ variable "github_username" {
   default     = ""
 }
 
+variable "vulnerability_alerts" {
+  description = "Enable vulnerability alerts on the infrastructure repository"
+  type        = bool
+  default     = true
+}
+
+variable "collaborator_permission" {
+  description = "Permission level for the GitHub collaborator (pull, triage, push, maintain, admin)"
+  type        = string
+  default     = "admin"
+}
+
 # ============================================================================
 # AWS Variables (required when cloud_provider = aws)
 # ============================================================================
