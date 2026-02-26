@@ -56,6 +56,28 @@ if [[ "$drift_count" -eq 0 ]]; then
 fi
 
 echo "Drift detected: $drift_count resource(s) have drifted."
+echo ""
+
+# Print human-readable drift summary showing changed attributes per resource.
+# The jq filter uses single quotes intentionally — jq handles \() interpolation.
+# shellcheck disable=SC2016
+_drift_filter='
+  .[] |
+  "  \(.address)",
+  (
+    (.change.before // {} | to_entries) as $before |
+    (.change.after // {} | to_entries) as $after |
+    [
+      $before[] |
+      . as $b |
+      ($after | map(select(.key == $b.key)) | .[0]) as $a |
+      select(($a.value == $b.value) | not) |
+      "    \(.key): \($b.value | tojson) -> \($a.value | tojson)"
+    ] | .[]
+  ),
+  ""
+'
+echo "$drift" | jq -r "$_drift_filter"
 
 # Write drift report
 mkdir -p "$OUTPUTS_DIR"

@@ -44,6 +44,12 @@ resource "aws_iam_role" "insideout_inspector" {
     ManagedBy = "terraform"
     Purpose   = "insideout-inspection"
   }
+
+  # managed_policy_arns is a read-only reflection of policies attached via
+  # aws_iam_role_policy_attachment — ignore it to prevent perpetual drift.
+  lifecycle {
+    ignore_changes = [managed_policy_arns]
+  }
 }
 
 resource "aws_iam_role_policy_attachment" "inspector_readonly" {
