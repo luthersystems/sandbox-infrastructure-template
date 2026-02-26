@@ -9,8 +9,9 @@ resource "github_repository" "infra" {
   visibility  = "private"
 
   // optional settings:
-  has_issues = true
-  has_wiki   = false
+  has_issues           = true
+  has_wiki             = false
+  vulnerability_alerts = var.vulnerability_alerts
 }
 
 # Generate an SSH keypair for deploy
@@ -98,5 +99,5 @@ resource "github_repository_collaborator" "user" {
 
   repository = github_repository.infra.name
   username   = var.github_username
-  permission = "push"
+  permission = var.collaborator_permission
 }
