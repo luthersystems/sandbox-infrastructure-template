@@ -11,6 +11,10 @@ set -euo pipefail
 #   6. Repo: non-preserved files replaced from repo, stale files removed
 #   7. Repo: error when both archive and repo URL are empty
 #   8. Dotglob: dotfile preserve patterns restored correctly
+#   9. Re-deploy: .git/ created from infra repo when repo_clone_ssh_url is set
+#  10. Re-deploy: gitCommit succeeds after ensure_git_from_infra runs
+#  11. Re-deploy: no-op when .git/ already exists
+#  12. Re-deploy: no-op when repo_clone_ssh_url is empty
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -285,6 +289,155 @@ else
 fi
 
 rm -rf "$dottest_dir" "$restore_dir"
+
+# --- Re-deploy git initialization tests ----------------------------------------------------------
+echo ""
+echo "Re-deploy git initialization tests..."
+
+# Build a bare git repo to act as the "infra repo"
+INFRA_SRC="$WORKDIR/infra-src"
+INFRA_BARE="$WORKDIR/infra-bare.git"
+mkdir -p "$INFRA_SRC"
+echo "infra-readme" > "$INFRA_SRC/README.md"
+(
+  cd "$INFRA_SRC"
+  git init -q -b main
+  git add -A
+  git commit -q -m "initial infra commit"
+)
+git clone -q --bare "$INFRA_SRC" "$INFRA_BARE"
+
+# 9. Re-deploy with archive: .git/ is created when repo_clone_ssh_url is set and no .git exists
+echo ""
+echo "Test 9: Re-deploy archive creates .git/ from infra repo..."
+
+# Set up a fresh project without .git
+REDEPLOY_PROJECT="$WORKDIR/redeploy-project"
+mkdir -p "$REDEPLOY_PROJECT/tf/auto-vars"
+mkdir -p "$REDEPLOY_PROJECT/tf/custom-stack-provision"
+mkdir -p "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+
+# Set repo_clone_ssh_url in auto-vars pointing to the bare repo
+jq -n --arg url "file://$INFRA_BARE" '{"repo_clone_ssh_url": $url}' \
+  > "$REDEPLOY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+
+cp "$SCRIPT_DIR/shell_utils.sh" "$REDEPLOY_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$REDEPLOY_PROJECT/prepare-custom-stack.sh"
+
+# Build a small archive for the custom stack
+REDEPLOY_ARCHIVE_DIR="$WORKDIR/redeploy-archive"
+mkdir -p "$REDEPLOY_ARCHIVE_DIR"
+echo "redeploy-main" > "$REDEPLOY_ARCHIVE_DIR/main.tf"
+REDEPLOY_TGZ="$WORKDIR/redeploy-payload.tgz"
+tar -czf "$REDEPLOY_TGZ" -C "$REDEPLOY_ARCHIVE_DIR" .
+REDEPLOY_B64="$(base64 < "$REDEPLOY_TGZ")"
+
+(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+if [[ -d "$REDEPLOY_PROJECT/.git" ]]; then
+  pass "re-deploy: .git/ created from infra repo"
+else
+  fail "re-deploy: .git/ not created (ensure_git_from_infra did not run)"
+fi
+
+# Verify infra remote is set correctly
+if (cd "$REDEPLOY_PROJECT" && git remote get-url infra >/dev/null 2>&1); then
+  pass "re-deploy: infra remote is configured"
+else
+  fail "re-deploy: infra remote not configured after ensure_git_from_infra"
+fi
+
+# 10. Re-deploy commit: gitCommit succeeds after ensure_git_from_infra runs
+echo ""
+echo "Test 10: Re-deploy gitCommit succeeds..."
+
+# Source shell_utils and run gitCommit in the re-deploy project
+(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  . "$REDEPLOY_PROJECT/shell_utils.sh"
+  gitCommit "test: re-deploy commit"
+) 2>&1 | sed 's/^/  | /'
+
+if (cd "$REDEPLOY_PROJECT" && git log --oneline -1 | grep -q "re-deploy commit"); then
+  pass "re-deploy: gitCommit created a commit with updated files"
+else
+  fail "re-deploy: gitCommit did not create expected commit"
+fi
+
+# 11. No-op when .git/ already exists
+echo ""
+echo "Test 11: No-op when .git/ already exists..."
+
+# Re-run prepare-custom-stack on the same project (which now has .git/)
+EXISTING_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+NEW_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+if [[ "$EXISTING_HEAD" == "$NEW_HEAD" ]]; then
+  pass "re-deploy: ensure_git_from_infra is no-op when .git/ exists"
+else
+  fail "re-deploy: HEAD changed unexpectedly (clone ran when .git/ existed)"
+fi
+
+# 12. No-op when repo_clone_ssh_url is empty
+echo ""
+echo "Test 12: No-op when repo_clone_ssh_url is empty..."
+
+NOREPO_PROJECT="$WORKDIR/norepo-project"
+mkdir -p "$NOREPO_PROJECT/tf/auto-vars"
+mkdir -p "$NOREPO_PROJECT/tf/custom-stack-provision"
+mkdir -p "$NOREPO_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$NOREPO_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+echo '{}' > "$NOREPO_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+
+cp "$SCRIPT_DIR/shell_utils.sh" "$NOREPO_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$NOREPO_PROJECT/prepare-custom-stack.sh"
+
+# Build archive
+NOREPO_ARCHIVE_DIR="$WORKDIR/norepo-archive"
+mkdir -p "$NOREPO_ARCHIVE_DIR"
+echo "norepo-main" > "$NOREPO_ARCHIVE_DIR/main.tf"
+NOREPO_TGZ="$WORKDIR/norepo-payload.tgz"
+tar -czf "$NOREPO_TGZ" -C "$NOREPO_ARCHIVE_DIR" .
+NOREPO_B64="$(base64 < "$NOREPO_TGZ")"
+
+(
+  cd "$NOREPO_PROJECT"
+  export MARS_PROJECT_ROOT="$NOREPO_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$NOREPO_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+if [[ ! -d "$NOREPO_PROJECT/.git" ]]; then
+  pass "re-deploy: no .git/ created when repo_clone_ssh_url is empty"
+else
+  fail "re-deploy: .git/ was created despite empty repo_clone_ssh_url"
+fi
 
 # --- Summary ---
 echo ""
