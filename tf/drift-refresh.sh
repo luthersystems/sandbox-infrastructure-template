@@ -38,5 +38,10 @@ trap 'cleanupCloudEnv' EXIT
 terraform init -input=false
 terraform plan -refresh-only -out=refresh.tfplan -input=false
 
+# Export JSON plan for structured analysis
+mkdir -p "$MARS_PROJECT_ROOT/outputs"
+terraform show -json refresh.tfplan > "$MARS_PROJECT_ROOT/outputs/tfplan.json"
+echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
+
 # Check for drift (always fails on drift — no --ignore-drift)
 bash "$SCRIPT_DIR/drift-check.sh" refresh.tfplan
