@@ -9,3 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 tfInit
 tfPlan
+
+# Export JSON plan for structured analysis (best-effort)
+planfile=$(find . -maxdepth 1 -name '*.tfplan' -print -quit 2>/dev/null)
+if [[ -n "$planfile" ]]; then
+  mkdir -p "$MARS_PROJECT_ROOT/outputs"
+  terraform show -json "$planfile" > "$MARS_PROJECT_ROOT/outputs/tfplan.json"
+  echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
+fi
