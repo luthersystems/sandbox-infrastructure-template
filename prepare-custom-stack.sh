@@ -67,6 +67,54 @@ for pat in "${PRESERVE_PATTERNS[@]}"; do
 done
 RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.lock.hcl')
 
+# --- Re-deploy: initialize git from infra repo if needed ----------------------------------------
+# On re-deploy the working directory is an extracted archive (no .git/).
+# Clone the infra repo so that apply.sh's gitCommit/gitPushInfra will work.
+ensure_git_from_infra() {
+  if [[ -e "$MARS_PROJECT_ROOT/.git" ]]; then
+    log "Git repo already exists; skipping infra clone"
+    return 0
+  fi
+
+  local infra_url
+  infra_url="$(getTfVar repo_clone_ssh_url)"
+  if [[ -z "$infra_url" || "$infra_url" == "null" ]]; then
+    log "No repo_clone_ssh_url set; skipping infra clone"
+    return 0
+  fi
+
+  local deploy_key="$MARS_PROJECT_ROOT/secrets/infra_deploy_key.pem"
+  local git_ssh_cmd="ssh -o StrictHostKeyChecking=no"
+  if [[ -f "$deploy_key" ]]; then
+    chmod 600 "$deploy_key"
+    git_ssh_cmd="ssh -i $deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+  fi
+
+  log "Cloning infra repo to initialize git state: $infra_url"
+  local tmp_clone
+  tmp_clone="$(mktemp -d)"
+  if ! GIT_SSH_COMMAND="$git_ssh_cmd" git clone "$infra_url" "$tmp_clone/repo"; then
+    log "WARNING: failed to clone infra repo; git commit/push will be skipped"
+    rm -rf "$tmp_clone"
+    return 0
+  fi
+
+  # Move .git into working directory so apply.sh's git helpers work
+  mv "$tmp_clone/repo/.git" "$MARS_PROJECT_ROOT/.git"
+  rm -rf "$tmp_clone"
+
+  # Rename origin → infra (ensure_infra_remote expects "infra" remote)
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  if git remote get-url origin >/dev/null 2>&1; then
+    git remote rename origin infra
+  fi
+  popd >/dev/null
+
+  log "Git state initialized from infra repo"
+}
+
+ensure_git_from_infra
+
 # --- Archive-mode (preferred) --------------------------------------------------------------------
 if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then
   log "Inline archive provided; extracting into ${TARGET_DIR}"
