@@ -256,29 +256,90 @@ else
   fail "changes: custom-stack-provision add should be 2"
 fi
 
-# ============================================================
-# Test 3: Per-stage tfplan files created
-# ============================================================
-echo ""
-echo "Test 3: Per-stage tfplan files..."
-
+# Also verify per-stage plan files from Test 2
 if [[ -f "$PROJECT/outputs/tfplan-cloud-provision.json" ]]; then
-  pass "per-stage: tfplan-cloud-provision.json exists"
+  pass "changes: tfplan-cloud-provision.json exists"
 else
-  fail "per-stage: tfplan-cloud-provision.json not created"
+  fail "changes: tfplan-cloud-provision.json not created"
 fi
 
 if [[ -f "$PROJECT/outputs/tfplan-custom-stack-provision.json" ]]; then
-  pass "per-stage: tfplan-custom-stack-provision.json exists"
+  pass "changes: tfplan-custom-stack-provision.json exists"
 else
-  fail "per-stage: tfplan-custom-stack-provision.json not created"
+  fail "changes: tfplan-custom-stack-provision.json not created"
 fi
 
-# Verify old filename is NOT created
 if [[ ! -f "$PROJECT/outputs/tfplan.json" ]]; then
-  pass "per-stage: tfplan.json NOT created (correct)"
+  pass "changes: tfplan.json NOT created (correct)"
 else
-  fail "per-stage: tfplan.json should not exist"
+  fail "changes: tfplan.json should not exist"
+fi
+
+# ============================================================
+# Test 3: Both stages with changes — verify aggregation sums correctly
+# ============================================================
+echo ""
+echo "Test 3: Both stages with changes (aggregation)..."
+
+cat > "$STAGE_PLANS_DIR/cloud-provision.json" <<'EOF'
+{
+  "resource_changes": [
+    {"address": "aws_route53_zone.main", "change": {"actions": ["create"]}},
+    {"address": "aws_s3_bucket.state", "change": {"actions": ["update"]}}
+  ]
+}
+EOF
+
+cat > "$STAGE_PLANS_DIR/custom-stack-provision.json" <<'EOF'
+{
+  "resource_changes": [
+    {"address": "aws_instance.web", "change": {"actions": ["create"]}},
+    {"address": "aws_ebs_volume.data", "change": {"actions": ["create"]}},
+    {"address": "aws_security_group.web", "change": {"actions": ["delete"]}}
+  ]
+}
+EOF
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "both-changes: exit code 2"
+else
+  fail "both-changes: expected exit 2, got $exit_code. Output: $output"
+fi
+
+# Totals should be sums across BOTH stages, not just the last stage
+if jq -e '.total.add == 3' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "both-changes: total add is 3 (1+2 summed across stages)"
+else
+  fail "both-changes: total add should be 3, got $(jq '.total.add' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.total.change == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "both-changes: total change is 1"
+else
+  fail "both-changes: total change should be 1, got $(jq '.total.change' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.total.destroy == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "both-changes: total destroy is 1"
+else
+  fail "both-changes: total destroy should be 1, got $(jq '.total.destroy' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.stages["cloud-provision"].add == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "both-changes: cloud-provision add is 1"
+else
+  fail "both-changes: cloud-provision add should be 1"
+fi
+
+if jq -e '.stages["custom-stack-provision"].add == 2' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "both-changes: custom-stack-provision add is 2"
+else
+  fail "both-changes: custom-stack-provision add should be 2"
 fi
 
 # ============================================================

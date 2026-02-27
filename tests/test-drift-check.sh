@@ -307,6 +307,18 @@ else
   fail "stage+ignore: drift-mystack.json not created"
 fi
 
+if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift-mystack.json" >/dev/null 2>&1; then
+  pass "stage+ignore: drift_detected is true"
+else
+  fail "stage+ignore: drift_detected field missing or wrong"
+fi
+
+if jq -e '.drift_count == 1' "$WORKDIR/outputs/drift-mystack.json" >/dev/null 2>&1; then
+  pass "stage+ignore: drift_count is 1"
+else
+  fail "stage+ignore: drift_count wrong"
+fi
+
 # ============================================================
 # Test 10: No --stage still produces drift.json (backwards compat)
 # ============================================================
@@ -316,6 +328,12 @@ echo "Test 10: No --stage still produces drift.json..."
 rm -rf "$WORKDIR/outputs"
 result="$(run_drift_check "$drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "no stage: exit code 2 (drift detected)"
+else
+  fail "no stage: expected exit 2, got $exit_code"
+fi
 
 if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
   pass "no stage: drift.json created (backwards compat)"
