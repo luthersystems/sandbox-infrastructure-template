@@ -137,6 +137,7 @@ chmod +x "$MOCK_BIN/chmod"
 export PATH="$MOCK_BIN:$PATH"
 
 # --- Helper: run plan-all in the project context ---
+# shellcheck disable=SC2120  # callers pass args via env vars, not positional params
 run_plan_all() {
   : > "$CMD_LOG"
   rm -rf "$PROJECT/outputs"
