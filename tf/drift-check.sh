@@ -23,11 +23,20 @@ plan_file="$1"
 shift
 
 ignore_drift=false
-for arg in "$@"; do
-  case "$arg" in
-    --ignore-drift) ignore_drift=true ;;
+stage_name=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ignore-drift) ignore_drift=true; shift ;;
+    --stage)
+      if [[ $# -lt 2 ]]; then
+        echo "ERROR: --stage requires a value" >&2
+        exit 1
+      fi
+      stage_name="$2"
+      shift 2
+      ;;
     *)
-      echo "Unknown argument: $arg" >&2
+      echo "Unknown argument: $1" >&2
       exit 1
       ;;
   esac
@@ -81,11 +90,16 @@ echo "$drift" | jq -r "$_drift_filter"
 
 # Write drift report
 mkdir -p "$OUTPUTS_DIR"
+if [[ -n "$stage_name" ]]; then
+  drift_file="$OUTPUTS_DIR/drift-${stage_name}.json"
+else
+  drift_file="$OUTPUTS_DIR/drift.json"
+fi
 jq -n --argjson drift "$drift" --argjson count "$drift_count" \
   '{ drift_detected: true, drift_count: $count, resources: $drift }' \
-  > "$OUTPUTS_DIR/drift.json"
+  > "$drift_file"
 
-echo "Drift report written to $OUTPUTS_DIR/drift.json"
+echo "Drift report written to $drift_file"
 
 if [[ "$ignore_drift" == "true" ]]; then
   echo "WARNING: Drift ignored (--ignore-drift flag set)."

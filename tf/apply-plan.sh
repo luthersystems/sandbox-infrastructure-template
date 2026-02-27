@@ -79,7 +79,7 @@ if [[ "$check_drift" == "true" ]]; then
   if [[ "$ignore_drift" == "true" ]]; then
     drift_args+=("--ignore-drift")
   fi
-  bash "$SCRIPT_DIR/drift-check.sh" "$plan_file" "${drift_args[@]+"${drift_args[@]}"}"
+  bash "$SCRIPT_DIR/drift-check.sh" "$plan_file" --stage "$lifecycle" "${drift_args[@]+"${drift_args[@]}"}"
 fi
 
 terraform apply -input=false "$plan_file"

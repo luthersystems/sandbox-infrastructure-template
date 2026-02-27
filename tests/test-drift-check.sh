@@ -251,6 +251,84 @@ else
   fail "terraform show not called correctly"
 fi
 
+# ============================================================
+# Test 8: --stage flag produces drift-<stage>.json
+# ============================================================
+echo ""
+echo "Test 8: --stage flag produces stage-specific file..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$drift_plan" --stage cloud-provision)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "stage flag: exit code 2"
+else
+  fail "stage flag: expected exit 2, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift-cloud-provision.json" ]]; then
+  pass "stage flag: drift-cloud-provision.json created"
+else
+  fail "stage flag: drift-cloud-provision.json not created"
+fi
+
+if [[ ! -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "stage flag: drift.json NOT created (correct)"
+else
+  fail "stage flag: drift.json should not exist when --stage is used"
+fi
+
+if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift-cloud-provision.json" >/dev/null 2>&1; then
+  pass "stage flag: drift_detected is true"
+else
+  fail "stage flag: drift_detected field missing or wrong"
+fi
+
+# ============================================================
+# Test 9: --stage + --ignore-drift produces file and exits 0
+# ============================================================
+echo ""
+echo "Test 9: --stage with --ignore-drift..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$drift_plan" --stage mystack --ignore-drift)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "stage+ignore: exit code 0"
+else
+  fail "stage+ignore: expected exit 0, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift-mystack.json" ]]; then
+  pass "stage+ignore: drift-mystack.json created"
+else
+  fail "stage+ignore: drift-mystack.json not created"
+fi
+
+# ============================================================
+# Test 10: No --stage still produces drift.json (backwards compat)
+# ============================================================
+echo ""
+echo "Test 10: No --stage still produces drift.json..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$drift_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "no stage: drift.json created (backwards compat)"
+else
+  fail "no stage: drift.json not created"
+fi
+
+if [[ ! -f "$WORKDIR/outputs/drift-.json" ]]; then
+  pass "no stage: no empty-stage filename"
+else
+  fail "no stage: drift-.json should not exist"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"

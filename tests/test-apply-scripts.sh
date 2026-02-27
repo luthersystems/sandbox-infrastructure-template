@@ -241,10 +241,10 @@ else
   pass "drift detected: terraform apply not called (correct)"
 fi
 
-if [[ -f "$PROJECT/outputs/drift.json" ]]; then
-  pass "drift detected: drift.json created"
+if [[ -f "$PROJECT/outputs/drift-default.json" ]]; then
+  pass "drift detected: drift-default.json created"
 else
-  fail "drift detected: drift.json not created"
+  fail "drift detected: drift-default.json not created"
 fi
 
 # Reset show output
@@ -446,10 +446,10 @@ else
   fail "drift-refresh drift: expected exit 2, got $exit_code. Output: $output"
 fi
 
-if [[ -f "$PROJECT/outputs/drift.json" ]]; then
-  pass "drift-refresh drift: drift.json created"
+if [[ -f "$PROJECT/outputs/drift-default.json" ]]; then
+  pass "drift-refresh drift: drift-default.json created"
 else
-  fail "drift-refresh drift: drift.json not created"
+  fail "drift-refresh drift: drift-default.json not created"
 fi
 
 # Reset
