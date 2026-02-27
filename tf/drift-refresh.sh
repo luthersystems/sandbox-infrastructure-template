@@ -40,8 +40,8 @@ terraform plan -refresh-only -out=refresh.tfplan -input=false
 
 # Export JSON plan for structured analysis
 mkdir -p "$MARS_PROJECT_ROOT/outputs"
-terraform show -json refresh.tfplan > "$MARS_PROJECT_ROOT/outputs/tfplan.json"
-echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
+terraform show -json refresh.tfplan > "$MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json"
+echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json"
 
 # Check for drift (always fails on drift — no --ignore-drift)
-bash "$SCRIPT_DIR/drift-check.sh" refresh.tfplan
+bash "$SCRIPT_DIR/drift-check.sh" refresh.tfplan --stage "$lifecycle"

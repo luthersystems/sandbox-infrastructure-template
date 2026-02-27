@@ -14,6 +14,8 @@ tfPlan
 planfile=$(find . -maxdepth 1 -name '*.tfplan' -print -quit 2>/dev/null)
 if [[ -n "$planfile" ]]; then
   mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  terraform show -json "$planfile" > "$MARS_PROJECT_ROOT/outputs/tfplan.json"
-  echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
+  # shellcheck disable=SC2154  # workspace is set by sourced utils.sh
+  local_ws="${workspace}"
+  terraform show -json "$planfile" > "$MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
+  echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
 fi
