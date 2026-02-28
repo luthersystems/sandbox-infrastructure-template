@@ -39,74 +39,70 @@ run_log_version() {
   )
 }
 
-# ============================================================
-# Test 1: No .template_version file → outputs "unknown"
-# ============================================================
-echo "Test 1: Missing .template_version file..."
+# Helper: set template_ref in the tfvars JSON
+set_template_ref() {
+  local val="$1"
+  cat > "$PROJECT/tf/auto-vars/common.auto.tfvars.json" <<EOF
+{"template_ref": "$val"}
+EOF
+}
 
-rm -f "$PROJECT/.template_version"
+# ============================================================
+# Test 1: No template_ref in tfvars → outputs "unknown"
+# ============================================================
+echo "Test 1: Missing template_ref in tfvars..."
+
+echo '{}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 output="$(run_log_version)"
 
 if [[ "$output" == "template_version=unknown" ]]; then
-  pass "missing file: outputs template_version=unknown"
+  pass "missing key: outputs template_version=unknown"
 else
-  fail "missing file: expected 'template_version=unknown', got '$output'"
+  fail "missing key: expected 'template_version=unknown', got '$output'"
 fi
 
 # ============================================================
-# Test 2: .template_version with a normal value
+# Test 2: template_ref with a normal value
 # ============================================================
 echo "Test 2: Normal version string..."
 
-echo "abc123def" > "$PROJECT/.template_version"
+set_template_ref "main"
 output="$(run_log_version)"
 
-if [[ "$output" == "template_version=abc123def" ]]; then
+if [[ "$output" == "template_version=main" ]]; then
   pass "normal value: outputs correct version"
 else
-  fail "normal value: expected 'template_version=abc123def', got '$output'"
+  fail "normal value: expected 'template_version=main', got '$output'"
 fi
 
 # ============================================================
-# Test 3: Whitespace and newlines are stripped
+# Test 3: template_ref set to JSON null → outputs "unknown"
 # ============================================================
-echo "Test 3: Whitespace stripping..."
+echo "Test 3: JSON null template_ref value..."
 
-printf "  v1.2.3  \n\n" > "$PROJECT/.template_version"
-output="$(run_log_version)"
-
-if [[ "$output" == "template_version=v1.2.3" ]]; then
-  pass "whitespace: stripped correctly"
-else
-  fail "whitespace: expected 'template_version=v1.2.3', got '$output'"
-fi
-
-# ============================================================
-# Test 4: Empty file → outputs "unknown"
-# ============================================================
-echo "Test 4: Empty .template_version file..."
-
-: > "$PROJECT/.template_version"
+cat > "$PROJECT/tf/auto-vars/common.auto.tfvars.json" <<'EOF'
+{"template_ref": null}
+EOF
 output="$(run_log_version)"
 
 if [[ "$output" == "template_version=unknown" ]]; then
-  pass "empty file: outputs template_version=unknown"
+  pass "null value: outputs template_version=unknown"
 else
-  fail "empty file: expected 'template_version=unknown', got '$output'"
+  fail "null value: expected 'template_version=unknown', got '$output'"
 fi
 
 # ============================================================
-# Test 5: File with only whitespace → outputs "unknown"
+# Test 4: template_ref with empty string → outputs "unknown"
 # ============================================================
-echo "Test 5: Whitespace-only .template_version file..."
+echo "Test 4: Empty template_ref value..."
 
-printf "   \n  \n" > "$PROJECT/.template_version"
+set_template_ref ""
 output="$(run_log_version)"
 
 if [[ "$output" == "template_version=unknown" ]]; then
-  pass "whitespace-only: outputs template_version=unknown"
+  pass "empty value: outputs template_version=unknown"
 else
-  fail "whitespace-only: expected 'template_version=unknown', got '$output'"
+  fail "empty value: expected 'template_version=unknown', got '$output'"
 fi
 
 # --- Summary ---

@@ -56,7 +56,7 @@ getTfVar() {
     [[ -e "$file" ]] || continue
 
     val=$(jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' "$file" 2>/dev/null || echo "")
-    if [[ -n "$val" ]]; then
+    if [[ -n "$val" && "$val" != "null" ]]; then
       result="$val"
       break
     fi
@@ -442,12 +442,9 @@ cleanupCloudEnv() {
 }
 
 # logTemplateVersion logs the infrastructure template version.
-# The .template_version file is written by Oracle during template refresh.
+# Reads template_ref from TF auto-vars (set by Oracle during template refresh).
 logTemplateVersion() {
-  local version_file="${MARS_PROJECT_ROOT:-.}/.template_version"
-  local version=""
-  if [[ -f "$version_file" ]]; then
-    version="$(tr -d '[:space:]' < "$version_file")"
-  fi
-  echo "template_version=${version:-unknown}"
+  local ver
+  ver=$(getTfVar "template_ref")
+  echo "template_version=${ver:-unknown}"
 }
