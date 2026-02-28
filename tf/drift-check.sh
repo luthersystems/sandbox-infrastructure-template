@@ -50,6 +50,7 @@ fi
 # Resolve project root for output path
 : "${MARS_PROJECT_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export MARS_PROJECT_ROOT
+echo "template_version=$(cat "$MARS_PROJECT_ROOT/.template_version" 2>/dev/null | tr -d '[:space:]')"
 
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 

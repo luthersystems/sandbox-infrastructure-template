@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 . ./utils.sh
+logTemplateVersion
 
 tfInit
 tfPlan
