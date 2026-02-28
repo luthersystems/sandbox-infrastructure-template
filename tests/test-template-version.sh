@@ -76,17 +76,19 @@ else
 fi
 
 # ============================================================
-# Test 3: template_ref with a tag value
+# Test 3: template_ref set to JSON null → outputs "unknown"
 # ============================================================
-echo "Test 3: Tag version string..."
+echo "Test 3: JSON null template_ref value..."
 
-set_template_ref "v1.2.3"
+cat > "$PROJECT/tf/auto-vars/common.auto.tfvars.json" <<'EOF'
+{"template_ref": null}
+EOF
 output="$(run_log_version)"
 
-if [[ "$output" == "template_version=v1.2.3" ]]; then
-  pass "tag value: outputs correct version"
+if [[ "$output" == "template_version=unknown" ]]; then
+  pass "null value: outputs template_version=unknown"
 else
-  fail "tag value: expected 'template_version=v1.2.3', got '$output'"
+  fail "null value: expected 'template_version=unknown', got '$output'"
 fi
 
 # ============================================================

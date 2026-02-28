@@ -56,7 +56,7 @@ getTfVar() {
     [[ -e "$file" ]] || continue
 
     val=$(jq -r --arg k "$key" 'if has($k) then .[$k] else empty end' "$file" 2>/dev/null || echo "")
-    if [[ -n "$val" ]]; then
+    if [[ -n "$val" && "$val" != "null" ]]; then
       result="$val"
       break
     fi
