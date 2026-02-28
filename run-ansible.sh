@@ -12,6 +12,10 @@ export VERBOSITY=$4
 echo "whoami: $(whoami)"
 echo "pwd: $(pwd)"
 echo "date: $(date)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${MARS_PROJECT_ROOT:=$SCRIPT_DIR}"
+. "$MARS_PROJECT_ROOT/shell_utils.sh"
+logTemplateVersion
 echo "docker version"
 docker --version
 

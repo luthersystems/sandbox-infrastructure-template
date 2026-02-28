@@ -43,6 +43,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
 export MARS_PROJECT_ROOT
 
+. "$MARS_PROJECT_ROOT/shell_utils.sh"
+logTemplateVersion
+
 captureOutputs() {
   mkdir -p "$MARS_PROJECT_ROOT/outputs"
   terraform output -json > "$MARS_PROJECT_ROOT/outputs/outputs.json"
