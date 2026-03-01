@@ -16,6 +16,8 @@ set -euo pipefail
 #  11. Re-deploy: no-op when .git/ already exists
 #  12. Re-deploy: no-op when repo_clone_ssh_url is empty
 #  13. Re-deploy: graceful degradation when clone fails (nonexistent repo)
+#  14. Repo mode with commit SHA ref (token auth)
+#  15. Repo mode with commit SHA ref (SSH auth)
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -517,6 +519,88 @@ if echo "$clone_fail_output" | grep -q "WARNING: failed to clone infra repo"; th
   pass "re-deploy: warning logged when clone fails"
 else
   fail "re-deploy: expected warning log not found in output"
+fi
+
+# --- Test 14: Repo mode with commit SHA ref (token auth) ---
+echo ""
+echo "Test 14: Repo mode with commit SHA ref (token auth)..."
+
+# Get the SHA of the commit in the bare repo we already created
+SHA_REF="$(git -C "$REPO_BARE" rev-parse HEAD)"
+
+# Reset the project target directory for this test
+rm -rf "$TARGET"
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
+echo "old-version" > "$TARGET/.terraform-version"
+
+(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ=""
+  export CUSTOM_REPO_URL="file://$REPO_BARE"
+  export CUSTOM_REF="$SHA_REF"
+  export CUSTOM_AUTH="token"
+  export GITHUB_TOKEN="unused-local-clone"
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+if [[ -f "$TARGET/main.tf" ]] && [[ "$(cat "$TARGET/main.tf")" == "repo-main" ]]; then
+  pass "SHA ref (token): main.tf checked out from commit SHA"
+else
+  fail "SHA ref (token): main.tf not found or wrong content"
+fi
+
+if [[ -f "$TARGET/.terraform-version" ]] && [[ "$(cat "$TARGET/.terraform-version")" == "1.9.0" ]]; then
+  pass "SHA ref (token): .terraform-version correct"
+else
+  fail "SHA ref (token): .terraform-version missing or wrong"
+fi
+
+if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existing-backend" ]]; then
+  pass "SHA ref (token): preserved files intact"
+else
+  fail "SHA ref (token): preserved files not intact"
+fi
+
+# --- Test 15: Repo mode with commit SHA ref (SSH auth) ---
+echo ""
+echo "Test 15: Repo mode with commit SHA ref (SSH auth)..."
+
+# Reset the project target directory for this test
+rm -rf "$TARGET"
+mkdir -p "$TARGET"
+echo "existing-backend" > "$TARGET/backend.tf"
+echo "existing-providers" > "$TARGET/providers.tf"
+echo "old-version" > "$TARGET/.terraform-version"
+
+(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ=""
+  export CUSTOM_REPO_URL="file://$REPO_BARE"
+  export CUSTOM_REF="$SHA_REF"
+  export CUSTOM_AUTH="ssh"
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+if [[ -f "$TARGET/main.tf" ]] && [[ "$(cat "$TARGET/main.tf")" == "repo-main" ]]; then
+  pass "SHA ref (ssh): main.tf checked out from commit SHA"
+else
+  fail "SHA ref (ssh): main.tf not found or wrong content"
+fi
+
+if [[ -f "$TARGET/.terraform-version" ]] && [[ "$(cat "$TARGET/.terraform-version")" == "1.9.0" ]]; then
+  pass "SHA ref (ssh): .terraform-version correct"
+else
+  fail "SHA ref (ssh): .terraform-version missing or wrong"
+fi
+
+if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existing-backend" ]]; then
+  pass "SHA ref (ssh): preserved files intact"
+else
+  fail "SHA ref (ssh): preserved files not intact"
 fi
 
 # --- Summary ---

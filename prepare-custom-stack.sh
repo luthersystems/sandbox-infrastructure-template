@@ -172,6 +172,9 @@ fi
 
 git config --global advice.detachedHead false || true
 
+# Detect 40-char hex commit SHAs (git clone --branch doesn't support them)
+is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
+
 git_clone_with_token() {
   local url="$1" ref="$2" dest="$3"
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
@@ -182,12 +185,22 @@ git_clone_with_token() {
   if [[ "$token_url" =~ ^https:// ]]; then
     token_url="${url/https:\/\//https:\/\/${GITHUB_TOKEN}@}"
   fi
-  git clone --depth 1 --no-tags --branch "$ref" "$token_url" "$dest"
+  if is_commit_sha "$ref"; then
+    git clone --no-tags "$token_url" "$dest"
+    git -C "$dest" checkout "$ref"
+  else
+    git clone --depth 1 --no-tags --branch "$ref" "$token_url" "$dest"
+  fi
 }
 
 git_clone_with_ssh() {
   local url="$1" ref="$2" dest="$3"
-  GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no' git clone --depth 1 --no-tags --branch "$ref" "$url" "$dest"
+  if is_commit_sha "$ref"; then
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no' git clone --no-tags "$url" "$dest"
+    git -C "$dest" checkout "$ref"
+  else
+    GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=no' git clone --depth 1 --no-tags --branch "$ref" "$url" "$dest"
+  fi
 }
 
 tmp_dir="$(mktemp -d)"
