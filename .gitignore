@@ -1,3 +1,4 @@
 secrets/
 .tmp/
 .template_version
+tf/auto-vars/skip_remote_state.auto.tfvars.json

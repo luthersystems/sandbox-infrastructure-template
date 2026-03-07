@@ -474,6 +474,74 @@ else
   fail "destroy: read actions should not be counted"
 fi
 
+# ============================================================
+# Test 7: New project (no prior_state) — skip_remote_state auto-detected
+# ============================================================
+echo ""
+echo "Test 7: New project skip_remote_state detection..."
+
+# cloud-provision plan with no prior_state (new project)
+echo '{"resource_changes": [], "prior_state": {"values": {"root_module": {"resources": []}}}}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+if echo "$output" | grep -q "skip_remote_state=true"; then
+  pass "new-project: skip_remote_state=true detected"
+else
+  fail "new-project: should detect skip_remote_state=true. Output: $output"
+fi
+
+# The temp file should be cleaned up by the EXIT trap
+if [[ ! -f "$PROJECT/tf/auto-vars/skip_remote_state.auto.tfvars.json" ]]; then
+  pass "new-project: temp auto-var cleaned up"
+else
+  fail "new-project: temp auto-var should be cleaned up"
+fi
+
+# ============================================================
+# Test 8: Existing project (has prior_state resources) — skip NOT triggered
+# ============================================================
+echo ""
+echo "Test 8: Existing project — skip_remote_state NOT triggered..."
+
+# cloud-provision plan with prior_state containing resources (existing project)
+cat > "$STAGE_PLANS_DIR/cloud-provision.json" <<'EOF'
+{
+  "resource_changes": [],
+  "prior_state": {
+    "values": {
+      "root_module": {
+        "resources": [
+          {"address": "aws_s3_bucket.state", "type": "aws_s3_bucket", "values": {}}
+        ]
+      }
+    }
+  }
+}
+EOF
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+if echo "$output" | grep -q "skip_remote_state=true"; then
+  fail "existing-project: should NOT detect skip_remote_state. Output: $output"
+else
+  pass "existing-project: skip_remote_state not triggered"
+fi
+
+if [[ ! -f "$PROJECT/tf/auto-vars/skip_remote_state.auto.tfvars.json" ]]; then
+  pass "existing-project: no temp auto-var created"
+else
+  fail "existing-project: temp auto-var should not exist"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"

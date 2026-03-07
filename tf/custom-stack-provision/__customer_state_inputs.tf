@@ -1,4 +1,10 @@
 # Inputs needed to read the cloud-provision remote state and choose the role/region
+variable "skip_remote_state" {
+  description = "Skip reading remote state from prior stages (for plan-only on new projects)"
+  type        = bool
+  default     = false
+}
+
 variable "short_project_id" { type = string }
 variable "project_id" {
   description = "Full Luther project ID"
