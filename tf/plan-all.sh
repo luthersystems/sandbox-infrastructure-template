@@ -34,7 +34,12 @@ had_changes=false
 
 # Per-stage results stored as temp files for aggregation
 results_dir="$(mktemp -d)"
-trap 'rm -rf "$results_dir"' EXIT
+SKIP_REMOTE_STATE_FILE="$SCRIPT_DIR/auto-vars/skip_remote_state.auto.tfvars.json"
+cleanup_plan_all() {
+  rm -rf "$results_dir"
+  rm -f "$SKIP_REMOTE_STATE_FILE"
+}
+trap cleanup_plan_all EXIT
 
 for stage in $STAGES; do
   echo ""
@@ -53,6 +58,16 @@ for stage in $STAGES; do
     had_error=true
     echo '{"error": true}' > "$results_dir/$stage.json"
     continue
+  fi
+
+  # Auto-detect new project: if cloud-provision has no prior state, inject
+  # skip_remote_state=true so downstream stages don't try to read it.
+  if [[ "$stage" == "cloud-provision" && -f "$plan_file" ]]; then
+    prior_resource_count="$(jq '[.prior_state.values.root_module.resources // [] | .[]] | length' "$plan_file" 2>/dev/null || echo "0")"
+    if [[ "$prior_resource_count" -eq 0 ]]; then
+      echo "INFO: New project detected (no prior state in cloud-provision). Setting skip_remote_state=true."
+      echo '{"skip_remote_state": true}' > "$SKIP_REMOTE_STATE_FILE"
+    fi
   fi
 
   if [[ ! -f "$plan_file" ]]; then
