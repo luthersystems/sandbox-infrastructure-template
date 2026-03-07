@@ -34,10 +34,8 @@ had_changes=false
 
 # Per-stage results stored as temp files for aggregation
 results_dir="$(mktemp -d)"
-SKIP_REMOTE_STATE_FILE="$SCRIPT_DIR/auto-vars/skip_remote_state.auto.tfvars.json"
 cleanup_plan_all() {
   rm -rf "$results_dir"
-  rm -f "$SKIP_REMOTE_STATE_FILE"
 }
 trap cleanup_plan_all EXIT
 
@@ -60,13 +58,31 @@ for stage in $STAGES; do
     continue
   fi
 
-  # Auto-detect new project: if cloud-provision has no prior state, inject
-  # skip_remote_state=true so downstream stages don't try to read it.
+  # Auto-detect new project: if cloud-provision has no prior state, apply it
+  # so downstream stages can read its remote state.
   if [[ "$stage" == "cloud-provision" && -f "$plan_file" ]]; then
     prior_resource_count="$(jq '[.prior_state.values.root_module.resources // [] | .[]] | length' "$plan_file" 2>/dev/null || echo "0")"
     if [[ "$prior_resource_count" -eq 0 ]]; then
-      echo "INFO: New project detected (no prior state in cloud-provision). Setting skip_remote_state=true."
-      echo '{"skip_remote_state": true}' > "$SKIP_REMOTE_STATE_FILE"
+      echo ""
+      echo "INFO: New project detected (no prior state in cloud-provision)."
+      echo "INFO: Applying cloud-provision to create remote state for downstream stages..."
+      echo ""
+      set +e
+      (
+        cd "$SCRIPT_DIR"
+        set -- "$stage"
+        . ./utils.sh
+        tfInit
+        tfApply
+      )
+      apply_rc=$?
+      set -e
+      if [[ $apply_rc -ne 0 ]]; then
+        echo "ERROR: Failed to apply cloud-provision (exit $apply_rc)"
+        had_error=true
+      else
+        echo "INFO: cloud-provision applied successfully."
+      fi
     fi
   fi
 
