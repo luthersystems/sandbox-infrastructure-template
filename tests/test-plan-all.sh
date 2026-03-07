@@ -116,6 +116,19 @@ elif [[ "\$1" == "plan" ]]; then
   if [[ -n "\$stage" && -f "\$fail_file" ]]; then
     exit 1
   fi
+elif [[ "\$1" == "apply" ]]; then
+  # Check for forced apply failure
+  stage=""
+  for s in cloud-provision custom-stack-provision stage-a stage-b failing-stage; do
+    if echo "\$cwd/" | grep -q "/\$s/"; then
+      stage="\$s"
+      break
+    fi
+  done
+  apply_fail_file="$STAGE_PLANS_DIR/\${stage}.apply-fail"
+  if [[ -n "\$stage" && -f "\$apply_fail_file" ]]; then
+    exit 1
+  fi
 fi
 OUTER
 chmod +x "$MOCK_BIN/terraform"
@@ -475,38 +488,44 @@ else
 fi
 
 # ============================================================
-# Test 7: New project (no prior_state) — skip_remote_state auto-detected
+# Test 7: New project (no prior_state) — cloud-provision auto-applied
 # ============================================================
 echo ""
-echo "Test 7: New project skip_remote_state detection..."
+echo "Test 7: New project auto-apply cloud-provision..."
 
 # cloud-provision plan with no prior_state (new project)
 echo '{"resource_changes": [], "prior_state": {"values": {"root_module": {"resources": []}}}}' > "$STAGE_PLANS_DIR/cloud-provision.json"
 echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
 
 set +e
+: > "$CMD_LOG"
 output="$(run_plan_all 2>&1)"
 exit_code=$?
 set -e
 
-if echo "$output" | grep -q "skip_remote_state=true"; then
-  pass "new-project: skip_remote_state=true detected"
+if echo "$output" | grep -q "Applying cloud-provision"; then
+  pass "new-project: cloud-provision apply triggered"
 else
-  fail "new-project: should detect skip_remote_state=true. Output: $output"
+  fail "new-project: should apply cloud-provision. Output: $output"
 fi
 
-# The temp file should be cleaned up by the EXIT trap
-if [[ ! -f "$PROJECT/tf/auto-vars/skip_remote_state.auto.tfvars.json" ]]; then
-  pass "new-project: temp auto-var cleaned up"
+if grep -q "apply" "$CMD_LOG"; then
+  pass "new-project: terraform apply was called"
 else
-  fail "new-project: temp auto-var should be cleaned up"
+  fail "new-project: terraform apply should have been called. Log: $(cat "$CMD_LOG")"
+fi
+
+if echo "$output" | grep -q "cloud-provision applied successfully"; then
+  pass "new-project: apply completed successfully"
+else
+  fail "new-project: apply should succeed. Output: $output"
 fi
 
 # ============================================================
-# Test 8: Existing project (has prior_state resources) — skip NOT triggered
+# Test 8: Existing project (has prior_state resources) — apply NOT triggered
 # ============================================================
 echo ""
-echo "Test 8: Existing project — skip_remote_state NOT triggered..."
+echo "Test 8: Existing project — auto-apply NOT triggered..."
 
 # cloud-provision plan with prior_state containing resources (existing project)
 cat > "$STAGE_PLANS_DIR/cloud-provision.json" <<'EOF'
@@ -526,21 +545,56 @@ EOF
 echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
 
 set +e
+: > "$CMD_LOG"
 output="$(run_plan_all 2>&1)"
 exit_code=$?
 set -e
 
-if echo "$output" | grep -q "skip_remote_state=true"; then
-  fail "existing-project: should NOT detect skip_remote_state. Output: $output"
+if echo "$output" | grep -q "Applying cloud-provision"; then
+  fail "existing-project: should NOT apply cloud-provision. Output: $output"
 else
-  pass "existing-project: skip_remote_state not triggered"
+  pass "existing-project: auto-apply not triggered"
 fi
 
-if [[ ! -f "$PROJECT/tf/auto-vars/skip_remote_state.auto.tfvars.json" ]]; then
-  pass "existing-project: no temp auto-var created"
+if grep -q "apply" "$CMD_LOG"; then
+  fail "existing-project: terraform apply should NOT have been called. Log: $(cat "$CMD_LOG")"
 else
-  fail "existing-project: temp auto-var should not exist"
+  pass "existing-project: no terraform apply called"
 fi
+
+# ============================================================
+# Test 9: New project — apply failure is handled gracefully
+# ============================================================
+echo ""
+echo "Test 9: New project — apply failure..."
+
+echo '{"resource_changes": [], "prior_state": {"values": {"root_module": {"resources": []}}}}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+
+# Make apply fail for cloud-provision
+touch "$STAGE_PLANS_DIR/cloud-provision.apply-fail"
+
+set +e
+: > "$CMD_LOG"
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+# Should exit 1 (error) since apply failed
+if [[ "$exit_code" -eq 1 ]]; then
+  pass "apply-failure: exit code 1"
+else
+  fail "apply-failure: expected exit 1, got $exit_code. Output: $output"
+fi
+
+if echo "$output" | grep -q "Failed to apply cloud-provision"; then
+  pass "apply-failure: error message logged"
+else
+  fail "apply-failure: should log apply failure. Output: $output"
+fi
+
+# Clean up
+rm -f "$STAGE_PLANS_DIR/cloud-provision.apply-fail"
 
 # --- Summary ---
 echo ""
