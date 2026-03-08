@@ -61,7 +61,13 @@ for stage in $STAGES; do
   # Auto-detect new project: if cloud-provision has no prior state, apply it
   # so downstream stages can read its remote state.
   if [[ "$stage" == "cloud-provision" && -f "$plan_file" ]]; then
+    echo "DEBUG: plan_file=$plan_file exists=$(test -f "$plan_file" && echo yes || echo no)"
+    echo "DEBUG: plan_file size=$(wc -c < "$plan_file" 2>/dev/null || echo 'unknown')"
+    echo "DEBUG: prior_state key exists=$(jq 'has("prior_state")' "$plan_file" 2>/dev/null || echo 'jq-error')"
+    echo "DEBUG: prior_state.values=$(jq '.prior_state.values | keys // "null"' "$plan_file" 2>/dev/null || echo 'jq-error')"
+    echo "DEBUG: root_module resources=$(jq '.prior_state.values.root_module.resources // "null" | if type == "array" then length else . end' "$plan_file" 2>/dev/null || echo 'jq-error')"
     prior_resource_count="$(jq '[.prior_state.values.root_module.resources // [] | .[]] | length' "$plan_file" 2>/dev/null || echo "0")"
+    echo "DEBUG: prior_resource_count=$prior_resource_count"
     if [[ "$prior_resource_count" -eq 0 ]]; then
       echo ""
       echo "INFO: New project detected (no prior state in cloud-provision)."
