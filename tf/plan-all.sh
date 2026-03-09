@@ -83,6 +83,10 @@ for stage in $STAGES; do
         cd "$SCRIPT_DIR"
         set -- "$stage"
         . ./utils.sh
+        # Clear plan-specific CLI args that Oracle sets — flags like -out
+        # and -compact-warnings are invalid for terraform apply.
+        unset TF_CLI_ARGS_plan
+        unset TF_CLI_ARGS_apply
         tfInit
         tfApply
       )
