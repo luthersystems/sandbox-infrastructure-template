@@ -58,13 +58,25 @@ for stage in $STAGES; do
     continue
   fi
 
-  # Auto-detect new project: if cloud-provision has no prior state, apply it
-  # so downstream stages can read its remote state.
-  if [[ "$stage" == "cloud-provision" && -f "$plan_file" ]]; then
-    prior_resource_count="$(jq '[.prior_state.values.root_module.resources // [] | .[]] | length' "$plan_file" 2>/dev/null || echo "0")"
-    if [[ "$prior_resource_count" -eq 0 ]]; then
+  # Auto-detect new project: if cloud-provision has no managed resources in
+  # state, apply it so downstream stages can read its remote state.
+  # Uses `terraform state list` rather than parsing plan JSON — data sources
+  # appear in the plan's prior_state even for brand-new projects, but
+  # `state list` only reports managed resources.
+  if [[ "$stage" == "cloud-provision" ]]; then
+    set +e
+    state_count="$(
+      cd "$SCRIPT_DIR"
+      set -- "$stage"
+      . ./utils.sh
+      # shellcheck disable=SC2154  # tf_workspace is set by sourced utils.sh
+      $MARS ${tf_workspace} state list 2>/dev/null | grep -c '^'
+    )" || state_count=0
+    set -e
+
+    if [[ "$state_count" -eq 0 ]]; then
       echo ""
-      echo "INFO: New project detected (no prior state in cloud-provision)."
+      echo "INFO: New project detected (no managed resources in cloud-provision state)."
       echo "INFO: Applying cloud-provision to create remote state for downstream stages..."
       echo ""
       set +e
@@ -72,6 +84,10 @@ for stage in $STAGES; do
         cd "$SCRIPT_DIR"
         set -- "$stage"
         . ./utils.sh
+        # Clear plan-specific CLI args that Oracle sets — flags like -out
+        # and -compact-warnings are invalid for terraform apply.
+        unset TF_CLI_ARGS_plan
+        unset TF_CLI_ARGS_apply
         tfInit
         tfApply
       )
