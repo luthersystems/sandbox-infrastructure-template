@@ -90,3 +90,10 @@ else
 
   captureOutputs
 fi
+
+# Write empty drift.json stub if not already present so Argo doesn't
+# warn about a missing optional artifact.
+if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
+  mkdir -p "$MARS_PROJECT_ROOT/outputs"
+  echo '{}' > "$MARS_PROJECT_ROOT/outputs/drift.json"
+fi
