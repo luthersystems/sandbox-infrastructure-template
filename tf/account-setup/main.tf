@@ -23,6 +23,15 @@ data "aws_iam_policy_document" "admin_assume_policy" {
     }
 
     actions = ["sts:AssumeRole"]
+
+    dynamic "condition" {
+      for_each = var.aws_external_id != "" ? [var.aws_external_id] : []
+      content {
+        test     = "StringEquals"
+        variable = "sts:ExternalId"
+        values   = [condition.value]
+      }
+    }
   }
 }
 
