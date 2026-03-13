@@ -13,6 +13,11 @@ locals {
 
   # Extract deployment SA email from credentials for token creator binding
   gcp_deployment_sa_email = local.is_gcp ? jsondecode(base64decode(var.gcp_credentials_b64)).client_email : ""
+
+  inspector_role_arn      = try(aws_iam_role.insideout_inspector[0].arn, "")
+  inspector_role_name_out = try(aws_iam_role.insideout_inspector[0].name, "")
+  gcp_inspector_sa_email  = try(google_service_account.insideout_inspector[0].email, "")
+  gcp_inspector_sa_id_out = try(google_service_account.insideout_inspector[0].account_id, "")
 }
 
 data "aws_iam_policy_document" "inspector_assume" {
@@ -125,22 +130,21 @@ resource "google_service_account_iam_member" "inspector_token_creator" {
 
 output "inspector_role_arn" {
   description = "ARN of the InsideOut inspector role (AWS only)"
-  value       = local.is_aws ? aws_iam_role.insideout_inspector[0].arn : ""
+  value       = local.is_aws ? local.inspector_role_arn : ""
 }
 
 output "inspector_role_name" {
   description = "Name of the InsideOut inspector role (AWS only)"
-  value       = local.is_aws ? aws_iam_role.insideout_inspector[0].name : ""
+  value       = local.is_aws ? local.inspector_role_name_out : ""
 }
 
 output "gcp_inspector_sa_email" {
   description = "Email of the GCP inspector service account (GCP only)"
-  value       = local.is_gcp ? google_service_account.insideout_inspector[0].email : ""
+  value       = local.is_gcp ? local.gcp_inspector_sa_email : ""
 }
 
 output "gcp_inspector_sa_id" {
   description = "ID of the GCP inspector service account (GCP only)"
-  value       = local.is_gcp ? google_service_account.insideout_inspector[0].account_id : ""
+  value       = local.is_gcp ? local.gcp_inspector_sa_id_out : ""
 }
-
 

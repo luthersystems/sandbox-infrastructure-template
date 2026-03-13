@@ -14,7 +14,7 @@ locals {
 
 module "bootstrap" {
   count  = local.is_aws ? 1 : 0
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=v55.15.1"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=v55.15.2"
 
   admin_role_name     = local.admin_role_name
   create_dns          = var.create_dns
