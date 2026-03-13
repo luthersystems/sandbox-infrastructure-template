@@ -7,11 +7,11 @@ locals {
   state_workspace_k8s = "k8s"
 
   # AWS-specific state configuration
-  state_kms_key_id = local.is_aws ? module.bootstrap[0].aws_kms_key_id : ""
+  state_kms_key_id = local.is_aws ? try(module.bootstrap[0].aws_kms_key_id, "") : ""
   state_role_arn   = local.admin_role_arn
 
   state = local.is_aws ? {
-    bucket = module.bootstrap[0].aws_s3_bucket_tfstate
+    bucket = try(module.bootstrap[0].aws_s3_bucket_tfstate, "")
     region = var.aws_region
   } : {}
 

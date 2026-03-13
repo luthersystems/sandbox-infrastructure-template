@@ -1,5 +1,5 @@
 module "storage" {
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-storage?ref=v55.15.1"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-storage?ref=v55.15.2"
 
   luther_project = var.short_project_id
   luther_env     = var.luther_env
@@ -36,7 +36,7 @@ output "static_bucket_kms_key_arn" {
 }
 
 module "main" {
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-main?ref=v55.15.1"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-main?ref=v55.15.2"
 
   luther_project           = var.short_project_id
   luther_env               = var.luther_env
