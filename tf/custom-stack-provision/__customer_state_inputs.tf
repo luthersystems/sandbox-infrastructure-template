@@ -58,6 +58,12 @@ variable "gcp_credentials_b64" {
   sensitive   = true
 }
 
+variable "gcp_impersonate_service_account" {
+  description = "Optional GCP service account email to impersonate for steady-state Terraform operations"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # Custom Stack Variables (passed by workflow, used by prepare-custom-stack)
 # ============================================================================

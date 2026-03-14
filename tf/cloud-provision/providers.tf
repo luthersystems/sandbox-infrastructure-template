@@ -21,8 +21,9 @@ provider "aws" {
 # ============================================================================
 
 provider "google" {
-  project = var.cloud_provider == "gcp" ? var.gcp_project_id : null
-  region  = var.cloud_provider == "gcp" ? var.gcp_region : null
+  project                     = var.cloud_provider == "gcp" ? var.gcp_project_id : null
+  region                      = var.cloud_provider == "gcp" ? var.gcp_region : null
+  impersonate_service_account = var.cloud_provider == "gcp" && var.gcp_impersonate_service_account != "" ? var.gcp_impersonate_service_account : null
   # Credentials are provided via GOOGLE_APPLICATION_CREDENTIALS env var
   # set by shell_utils.sh / run-with-creds.sh
 }
