@@ -24,8 +24,8 @@ provider "google" {
   project                     = var.cloud_provider == "gcp" ? var.gcp_project_id : null
   region                      = var.cloud_provider == "gcp" ? var.gcp_region : null
   impersonate_service_account = var.cloud_provider == "gcp" && var.gcp_impersonate_service_account != "" ? var.gcp_impersonate_service_account : null
-  # Credentials are provided via GOOGLE_APPLICATION_CREDENTIALS env var
-  # set by shell_utils.sh / run-with-creds.sh
+  # Source credentials still come from GOOGLE_APPLICATION_CREDENTIALS as set by
+  # shell_utils.sh / run-with-creds.sh; impersonation is optional on top of that.
 }
 
 # ============================================================================

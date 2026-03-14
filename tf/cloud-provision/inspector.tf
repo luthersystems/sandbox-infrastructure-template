@@ -127,18 +127,21 @@ resource "google_service_account_iam_member" "inspector_token_creator" {
   member             = "serviceAccount:${local.gcp_deployment_sa_email}"
 }
 
-# Create a dedicated management service account for durable write operations
+# Create a dedicated management service account for steady-state write operations.
+# This is the execution identity Terraform can impersonate once a source GCP
+# credential is available; eliminating that source credential dependency
+# requires the separate federation work.
 resource "google_service_account" "insideout_management" {
   count = local.is_gcp ? 1 : 0
 
   account_id   = local.gcp_management_sa_id
   display_name = "InsideOut Management - ${var.project_id}"
-  description  = "Project-scoped management service account for durable InsideOut Terraform operations"
+  description  = "Project-scoped management service account for impersonated InsideOut Terraform operations"
   project      = var.gcp_project_id
 }
 
-# Broad v1 write access so Oracle can keep using project-scoped Terraform
-# after the original uploaded bootstrap key expires.
+# Broad v1 write access for Terraform when Oracle impersonates this service
+# account from another valid GCP source credential.
 resource "google_project_iam_member" "management_owner" {
   count = local.is_gcp ? 1 : 0
 
@@ -147,7 +150,8 @@ resource "google_project_iam_member" "management_owner" {
   member  = "serviceAccount:${google_service_account.insideout_management[0].email}"
 }
 
-# Allow the deployment SA to impersonate the management SA for write access.
+# Allow the deployment SA from the uploaded GCP credentials to impersonate the
+# management SA for write access.
 resource "google_service_account_iam_member" "management_token_creator" {
   count = local.is_gcp ? 1 : 0
 
