@@ -74,6 +74,7 @@ resource "google_storage_bucket" "tfstate" {
 # ============================================================================
 
 output "terraform_role" {
+  # AWS steady-state Terraform uses this durable role after bootstrap.
   description = "AWS IAM role ARN for Terraform (empty for GCP)"
   value       = local.admin_role_arn
 }

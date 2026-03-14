@@ -9,15 +9,18 @@ locals {
   inspector_role_name = "insideout-inspector-${var.project_id}"
 
   # GCP inspector service account ID (max 30 chars, lowercase, hyphens allowed)
-  gcp_inspector_sa_id = "insideout-inspector-${var.short_project_id}"
+  gcp_inspector_sa_id  = "insideout-inspector-${var.short_project_id}"
+  gcp_management_sa_id = "insideout-mgmt-${var.short_project_id}"
 
   # Extract deployment SA email from credentials for token creator binding
   gcp_deployment_sa_email = local.is_gcp ? jsondecode(base64decode(var.gcp_credentials_b64)).client_email : ""
 
-  inspector_role_arn      = try(aws_iam_role.insideout_inspector[0].arn, "")
-  inspector_role_name_out = try(aws_iam_role.insideout_inspector[0].name, "")
-  gcp_inspector_sa_email  = try(google_service_account.insideout_inspector[0].email, "")
-  gcp_inspector_sa_id_out = try(google_service_account.insideout_inspector[0].account_id, "")
+  inspector_role_arn       = try(aws_iam_role.insideout_inspector[0].arn, "")
+  inspector_role_name_out  = try(aws_iam_role.insideout_inspector[0].name, "")
+  gcp_inspector_sa_email   = try(google_service_account.insideout_inspector[0].email, "")
+  gcp_inspector_sa_id_out  = try(google_service_account.insideout_inspector[0].account_id, "")
+  gcp_management_sa_email  = try(google_service_account.insideout_management[0].email, "")
+  gcp_management_sa_id_out = try(google_service_account.insideout_management[0].account_id, "")
 }
 
 data "aws_iam_policy_document" "inspector_assume" {
@@ -124,6 +127,39 @@ resource "google_service_account_iam_member" "inspector_token_creator" {
   member             = "serviceAccount:${local.gcp_deployment_sa_email}"
 }
 
+# Create a dedicated management service account for steady-state write operations.
+# This is the execution identity Terraform can impersonate once a source GCP
+# credential is available; eliminating that source credential dependency
+# requires the separate federation work.
+resource "google_service_account" "insideout_management" {
+  count = local.is_gcp ? 1 : 0
+
+  account_id   = local.gcp_management_sa_id
+  display_name = "InsideOut Management - ${var.project_id}"
+  description  = "Project-scoped management service account for impersonated InsideOut Terraform operations"
+  project      = var.gcp_project_id
+}
+
+# Broad v1 write access for Terraform when Oracle impersonates this service
+# account from another valid GCP source credential.
+resource "google_project_iam_member" "management_owner" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/owner"
+  member  = "serviceAccount:${google_service_account.insideout_management[0].email}"
+}
+
+# Allow the deployment SA from the uploaded GCP credentials to impersonate the
+# management SA for write access.
+resource "google_service_account_iam_member" "management_token_creator" {
+  count = local.is_gcp ? 1 : 0
+
+  service_account_id = google_service_account.insideout_management[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${local.gcp_deployment_sa_email}"
+}
+
 # ============================================================================
 # Outputs
 # ============================================================================
@@ -148,3 +184,12 @@ output "gcp_inspector_sa_id" {
   value       = local.is_gcp ? local.gcp_inspector_sa_id_out : ""
 }
 
+output "gcp_management_sa_email" {
+  description = "Email of the GCP management service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_management_sa_email : ""
+}
+
+output "gcp_management_sa_id" {
+  description = "ID of the GCP management service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_management_sa_id_out : ""
+}
