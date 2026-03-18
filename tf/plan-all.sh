@@ -12,8 +12,7 @@
 #   outputs/plan-summary.json    Aggregated change counts across all stages
 #
 # Exit codes:
-#   0 — All stages planned successfully, no changes in any stage
-#   2 — All stages planned successfully, changes exist in at least one stage
+#   0 — All stages planned successfully (changes reported in plan-summary.json)
 #   1 — At least one stage failed to plan
 
 set -euo pipefail
@@ -172,8 +171,6 @@ echo "$summary" | jq '.'
 # Exit codes
 if [[ "$had_error" == "true" ]]; then
   exit 1
-elif [[ "$had_changes" == "true" ]]; then
-  exit 2
 else
   exit 0
 fi
