@@ -20,6 +20,8 @@ set -euo pipefail
 #  15. Repo mode with commit SHA ref (SSH auth)
 #  16. Re-deploy: cached repo respects CUSTOM_REF
 #  17. Re-deploy: graceful fallback when ref doesn't exist
+#  18. Re-deploy: graceful skip when cached .git has no remotes
+#  19. Re-deploy: graceful fallback when fetch fails on cached repo
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -423,8 +425,11 @@ echo "Test 11: Cached .git fetches and resets to latest..."
 EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
 EXISTING_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
 
-# Sanity: the bare repo has advanced past the project's HEAD
-if [[ "$EXISTING_HEAD" != "$EXPECTED_HEAD" ]]; then
+# Hard precondition: bare repo must have advanced past the project's HEAD
+if [[ "$EXISTING_HEAD" == "$EXPECTED_HEAD" ]]; then
+  fail "re-deploy: TEST SETUP BROKEN - bare repo HEAD did not advance"
+  echo "  SKIP: skipping dependent assertions" >&2
+else
   (
     cd "$REDEPLOY_PROJECT"
     export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
@@ -441,8 +446,6 @@ if [[ "$EXISTING_HEAD" != "$EXPECTED_HEAD" ]]; then
   else
     fail "re-deploy: HEAD did not advance (expected $EXPECTED_HEAD, got $NEW_HEAD)"
   fi
-else
-  fail "re-deploy: bare repo HEAD did not advance (test setup broken)"
 fi
 
 # 12. No-op when repo_clone_ssh_url is empty
@@ -669,6 +672,14 @@ else
   fail "cached repo: branch-marker.txt not found or wrong content (CUSTOM_REF not respected)"
 fi
 
+EXPECTED_BRANCH_HEAD="$(git -C "$INFRA_BARE" rev-parse refs/heads/feature/test-branch)"
+ACTUAL_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+if [[ "$ACTUAL_HEAD" == "$EXPECTED_BRANCH_HEAD" ]]; then
+  pass "cached repo: HEAD matches feature branch tip"
+else
+  fail "cached repo: HEAD is $ACTUAL_HEAD (expected $EXPECTED_BRANCH_HEAD)"
+fi
+
 # --- Test 17: Graceful fallback when ref doesn't exist ---
 echo ""
 echo "Test 17: Graceful fallback when ref doesn't exist..."
@@ -705,7 +716,7 @@ else
   fail "fallback: script exited $fallback_rc (expected 0)"
 fi
 
-if echo "$fallback_output" | grep -q "WARNING.*ref.*not found"; then
+if echo "$fallback_output" | grep -q "WARNING.*ref 'nonexistent/branch-that-does-not-exist' not found"; then
   pass "fallback: warning logged for nonexistent ref"
 else
   fail "fallback: expected warning about ref not found in output"
@@ -716,6 +727,123 @@ if [[ "$BEFORE_HEAD" == "$AFTER_HEAD" ]]; then
   pass "fallback: HEAD unchanged when ref doesn't exist"
 else
   fail "fallback: HEAD changed unexpectedly (was $BEFORE_HEAD, now $AFTER_HEAD)"
+fi
+
+# --- Test 18: Graceful skip when cached .git has no remotes ---
+echo ""
+echo "Test 18: Graceful skip when cached .git has no remotes..."
+
+NOREMOTE_PROJECT="$WORKDIR/noremote-project"
+mkdir -p "$NOREMOTE_PROJECT/tf/auto-vars"
+mkdir -p "$NOREMOTE_PROJECT/tf/custom-stack-provision"
+mkdir -p "$NOREMOTE_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$NOREMOTE_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+echo '{}' > "$NOREMOTE_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cp "$SCRIPT_DIR/shell_utils.sh" "$NOREMOTE_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$NOREMOTE_PROJECT/prepare-custom-stack.sh"
+
+# Initialize a .git with no remotes
+(cd "$NOREMOTE_PROJECT" && git init -q -b main && git add -A && git commit -q -m "init")
+(cd "$NOREMOTE_PROJECT" && git remote remove origin 2>/dev/null || true)
+
+NOREMOTE_ARCHIVE_DIR="$WORKDIR/noremote-archive"
+mkdir -p "$NOREMOTE_ARCHIVE_DIR"
+echo "noremote-main" > "$NOREMOTE_ARCHIVE_DIR/main.tf"
+NOREMOTE_TGZ="$WORKDIR/noremote-payload.tgz"
+tar -czf "$NOREMOTE_TGZ" -C "$NOREMOTE_ARCHIVE_DIR" .
+NOREMOTE_B64="$(base64 < "$NOREMOTE_TGZ")"
+
+NOREMOTE_HEAD="$(cd "$NOREMOTE_PROJECT" && git rev-parse HEAD)"
+
+noremote_output="$(
+  cd "$NOREMOTE_PROJECT"
+  export MARS_PROJECT_ROOT="$NOREMOTE_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$NOREMOTE_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh 2>&1
+)"
+noremote_rc=$?
+
+if [[ $noremote_rc -eq 0 ]]; then
+  pass "no-remote: script exits 0"
+else
+  fail "no-remote: script exited $noremote_rc (expected 0)"
+fi
+
+if echo "$noremote_output" | grep -q "WARNING.*no infra or origin remote"; then
+  pass "no-remote: warning logged about missing remotes"
+else
+  fail "no-remote: expected 'no infra or origin remote' warning"
+fi
+
+NOREMOTE_AFTER="$(cd "$NOREMOTE_PROJECT" && git rev-parse HEAD)"
+if [[ "$NOREMOTE_HEAD" == "$NOREMOTE_AFTER" ]]; then
+  pass "no-remote: HEAD unchanged"
+else
+  fail "no-remote: HEAD changed unexpectedly"
+fi
+
+# --- Test 19: Graceful fallback when fetch fails on cached repo ---
+echo ""
+echo "Test 19: Graceful fallback when fetch fails on cached repo..."
+
+FETCHFAIL_PROJECT="$WORKDIR/fetchfail-project"
+mkdir -p "$FETCHFAIL_PROJECT/tf/auto-vars"
+mkdir -p "$FETCHFAIL_PROJECT/tf/custom-stack-provision"
+mkdir -p "$FETCHFAIL_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$FETCHFAIL_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+echo '{}' > "$FETCHFAIL_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cp "$SCRIPT_DIR/shell_utils.sh" "$FETCHFAIL_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$FETCHFAIL_PROJECT/prepare-custom-stack.sh"
+
+# Initialize .git with a remote pointing to a dead URL
+(cd "$FETCHFAIL_PROJECT" && git init -q -b main && git add -A && git commit -q -m "init")
+(cd "$FETCHFAIL_PROJECT" && git remote remove origin 2>/dev/null || true)
+(cd "$FETCHFAIL_PROJECT" && git remote add infra "file:///nonexistent/dead-repo.git")
+
+FETCHFAIL_ARCHIVE_DIR="$WORKDIR/fetchfail-archive"
+mkdir -p "$FETCHFAIL_ARCHIVE_DIR"
+echo "fetchfail-main" > "$FETCHFAIL_ARCHIVE_DIR/main.tf"
+FETCHFAIL_TGZ="$WORKDIR/fetchfail-payload.tgz"
+tar -czf "$FETCHFAIL_TGZ" -C "$FETCHFAIL_ARCHIVE_DIR" .
+FETCHFAIL_B64="$(base64 < "$FETCHFAIL_TGZ")"
+
+FETCHFAIL_HEAD="$(cd "$FETCHFAIL_PROJECT" && git rev-parse HEAD)"
+
+fetchfail_output="$(
+  cd "$FETCHFAIL_PROJECT"
+  export MARS_PROJECT_ROOT="$FETCHFAIL_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$FETCHFAIL_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh 2>&1
+)"
+fetchfail_rc=$?
+
+if [[ $fetchfail_rc -eq 0 ]]; then
+  pass "fetch-fail: script exits 0"
+else
+  fail "fetch-fail: script exited $fetchfail_rc (expected 0)"
+fi
+
+if echo "$fetchfail_output" | grep -q "WARNING.*git fetch failed"; then
+  pass "fetch-fail: warning logged about fetch failure"
+else
+  fail "fetch-fail: expected 'git fetch failed' warning"
+fi
+
+FETCHFAIL_AFTER="$(cd "$FETCHFAIL_PROJECT" && git rev-parse HEAD)"
+if [[ "$FETCHFAIL_HEAD" == "$FETCHFAIL_AFTER" ]]; then
+  pass "fetch-fail: HEAD unchanged"
+else
+  fail "fetch-fail: HEAD changed unexpectedly"
 fi
 
 # --- Summary ---
