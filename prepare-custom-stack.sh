@@ -93,6 +93,15 @@ ensure_git_from_infra() {
     local ref="${CUSTOM_REF:-main}"
     local fetch_err
     if fetch_err="$(git fetch "$remote" 2>&1)"; then
+      # Preserve overlay files (auto-vars, secrets) that the workflow wrote
+      # into the working tree before this step — git reset --hard would
+      # revert them to their committed (empty) state.
+      local tmp_overlay
+      tmp_overlay="$(mktemp -d)"
+      if [[ -d "$MARS_PROJECT_ROOT/tf/auto-vars" ]]; then
+        cp -a "$MARS_PROJECT_ROOT/tf/auto-vars" "$tmp_overlay/auto-vars"
+      fi
+
       if is_commit_sha "$ref"; then
         git reset --hard "$ref" 2>/dev/null || log "WARNING: failed to reset to $ref"
       elif git rev-parse --verify "$remote/$ref" >/dev/null 2>&1; then
@@ -100,6 +109,12 @@ ensure_git_from_infra() {
       else
         log "WARNING: ref '$ref' not found on remote '$remote'; continuing with cached version"
       fi
+
+      # Restore overlay files
+      if [[ -d "$tmp_overlay/auto-vars" ]]; then
+        cp -a "$tmp_overlay/auto-vars"/* "$MARS_PROJECT_ROOT/tf/auto-vars/" 2>/dev/null || true
+      fi
+      rm -rf "$tmp_overlay"
     else
       log "WARNING: git fetch failed; continuing with cached version: $fetch_err"
     fi
