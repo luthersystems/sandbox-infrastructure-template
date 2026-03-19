@@ -884,6 +884,13 @@ environment: production
 cloud_provider: aws
 region: us-east-1
 EOF
+cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" <<'EOF'
+phylum_version: "1.2.3"
+substrate_chaincode_version: "4.5.6"
+EOF
+
+# Record expected HEAD after fetch+reset
+OVERLAY_EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
 
 OVERLAY_ARCHIVE_DIR="$WORKDIR/overlay-archive"
 mkdir -p "$OVERLAY_ARCHIVE_DIR"
@@ -915,16 +922,34 @@ else
   fail "overlay: auto-vars file missing after reset"
 fi
 
-# Verify env.yaml survived the reset
+# Verify env.yaml survived the reset (check exact value, not just key presence)
 if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" ]]; then
-  overlay_env="$(grep -c 'cloud_provider' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" || true)"
-  if [[ "$overlay_env" -ge 1 ]]; then
-    pass "overlay: env.yaml preserved through git reset (workflow values intact)"
+  if grep -q 'region: us-east-1' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml"; then
+    pass "overlay: env.yaml preserved through git reset (region: us-east-1 intact)"
   else
-    fail "overlay: env.yaml reverted to placeholder"
+    fail "overlay: env.yaml reverted — expected 'region: us-east-1'"
   fi
 else
   fail "overlay: env.yaml missing after reset"
+fi
+
+# Verify version.yaml survived the reset
+if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" ]]; then
+  if grep -q 'phylum_version: "1.2.3"' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml"; then
+    pass "overlay: version.yaml preserved through git reset (phylum_version intact)"
+  else
+    fail "overlay: version.yaml reverted — expected phylum_version '1.2.3'"
+  fi
+else
+  fail "overlay: version.yaml missing after reset"
+fi
+
+# Verify HEAD actually advanced (proves reset ran, not just a no-op)
+OVERLAY_ACTUAL_HEAD="$(cd "$OVERLAY_PROJECT" && git rev-parse HEAD)"
+if [[ "$OVERLAY_ACTUAL_HEAD" == "$OVERLAY_EXPECTED_HEAD" ]]; then
+  pass "overlay: HEAD advanced to latest (reset ran while overlays preserved)"
+else
+  fail "overlay: HEAD is $OVERLAY_ACTUAL_HEAD (expected $OVERLAY_EXPECTED_HEAD)"
 fi
 
 # --- Summary ---
