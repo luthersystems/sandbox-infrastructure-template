@@ -91,7 +91,8 @@ ensure_git_from_infra() {
     fi
 
     local ref="${CUSTOM_REF:-main}"
-    if git fetch "$remote" 2>/dev/null; then
+    local fetch_err
+    if fetch_err="$(git fetch "$remote" 2>&1)"; then
       if is_commit_sha "$ref"; then
         git reset --hard "$ref" 2>/dev/null || log "WARNING: failed to reset to $ref"
       elif git rev-parse --verify "$remote/$ref" >/dev/null 2>&1; then
@@ -100,7 +101,7 @@ ensure_git_from_infra() {
         log "WARNING: ref '$ref' not found on remote '$remote'; continuing with cached version"
       fi
     else
-      log "WARNING: git fetch failed; continuing with cached version"
+      log "WARNING: git fetch failed; continuing with cached version: $fetch_err"
     fi
 
     popd >/dev/null
