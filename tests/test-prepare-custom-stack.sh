@@ -22,6 +22,7 @@ set -euo pipefail
 #  17. Re-deploy: graceful fallback when ref doesn't exist
 #  18. Re-deploy: graceful skip when cached .git has no remotes
 #  19. Re-deploy: graceful fallback when fetch fails on cached repo
+#  20. Re-deploy: workflow overlay files (auto-vars, env.yaml) survive git reset
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -844,6 +845,111 @@ if [[ "$FETCHFAIL_HEAD" == "$FETCHFAIL_AFTER" ]]; then
   pass "fetch-fail: HEAD unchanged"
 else
   fail "fetch-fail: HEAD changed unexpectedly"
+fi
+
+# --- Test 20: Workflow overlay files survive git reset ---
+echo ""
+echo "Test 20: Workflow overlay files survive git reset..."
+
+# Set up a project with .git from infra, then write workflow-populated overlays
+OVERLAY_PROJECT="$WORKDIR/overlay-project"
+mkdir -p "$OVERLAY_PROJECT/tf/auto-vars"
+mkdir -p "$OVERLAY_PROJECT/tf/custom-stack-provision"
+mkdir -p "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+echo '{}' > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cp "$SCRIPT_DIR/shell_utils.sh" "$OVERLAY_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$OVERLAY_PROJECT/prepare-custom-stack.sh"
+
+# Clone infra repo to get .git, then commit everything so overlay
+# modifications show up as dirty tracked files
+(
+  cd "$OVERLAY_PROJECT"
+  tmp_clone="$(mktemp -d)"
+  git clone -q "file://$INFRA_BARE" "$tmp_clone/repo"
+  mv "$tmp_clone/repo/.git" "$OVERLAY_PROJECT/.git"
+  rm -rf "$tmp_clone"
+  git remote rename origin infra 2>/dev/null || true
+  git add -A
+  git commit -q -m "add project files"
+)
+
+# Simulate workflow writing real values into overlay files
+jq -n '{"bootstrap_state_bucket": "my-real-bucket", "repo_clone_ssh_url": "file:///some/repo.git"}' \
+  > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: production
+cloud_provider: aws
+region: us-east-1
+EOF
+cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" <<'EOF'
+phylum_version: "1.2.3"
+substrate_chaincode_version: "4.5.6"
+EOF
+
+# Record expected HEAD after fetch+reset
+OVERLAY_EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
+
+OVERLAY_ARCHIVE_DIR="$WORKDIR/overlay-archive"
+mkdir -p "$OVERLAY_ARCHIVE_DIR"
+echo "overlay-main" > "$OVERLAY_ARCHIVE_DIR/main.tf"
+OVERLAY_TGZ="$WORKDIR/overlay-payload.tgz"
+tar -czf "$OVERLAY_TGZ" -C "$OVERLAY_ARCHIVE_DIR" .
+OVERLAY_B64="$(base64 < "$OVERLAY_TGZ")"
+
+# Run prepare-custom-stack — this will fetch + stash + reset + restore
+(
+  cd "$OVERLAY_PROJECT"
+  export MARS_PROJECT_ROOT="$OVERLAY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$OVERLAY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+# Verify auto-vars survived the reset
+if [[ -f "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json" ]]; then
+  overlay_bucket="$(jq -r '.bootstrap_state_bucket // empty' "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json")"
+  if [[ "$overlay_bucket" == "my-real-bucket" ]]; then
+    pass "overlay: auto-vars preserved through git reset (bootstrap_state_bucket intact)"
+  else
+    fail "overlay: auto-vars reverted — bootstrap_state_bucket is '$overlay_bucket' (expected 'my-real-bucket')"
+  fi
+else
+  fail "overlay: auto-vars file missing after reset"
+fi
+
+# Verify env.yaml survived the reset (check exact value, not just key presence)
+if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" ]]; then
+  if grep -q 'region: us-east-1' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml"; then
+    pass "overlay: env.yaml preserved through git reset (region: us-east-1 intact)"
+  else
+    fail "overlay: env.yaml reverted — expected 'region: us-east-1'"
+  fi
+else
+  fail "overlay: env.yaml missing after reset"
+fi
+
+# Verify version.yaml survived the reset
+if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" ]]; then
+  if grep -q 'phylum_version: "1.2.3"' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml"; then
+    pass "overlay: version.yaml preserved through git reset (phylum_version intact)"
+  else
+    fail "overlay: version.yaml reverted — expected phylum_version '1.2.3'"
+  fi
+else
+  fail "overlay: version.yaml missing after reset"
+fi
+
+# Verify HEAD actually advanced (proves reset ran, not just a no-op)
+OVERLAY_ACTUAL_HEAD="$(cd "$OVERLAY_PROJECT" && git rev-parse HEAD)"
+if [[ "$OVERLAY_ACTUAL_HEAD" == "$OVERLAY_EXPECTED_HEAD" ]]; then
+  pass "overlay: HEAD advanced to latest (reset ran while overlays preserved)"
+else
+  fail "overlay: HEAD is $OVERLAY_ACTUAL_HEAD (expected $OVERLAY_EXPECTED_HEAD)"
 fi
 
 # --- Summary ---
