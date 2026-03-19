@@ -68,58 +68,12 @@ for pat in "${PRESERVE_PATTERNS[@]}"; do
 done
 RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.lock.hcl')
 
-# Detect 40-char hex commit SHAs (git clone --branch doesn't support them)
-is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
-
 # --- Re-deploy: initialize git from infra repo if needed ----------------------------------------
 # On re-deploy the working directory is an extracted archive (no .git/).
 # Clone the infra repo so that apply.sh's gitCommit/gitPushInfra will work.
 ensure_git_from_infra() {
   if [[ -e "$MARS_PROJECT_ROOT/.git" ]]; then
-    log "Git repo already exists; fetching latest..."
-    pushd "$MARS_PROJECT_ROOT" >/dev/null
-
-    # Determine remote (infra if renamed, else origin)
-    local remote="infra"
-    if ! git remote get-url infra >/dev/null 2>&1; then
-      remote="origin"
-      if ! git remote get-url origin >/dev/null 2>&1; then
-        log "WARNING: no infra or origin remote; skipping fetch"
-        popd >/dev/null
-        return 0
-      fi
-    fi
-
-    local ref="${CUSTOM_REF:-main}"
-    local fetch_err
-    if fetch_err="$(git fetch "$remote" 2>&1)"; then
-      # Stash dirty tracked files (auto-vars, env.yaml, version.yaml,
-      # etc.) that the workflow wrote before this step — git reset --hard
-      # would revert them to their committed (placeholder) state.
-      local stashed=false
-      if ! git diff --quiet HEAD 2>/dev/null; then
-        git stash push -q -m "prepare-custom-stack overlay preserve" 2>/dev/null && stashed=true
-      fi
-
-      if is_commit_sha "$ref"; then
-        git reset --hard "$ref" 2>/dev/null || log "WARNING: failed to reset to $ref"
-      elif git rev-parse --verify "$remote/$ref" >/dev/null 2>&1; then
-        git reset --hard "$remote/$ref" 2>/dev/null || log "WARNING: failed to reset to $remote/$ref"
-      else
-        log "WARNING: ref '$ref' not found on remote '$remote'; continuing with cached version"
-      fi
-
-      # Restore overlay files — use checkout instead of pop to avoid
-      # merge conflicts when the reset moved to a different commit.
-      if [[ "$stashed" == true ]]; then
-        git checkout stash@{0} -- . 2>/dev/null || log "WARNING: failed to restore stashed overlay files"
-        git stash drop -q 2>/dev/null || true
-      fi
-    else
-      log "WARNING: git fetch failed; continuing with cached version: $fetch_err"
-    fi
-
-    popd >/dev/null
+    log "Git repo already exists; skipping infra clone"
     return 0
   fi
 
@@ -217,6 +171,9 @@ if [[ -z "$CUSTOM_REPO_URL" || "$CUSTOM_REPO_URL" == "null" ]]; then
 fi
 
 git config --global advice.detachedHead false || true
+
+# Detect 40-char hex commit SHAs (git clone --branch doesn't support them)
+is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 
 git_clone_with_token() {
   local url="$1" ref="$2" dest="$3"
