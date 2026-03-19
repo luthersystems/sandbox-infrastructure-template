@@ -22,7 +22,7 @@ set -euo pipefail
 #  17. Re-deploy: graceful fallback when ref doesn't exist
 #  18. Re-deploy: graceful skip when cached .git has no remotes
 #  19. Re-deploy: graceful fallback when fetch fails on cached repo
-#  20. Re-deploy: auto-vars overlay files survive git reset
+#  20. Re-deploy: workflow overlay files (auto-vars, env.yaml) survive git reset
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -847,11 +847,11 @@ else
   fail "fetch-fail: HEAD changed unexpectedly"
 fi
 
-# --- Test 20: Auto-vars overlay files survive git reset ---
+# --- Test 20: Workflow overlay files survive git reset ---
 echo ""
-echo "Test 20: Auto-vars overlay files survive git reset..."
+echo "Test 20: Workflow overlay files survive git reset..."
 
-# Set up a project with .git from infra, then write workflow-populated auto-vars
+# Set up a project with .git from infra, then write workflow-populated overlays
 OVERLAY_PROJECT="$WORKDIR/overlay-project"
 mkdir -p "$OVERLAY_PROJECT/tf/auto-vars"
 mkdir -p "$OVERLAY_PROJECT/tf/custom-stack-provision"
@@ -863,21 +863,27 @@ echo '{}' > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
 cp "$SCRIPT_DIR/shell_utils.sh" "$OVERLAY_PROJECT/shell_utils.sh"
 cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$OVERLAY_PROJECT/prepare-custom-stack.sh"
 
-# Clone infra repo to get .git
+# Clone infra repo to get .git, then commit everything so overlay
+# modifications show up as dirty tracked files
 (
   cd "$OVERLAY_PROJECT"
-  export MARS_PROJECT_ROOT="$OVERLAY_PROJECT"
-  . "$OVERLAY_PROJECT/shell_utils.sh"
   tmp_clone="$(mktemp -d)"
   git clone -q "file://$INFRA_BARE" "$tmp_clone/repo"
   mv "$tmp_clone/repo/.git" "$OVERLAY_PROJECT/.git"
   rm -rf "$tmp_clone"
   git remote rename origin infra 2>/dev/null || true
+  git add -A
+  git commit -q -m "add project files"
 )
 
-# Simulate workflow writing real values into auto-vars (overlay files)
+# Simulate workflow writing real values into overlay files
 jq -n '{"bootstrap_state_bucket": "my-real-bucket", "repo_clone_ssh_url": "file:///some/repo.git"}' \
   > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: production
+cloud_provider: aws
+region: us-east-1
+EOF
 
 OVERLAY_ARCHIVE_DIR="$WORKDIR/overlay-archive"
 mkdir -p "$OVERLAY_ARCHIVE_DIR"
@@ -886,7 +892,7 @@ OVERLAY_TGZ="$WORKDIR/overlay-payload.tgz"
 tar -czf "$OVERLAY_TGZ" -C "$OVERLAY_ARCHIVE_DIR" .
 OVERLAY_B64="$(base64 < "$OVERLAY_TGZ")"
 
-# Run prepare-custom-stack — this will fetch + reset
+# Run prepare-custom-stack — this will fetch + stash + reset + pop
 (
   cd "$OVERLAY_PROJECT"
   export MARS_PROJECT_ROOT="$OVERLAY_PROJECT"
@@ -907,6 +913,18 @@ if [[ -f "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json" ]]; then
   fi
 else
   fail "overlay: auto-vars file missing after reset"
+fi
+
+# Verify env.yaml survived the reset
+if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" ]]; then
+  overlay_env="$(grep -c 'cloud_provider' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" || true)"
+  if [[ "$overlay_env" -ge 1 ]]; then
+    pass "overlay: env.yaml preserved through git reset (workflow values intact)"
+  else
+    fail "overlay: env.yaml reverted to placeholder"
+  fi
+else
+  fail "overlay: env.yaml missing after reset"
 fi
 
 # --- Summary ---

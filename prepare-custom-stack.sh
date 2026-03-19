@@ -93,13 +93,12 @@ ensure_git_from_infra() {
     local ref="${CUSTOM_REF:-main}"
     local fetch_err
     if fetch_err="$(git fetch "$remote" 2>&1)"; then
-      # Preserve overlay files (auto-vars, secrets) that the workflow wrote
-      # into the working tree before this step — git reset --hard would
-      # revert them to their committed (empty) state.
-      local tmp_overlay
-      tmp_overlay="$(mktemp -d)"
-      if [[ -d "$MARS_PROJECT_ROOT/tf/auto-vars" ]]; then
-        cp -a "$MARS_PROJECT_ROOT/tf/auto-vars" "$tmp_overlay/auto-vars"
+      # Stash dirty tracked files (auto-vars, env.yaml, version.yaml,
+      # etc.) that the workflow wrote before this step — git reset --hard
+      # would revert them to their committed (placeholder) state.
+      local stashed=false
+      if ! git diff --quiet HEAD 2>/dev/null; then
+        git stash push -q -m "prepare-custom-stack overlay preserve" 2>/dev/null && stashed=true
       fi
 
       if is_commit_sha "$ref"; then
@@ -110,11 +109,12 @@ ensure_git_from_infra() {
         log "WARNING: ref '$ref' not found on remote '$remote'; continuing with cached version"
       fi
 
-      # Restore overlay files
-      if [[ -d "$tmp_overlay/auto-vars" ]]; then
-        cp -a "$tmp_overlay/auto-vars"/* "$MARS_PROJECT_ROOT/tf/auto-vars/" 2>/dev/null || true
+      # Restore overlay files — use checkout instead of pop to avoid
+      # merge conflicts when the reset moved to a different commit.
+      if [[ "$stashed" == true ]]; then
+        git checkout stash@{0} -- . 2>/dev/null || log "WARNING: failed to restore stashed overlay files"
+        git stash drop -q 2>/dev/null || true
       fi
-      rm -rf "$tmp_overlay"
     else
       log "WARNING: git fetch failed; continuing with cached version: $fetch_err"
     fi
