@@ -13,11 +13,13 @@ set -euo pipefail
 #   8. Dotglob: dotfile preserve patterns restored correctly
 #   9. Re-deploy: .git/ created from infra repo when repo_clone_ssh_url is set
 #  10. Re-deploy: gitCommit succeeds after ensure_git_from_infra runs
-#  11. Re-deploy: no-op when .git/ already exists
+#  11. Re-deploy: cached .git fetches and resets to latest
 #  12. Re-deploy: no-op when repo_clone_ssh_url is empty
 #  13. Re-deploy: graceful degradation when clone fails (nonexistent repo)
 #  14. Repo mode with commit SHA ref (token auth)
 #  15. Repo mode with commit SHA ref (SSH auth)
+#  16. Re-deploy: cached repo respects CUSTOM_REF
+#  17. Re-deploy: graceful fallback when ref doesn't exist
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -402,27 +404,45 @@ else
   fail "re-deploy: working tree still has uncommitted changes after gitCommit"
 fi
 
-# 11. No-op when .git/ already exists
+# 11. Cached .git fetches and resets to latest
 echo ""
-echo "Test 11: No-op when .git/ already exists..."
+echo "Test 11: Cached .git fetches and resets to latest..."
 
-# Re-run prepare-custom-stack on the same project (which now has .git/)
-EXISTING_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+# Add a new commit to the bare infra repo so HEAD advances
 (
-  cd "$REDEPLOY_PROJECT"
-  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF=""
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh
-) 2>&1 | sed 's/^/  | /'
+  INFRA_WORK="$(mktemp -d)"
+  git clone -q "$INFRA_BARE" "$INFRA_WORK/repo"
+  cd "$INFRA_WORK/repo"
+  echo "updated-readme" > README.md
+  git add -A
+  git commit -q -m "second infra commit"
+  git push -q origin main
+  rm -rf "$INFRA_WORK"
+)
 
-NEW_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
-if [[ "$EXISTING_HEAD" == "$NEW_HEAD" ]]; then
-  pass "re-deploy: ensure_git_from_infra is no-op when .git/ exists"
+EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
+EXISTING_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+
+# Sanity: the bare repo has advanced past the project's HEAD
+if [[ "$EXISTING_HEAD" != "$EXPECTED_HEAD" ]]; then
+  (
+    cd "$REDEPLOY_PROJECT"
+    export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+    export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+    export CUSTOM_REPO_URL=""
+    export CUSTOM_REF=""
+    export CUSTOM_AUTH=""
+    bash prepare-custom-stack.sh
+  ) 2>&1 | sed 's/^/  | /'
+
+  NEW_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+  if [[ "$NEW_HEAD" == "$EXPECTED_HEAD" ]]; then
+    pass "re-deploy: HEAD advanced to latest infra commit after fetch+reset"
+  else
+    fail "re-deploy: HEAD did not advance (expected $EXPECTED_HEAD, got $NEW_HEAD)"
+  fi
 else
-  fail "re-deploy: HEAD changed unexpectedly (clone ran when .git/ existed)"
+  fail "re-deploy: bare repo HEAD did not advance (test setup broken)"
 fi
 
 # 12. No-op when repo_clone_ssh_url is empty
@@ -601,6 +621,101 @@ if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existin
   pass "SHA ref (ssh): preserved files intact"
 else
   fail "SHA ref (ssh): preserved files not intact"
+fi
+
+# --- Test 16: Cached repo respects CUSTOM_REF ---
+echo ""
+echo "Test 16: Cached repo respects CUSTOM_REF..."
+
+# Create a feature branch on the bare infra repo with a distinct file
+(
+  BRANCH_WORK="$(mktemp -d)"
+  git clone -q "$INFRA_BARE" "$BRANCH_WORK/repo"
+  cd "$BRANCH_WORK/repo"
+  git checkout -q -b feature/test-branch
+  echo "branch-only-content" > branch-marker.txt
+  git add -A
+  git commit -q -m "add branch marker"
+  git push -q origin feature/test-branch
+  rm -rf "$BRANCH_WORK"
+)
+
+# Restore project structure (git reset --hard in test 11 may have removed files)
+mkdir -p "$REDEPLOY_PROJECT/tf/auto-vars"
+mkdir -p "$REDEPLOY_PROJECT/tf/custom-stack-provision"
+mkdir -p "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+jq -n --arg url "file://$INFRA_BARE" '{"repo_clone_ssh_url": $url}' \
+  > "$REDEPLOY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cp "$SCRIPT_DIR/shell_utils.sh" "$REDEPLOY_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$REDEPLOY_PROJECT/prepare-custom-stack.sh"
+
+# Re-run prepare-custom-stack with CUSTOM_REF pointing to the feature branch
+(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF="feature/test-branch"
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
+
+if [[ -f "$REDEPLOY_PROJECT/branch-marker.txt" ]] && [[ "$(cat "$REDEPLOY_PROJECT/branch-marker.txt")" == "branch-only-content" ]]; then
+  pass "cached repo: CUSTOM_REF checked out feature branch content"
+else
+  fail "cached repo: branch-marker.txt not found or wrong content (CUSTOM_REF not respected)"
+fi
+
+# --- Test 17: Graceful fallback when ref doesn't exist ---
+echo ""
+echo "Test 17: Graceful fallback when ref doesn't exist..."
+
+# Restore project structure
+mkdir -p "$REDEPLOY_PROJECT/tf/auto-vars"
+mkdir -p "$REDEPLOY_PROJECT/tf/custom-stack-provision"
+mkdir -p "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all"
+cat > "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
+environment: test
+EOF
+jq -n --arg url "file://$INFRA_BARE" '{"repo_clone_ssh_url": $url}' \
+  > "$REDEPLOY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
+cp "$SCRIPT_DIR/shell_utils.sh" "$REDEPLOY_PROJECT/shell_utils.sh"
+cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$REDEPLOY_PROJECT/prepare-custom-stack.sh"
+
+# Record HEAD before running with nonexistent ref
+BEFORE_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+
+fallback_output="$(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF="nonexistent/branch-that-does-not-exist"
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh 2>&1
+)"
+fallback_rc=$?
+
+if [[ $fallback_rc -eq 0 ]]; then
+  pass "fallback: script exits 0 with nonexistent ref"
+else
+  fail "fallback: script exited $fallback_rc (expected 0)"
+fi
+
+if echo "$fallback_output" | grep -q "WARNING.*ref.*not found"; then
+  pass "fallback: warning logged for nonexistent ref"
+else
+  fail "fallback: expected warning about ref not found in output"
+fi
+
+AFTER_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+if [[ "$BEFORE_HEAD" == "$AFTER_HEAD" ]]; then
+  pass "fallback: HEAD unchanged when ref doesn't exist"
+else
+  fail "fallback: HEAD changed unexpectedly (was $BEFORE_HEAD, now $AFTER_HEAD)"
 fi
 
 # --- Summary ---

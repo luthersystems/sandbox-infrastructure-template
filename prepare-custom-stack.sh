@@ -68,12 +68,42 @@ for pat in "${PRESERVE_PATTERNS[@]}"; do
 done
 RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.lock.hcl')
 
+# Detect 40-char hex commit SHAs (git clone --branch doesn't support them)
+is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
+
 # --- Re-deploy: initialize git from infra repo if needed ----------------------------------------
 # On re-deploy the working directory is an extracted archive (no .git/).
 # Clone the infra repo so that apply.sh's gitCommit/gitPushInfra will work.
 ensure_git_from_infra() {
   if [[ -e "$MARS_PROJECT_ROOT/.git" ]]; then
-    log "Git repo already exists; skipping infra clone"
+    log "Git repo already exists; fetching latest..."
+    pushd "$MARS_PROJECT_ROOT" >/dev/null
+
+    # Determine remote (infra if renamed, else origin)
+    local remote="infra"
+    if ! git remote get-url infra >/dev/null 2>&1; then
+      remote="origin"
+      if ! git remote get-url origin >/dev/null 2>&1; then
+        log "WARNING: no infra or origin remote; skipping fetch"
+        popd >/dev/null
+        return 0
+      fi
+    fi
+
+    local ref="${CUSTOM_REF:-main}"
+    if git fetch "$remote" 2>/dev/null; then
+      if is_commit_sha "$ref"; then
+        git reset --hard "$ref" 2>/dev/null || log "WARNING: failed to reset to $ref"
+      elif git rev-parse --verify "$remote/$ref" >/dev/null 2>&1; then
+        git reset --hard "$remote/$ref" 2>/dev/null || log "WARNING: failed to reset to $remote/$ref"
+      else
+        log "WARNING: ref '$ref' not found on remote '$remote'; continuing with cached version"
+      fi
+    else
+      log "WARNING: git fetch failed; continuing with cached version"
+    fi
+
+    popd >/dev/null
     return 0
   fi
 
@@ -171,9 +201,6 @@ if [[ -z "$CUSTOM_REPO_URL" || "$CUSTOM_REPO_URL" == "null" ]]; then
 fi
 
 git config --global advice.detachedHead false || true
-
-# Detect 40-char hex commit SHAs (git clone --branch doesn't support them)
-is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 
 git_clone_with_token() {
   local url="$1" ref="$2" dest="$3"
