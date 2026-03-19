@@ -82,6 +82,12 @@ variable "aws_region" {
   default     = ""
 }
 
+variable "bootstrap_state_region" {
+  description = "AWS region where the S3 state bucket lives (falls back to aws_region if empty)"
+  type        = string
+  default     = ""
+}
+
 variable "bootstrap_role" {
   description = "AWS IAM role ARN for Terraform (required for AWS deployments)"
   type        = string
