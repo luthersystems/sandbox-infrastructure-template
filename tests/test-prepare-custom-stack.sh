@@ -13,16 +13,11 @@ set -euo pipefail
 #   8. Dotglob: dotfile preserve patterns restored correctly
 #   9. Re-deploy: .git/ created from infra repo when repo_clone_ssh_url is set
 #  10. Re-deploy: gitCommit succeeds after ensure_git_from_infra runs
-#  11. Re-deploy: cached .git fetches and resets to latest
+#  11. Re-deploy: no-op when .git/ already exists
 #  12. Re-deploy: no-op when repo_clone_ssh_url is empty
 #  13. Re-deploy: graceful degradation when clone fails (nonexistent repo)
 #  14. Repo mode with commit SHA ref (token auth)
 #  15. Repo mode with commit SHA ref (SSH auth)
-#  16. Re-deploy: cached repo respects CUSTOM_REF
-#  17. Re-deploy: graceful fallback when ref doesn't exist
-#  18. Re-deploy: graceful skip when cached .git has no remotes
-#  19. Re-deploy: graceful fallback when fetch fails on cached repo
-#  20. Re-deploy: workflow overlay files (auto-vars, env.yaml) survive git reset
 # Note: Collaborator invites are now handled declaratively via Terraform
 # (github_repository_collaborator resource in tf/cloud-provision/repo.tf).
 
@@ -407,46 +402,27 @@ else
   fail "re-deploy: working tree still has uncommitted changes after gitCommit"
 fi
 
-# 11. Cached .git fetches and resets to latest
+# 11. No-op when .git/ already exists
 echo ""
-echo "Test 11: Cached .git fetches and resets to latest..."
+echo "Test 11: No-op when .git/ already exists..."
 
-# Add a new commit to the bare infra repo so HEAD advances
-(
-  INFRA_WORK="$(mktemp -d)"
-  git clone -q "$INFRA_BARE" "$INFRA_WORK/repo"
-  cd "$INFRA_WORK/repo"
-  echo "updated-readme" > README.md
-  git add -A
-  git commit -q -m "second infra commit"
-  git push -q origin main
-  rm -rf "$INFRA_WORK"
-)
-
-EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
+# Re-run prepare-custom-stack on the same project (which now has .git/)
 EXISTING_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+(
+  cd "$REDEPLOY_PROJECT"
+  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
+  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
+  export CUSTOM_REPO_URL=""
+  export CUSTOM_REF=""
+  export CUSTOM_AUTH=""
+  bash prepare-custom-stack.sh
+) 2>&1 | sed 's/^/  | /'
 
-# Hard precondition: bare repo must have advanced past the project's HEAD
-if [[ "$EXISTING_HEAD" == "$EXPECTED_HEAD" ]]; then
-  fail "re-deploy: TEST SETUP BROKEN - bare repo HEAD did not advance"
-  echo "  SKIP: skipping dependent assertions" >&2
+NEW_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
+if [[ "$EXISTING_HEAD" == "$NEW_HEAD" ]]; then
+  pass "re-deploy: ensure_git_from_infra is no-op when .git/ exists"
 else
-  (
-    cd "$REDEPLOY_PROJECT"
-    export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
-    export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
-    export CUSTOM_REPO_URL=""
-    export CUSTOM_REF=""
-    export CUSTOM_AUTH=""
-    bash prepare-custom-stack.sh
-  ) 2>&1 | sed 's/^/  | /'
-
-  NEW_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
-  if [[ "$NEW_HEAD" == "$EXPECTED_HEAD" ]]; then
-    pass "re-deploy: HEAD advanced to latest infra commit after fetch+reset"
-  else
-    fail "re-deploy: HEAD did not advance (expected $EXPECTED_HEAD, got $NEW_HEAD)"
-  fi
+  fail "re-deploy: HEAD changed unexpectedly (clone ran when .git/ existed)"
 fi
 
 # 12. No-op when repo_clone_ssh_url is empty
@@ -625,331 +601,6 @@ if [[ -f "$TARGET/backend.tf" ]] && [[ "$(cat "$TARGET/backend.tf")" == "existin
   pass "SHA ref (ssh): preserved files intact"
 else
   fail "SHA ref (ssh): preserved files not intact"
-fi
-
-# --- Test 16: Cached repo respects CUSTOM_REF ---
-echo ""
-echo "Test 16: Cached repo respects CUSTOM_REF..."
-
-# Create a feature branch on the bare infra repo with a distinct file
-(
-  BRANCH_WORK="$(mktemp -d)"
-  git clone -q "$INFRA_BARE" "$BRANCH_WORK/repo"
-  cd "$BRANCH_WORK/repo"
-  git checkout -q -b feature/test-branch
-  echo "branch-only-content" > branch-marker.txt
-  git add -A
-  git commit -q -m "add branch marker"
-  git push -q origin feature/test-branch
-  rm -rf "$BRANCH_WORK"
-)
-
-# Restore project structure (git reset --hard in test 11 may have removed files)
-mkdir -p "$REDEPLOY_PROJECT/tf/auto-vars"
-mkdir -p "$REDEPLOY_PROJECT/tf/custom-stack-provision"
-mkdir -p "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all"
-cat > "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: test
-EOF
-jq -n --arg url "file://$INFRA_BARE" '{"repo_clone_ssh_url": $url}' \
-  > "$REDEPLOY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cp "$SCRIPT_DIR/shell_utils.sh" "$REDEPLOY_PROJECT/shell_utils.sh"
-cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$REDEPLOY_PROJECT/prepare-custom-stack.sh"
-
-# Re-run prepare-custom-stack with CUSTOM_REF pointing to the feature branch
-(
-  cd "$REDEPLOY_PROJECT"
-  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF="feature/test-branch"
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh
-) 2>&1 | sed 's/^/  | /'
-
-if [[ -f "$REDEPLOY_PROJECT/branch-marker.txt" ]] && [[ "$(cat "$REDEPLOY_PROJECT/branch-marker.txt")" == "branch-only-content" ]]; then
-  pass "cached repo: CUSTOM_REF checked out feature branch content"
-else
-  fail "cached repo: branch-marker.txt not found or wrong content (CUSTOM_REF not respected)"
-fi
-
-EXPECTED_BRANCH_HEAD="$(git -C "$INFRA_BARE" rev-parse refs/heads/feature/test-branch)"
-ACTUAL_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
-if [[ "$ACTUAL_HEAD" == "$EXPECTED_BRANCH_HEAD" ]]; then
-  pass "cached repo: HEAD matches feature branch tip"
-else
-  fail "cached repo: HEAD is $ACTUAL_HEAD (expected $EXPECTED_BRANCH_HEAD)"
-fi
-
-# --- Test 17: Graceful fallback when ref doesn't exist ---
-echo ""
-echo "Test 17: Graceful fallback when ref doesn't exist..."
-
-# Restore project structure
-mkdir -p "$REDEPLOY_PROJECT/tf/auto-vars"
-mkdir -p "$REDEPLOY_PROJECT/tf/custom-stack-provision"
-mkdir -p "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all"
-cat > "$REDEPLOY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: test
-EOF
-jq -n --arg url "file://$INFRA_BARE" '{"repo_clone_ssh_url": $url}' \
-  > "$REDEPLOY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cp "$SCRIPT_DIR/shell_utils.sh" "$REDEPLOY_PROJECT/shell_utils.sh"
-cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$REDEPLOY_PROJECT/prepare-custom-stack.sh"
-
-# Record HEAD before running with nonexistent ref
-BEFORE_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
-
-fallback_output="$(
-  cd "$REDEPLOY_PROJECT"
-  export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$REDEPLOY_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF="nonexistent/branch-that-does-not-exist"
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh 2>&1
-)"
-fallback_rc=$?
-
-if [[ $fallback_rc -eq 0 ]]; then
-  pass "fallback: script exits 0 with nonexistent ref"
-else
-  fail "fallback: script exited $fallback_rc (expected 0)"
-fi
-
-if echo "$fallback_output" | grep -q "WARNING.*ref 'nonexistent/branch-that-does-not-exist' not found"; then
-  pass "fallback: warning logged for nonexistent ref"
-else
-  fail "fallback: expected warning about ref not found in output"
-fi
-
-AFTER_HEAD="$(cd "$REDEPLOY_PROJECT" && git rev-parse HEAD)"
-if [[ "$BEFORE_HEAD" == "$AFTER_HEAD" ]]; then
-  pass "fallback: HEAD unchanged when ref doesn't exist"
-else
-  fail "fallback: HEAD changed unexpectedly (was $BEFORE_HEAD, now $AFTER_HEAD)"
-fi
-
-# --- Test 18: Graceful skip when cached .git has no remotes ---
-echo ""
-echo "Test 18: Graceful skip when cached .git has no remotes..."
-
-NOREMOTE_PROJECT="$WORKDIR/noremote-project"
-mkdir -p "$NOREMOTE_PROJECT/tf/auto-vars"
-mkdir -p "$NOREMOTE_PROJECT/tf/custom-stack-provision"
-mkdir -p "$NOREMOTE_PROJECT/ansible/inventories/default/group_vars/all"
-cat > "$NOREMOTE_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: test
-EOF
-echo '{}' > "$NOREMOTE_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cp "$SCRIPT_DIR/shell_utils.sh" "$NOREMOTE_PROJECT/shell_utils.sh"
-cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$NOREMOTE_PROJECT/prepare-custom-stack.sh"
-
-# Initialize a .git with no remotes
-(cd "$NOREMOTE_PROJECT" && git init -q -b main && git add -A && git commit -q -m "init")
-(cd "$NOREMOTE_PROJECT" && git remote remove origin 2>/dev/null || true)
-
-NOREMOTE_ARCHIVE_DIR="$WORKDIR/noremote-archive"
-mkdir -p "$NOREMOTE_ARCHIVE_DIR"
-echo "noremote-main" > "$NOREMOTE_ARCHIVE_DIR/main.tf"
-NOREMOTE_TGZ="$WORKDIR/noremote-payload.tgz"
-tar -czf "$NOREMOTE_TGZ" -C "$NOREMOTE_ARCHIVE_DIR" .
-NOREMOTE_B64="$(base64 < "$NOREMOTE_TGZ")"
-
-NOREMOTE_HEAD="$(cd "$NOREMOTE_PROJECT" && git rev-parse HEAD)"
-
-noremote_output="$(
-  cd "$NOREMOTE_PROJECT"
-  export MARS_PROJECT_ROOT="$NOREMOTE_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$NOREMOTE_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF=""
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh 2>&1
-)"
-noremote_rc=$?
-
-if [[ $noremote_rc -eq 0 ]]; then
-  pass "no-remote: script exits 0"
-else
-  fail "no-remote: script exited $noremote_rc (expected 0)"
-fi
-
-if echo "$noremote_output" | grep -q "WARNING.*no infra or origin remote"; then
-  pass "no-remote: warning logged about missing remotes"
-else
-  fail "no-remote: expected 'no infra or origin remote' warning"
-fi
-
-NOREMOTE_AFTER="$(cd "$NOREMOTE_PROJECT" && git rev-parse HEAD)"
-if [[ "$NOREMOTE_HEAD" == "$NOREMOTE_AFTER" ]]; then
-  pass "no-remote: HEAD unchanged"
-else
-  fail "no-remote: HEAD changed unexpectedly"
-fi
-
-# --- Test 19: Graceful fallback when fetch fails on cached repo ---
-echo ""
-echo "Test 19: Graceful fallback when fetch fails on cached repo..."
-
-FETCHFAIL_PROJECT="$WORKDIR/fetchfail-project"
-mkdir -p "$FETCHFAIL_PROJECT/tf/auto-vars"
-mkdir -p "$FETCHFAIL_PROJECT/tf/custom-stack-provision"
-mkdir -p "$FETCHFAIL_PROJECT/ansible/inventories/default/group_vars/all"
-cat > "$FETCHFAIL_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: test
-EOF
-echo '{}' > "$FETCHFAIL_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cp "$SCRIPT_DIR/shell_utils.sh" "$FETCHFAIL_PROJECT/shell_utils.sh"
-cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$FETCHFAIL_PROJECT/prepare-custom-stack.sh"
-
-# Initialize .git with a remote pointing to a dead URL
-(cd "$FETCHFAIL_PROJECT" && git init -q -b main && git add -A && git commit -q -m "init")
-(cd "$FETCHFAIL_PROJECT" && git remote remove origin 2>/dev/null || true)
-(cd "$FETCHFAIL_PROJECT" && git remote add infra "file:///nonexistent/dead-repo.git")
-
-FETCHFAIL_ARCHIVE_DIR="$WORKDIR/fetchfail-archive"
-mkdir -p "$FETCHFAIL_ARCHIVE_DIR"
-echo "fetchfail-main" > "$FETCHFAIL_ARCHIVE_DIR/main.tf"
-FETCHFAIL_TGZ="$WORKDIR/fetchfail-payload.tgz"
-tar -czf "$FETCHFAIL_TGZ" -C "$FETCHFAIL_ARCHIVE_DIR" .
-FETCHFAIL_B64="$(base64 < "$FETCHFAIL_TGZ")"
-
-FETCHFAIL_HEAD="$(cd "$FETCHFAIL_PROJECT" && git rev-parse HEAD)"
-
-fetchfail_output="$(
-  cd "$FETCHFAIL_PROJECT"
-  export MARS_PROJECT_ROOT="$FETCHFAIL_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$FETCHFAIL_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF=""
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh 2>&1
-)"
-fetchfail_rc=$?
-
-if [[ $fetchfail_rc -eq 0 ]]; then
-  pass "fetch-fail: script exits 0"
-else
-  fail "fetch-fail: script exited $fetchfail_rc (expected 0)"
-fi
-
-if echo "$fetchfail_output" | grep -q "WARNING.*git fetch failed"; then
-  pass "fetch-fail: warning logged about fetch failure"
-else
-  fail "fetch-fail: expected 'git fetch failed' warning"
-fi
-
-FETCHFAIL_AFTER="$(cd "$FETCHFAIL_PROJECT" && git rev-parse HEAD)"
-if [[ "$FETCHFAIL_HEAD" == "$FETCHFAIL_AFTER" ]]; then
-  pass "fetch-fail: HEAD unchanged"
-else
-  fail "fetch-fail: HEAD changed unexpectedly"
-fi
-
-# --- Test 20: Workflow overlay files survive git reset ---
-echo ""
-echo "Test 20: Workflow overlay files survive git reset..."
-
-# Set up a project with .git from infra, then write workflow-populated overlays
-OVERLAY_PROJECT="$WORKDIR/overlay-project"
-mkdir -p "$OVERLAY_PROJECT/tf/auto-vars"
-mkdir -p "$OVERLAY_PROJECT/tf/custom-stack-provision"
-mkdir -p "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all"
-cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: test
-EOF
-echo '{}' > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cp "$SCRIPT_DIR/shell_utils.sh" "$OVERLAY_PROJECT/shell_utils.sh"
-cp "$SCRIPT_DIR/prepare-custom-stack.sh" "$OVERLAY_PROJECT/prepare-custom-stack.sh"
-
-# Clone infra repo to get .git, then commit everything so overlay
-# modifications show up as dirty tracked files
-(
-  cd "$OVERLAY_PROJECT"
-  tmp_clone="$(mktemp -d)"
-  git clone -q "file://$INFRA_BARE" "$tmp_clone/repo"
-  mv "$tmp_clone/repo/.git" "$OVERLAY_PROJECT/.git"
-  rm -rf "$tmp_clone"
-  git remote rename origin infra 2>/dev/null || true
-  git add -A
-  git commit -q -m "add project files"
-)
-
-# Simulate workflow writing real values into overlay files
-jq -n '{"bootstrap_state_bucket": "my-real-bucket", "repo_clone_ssh_url": "file:///some/repo.git"}' \
-  > "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json"
-cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
-environment: production
-cloud_provider: aws
-region: us-east-1
-EOF
-cat > "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" <<'EOF'
-phylum_version: "1.2.3"
-substrate_chaincode_version: "4.5.6"
-EOF
-
-# Record expected HEAD after fetch+reset
-OVERLAY_EXPECTED_HEAD="$(git -C "$INFRA_BARE" rev-parse HEAD)"
-
-OVERLAY_ARCHIVE_DIR="$WORKDIR/overlay-archive"
-mkdir -p "$OVERLAY_ARCHIVE_DIR"
-echo "overlay-main" > "$OVERLAY_ARCHIVE_DIR/main.tf"
-OVERLAY_TGZ="$WORKDIR/overlay-payload.tgz"
-tar -czf "$OVERLAY_TGZ" -C "$OVERLAY_ARCHIVE_DIR" .
-OVERLAY_B64="$(base64 < "$OVERLAY_TGZ")"
-
-# Run prepare-custom-stack — this will fetch + stash + reset + restore
-(
-  cd "$OVERLAY_PROJECT"
-  export MARS_PROJECT_ROOT="$OVERLAY_PROJECT"
-  export CUSTOM_ARCHIVE_TGZ="$OVERLAY_B64"
-  export CUSTOM_REPO_URL=""
-  export CUSTOM_REF=""
-  export CUSTOM_AUTH=""
-  bash prepare-custom-stack.sh
-) 2>&1 | sed 's/^/  | /'
-
-# Verify auto-vars survived the reset
-if [[ -f "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json" ]]; then
-  overlay_bucket="$(jq -r '.bootstrap_state_bucket // empty' "$OVERLAY_PROJECT/tf/auto-vars/common.auto.tfvars.json")"
-  if [[ "$overlay_bucket" == "my-real-bucket" ]]; then
-    pass "overlay: auto-vars preserved through git reset (bootstrap_state_bucket intact)"
-  else
-    fail "overlay: auto-vars reverted — bootstrap_state_bucket is '$overlay_bucket' (expected 'my-real-bucket')"
-  fi
-else
-  fail "overlay: auto-vars file missing after reset"
-fi
-
-# Verify env.yaml survived the reset (check exact value, not just key presence)
-if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml" ]]; then
-  if grep -q 'region: us-east-1' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/env.yaml"; then
-    pass "overlay: env.yaml preserved through git reset (region: us-east-1 intact)"
-  else
-    fail "overlay: env.yaml reverted — expected 'region: us-east-1'"
-  fi
-else
-  fail "overlay: env.yaml missing after reset"
-fi
-
-# Verify version.yaml survived the reset
-if [[ -f "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml" ]]; then
-  if grep -q 'phylum_version: "1.2.3"' "$OVERLAY_PROJECT/ansible/inventories/default/group_vars/all/version.yaml"; then
-    pass "overlay: version.yaml preserved through git reset (phylum_version intact)"
-  else
-    fail "overlay: version.yaml reverted — expected phylum_version '1.2.3'"
-  fi
-else
-  fail "overlay: version.yaml missing after reset"
-fi
-
-# Verify HEAD actually advanced (proves reset ran, not just a no-op)
-OVERLAY_ACTUAL_HEAD="$(cd "$OVERLAY_PROJECT" && git rev-parse HEAD)"
-if [[ "$OVERLAY_ACTUAL_HEAD" == "$OVERLAY_EXPECTED_HEAD" ]]; then
-  pass "overlay: HEAD advanced to latest (reset ran while overlays preserved)"
-else
-  fail "overlay: HEAD is $OVERLAY_ACTUAL_HEAD (expected $OVERLAY_EXPECTED_HEAD)"
 fi
 
 # --- Summary ---
