@@ -46,11 +46,6 @@ variable "bootstrap_state_kms_key_id" {
   default = ""
 }
 
-variable "bootstrap_state_region" {
-  type    = string
-  default = ""
-}
-
 variable "eks_version" {
   type    = string
   default = ""
