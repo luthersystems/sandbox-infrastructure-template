@@ -50,6 +50,8 @@ captureOutputs() {
   mkdir -p "$MARS_PROJECT_ROOT/outputs"
   terraform output -json > "$MARS_PROJECT_ROOT/outputs/outputs.json"
   echo "Outputs written to $MARS_PROJECT_ROOT/outputs/outputs.json"
+  cp "$MARS_PROJECT_ROOT/outputs/outputs.json" "$MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
+  echo "Outputs also saved to $MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
 }
 
 if [[ "$check_drift" == "true" ]]; then

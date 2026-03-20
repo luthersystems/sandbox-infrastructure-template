@@ -168,6 +168,18 @@ else
   fail "simple mode: outputs.json content wrong"
 fi
 
+if [[ -f "$PROJECT/outputs/default.json" ]]; then
+  pass "simple mode: lifecycle-specific default.json created"
+else
+  fail "simple mode: lifecycle-specific default.json not created"
+fi
+
+if jq -e '.vpc_id.value == "vpc-123"' "$PROJECT/outputs/default.json" >/dev/null 2>&1; then
+  pass "simple mode: default.json has correct content"
+else
+  fail "simple mode: default.json content wrong"
+fi
+
 # --- Test 2: Drift-check mode runs terraform directly ---
 echo ""
 echo "Test 2: Drift-check mode (no drift)..."
@@ -214,6 +226,18 @@ if jq -e '.vpc_id.value == "vpc-123"' "$PROJECT/outputs/outputs.json" >/dev/null
   pass "drift-check mode: outputs.json has correct content"
 else
   fail "drift-check mode: outputs.json content wrong"
+fi
+
+if [[ -f "$PROJECT/outputs/default.json" ]]; then
+  pass "drift-check mode: lifecycle-specific default.json created"
+else
+  fail "drift-check mode: lifecycle-specific default.json not created"
+fi
+
+if jq -e '.vpc_id.value == "vpc-123"' "$PROJECT/outputs/default.json" >/dev/null 2>&1; then
+  pass "drift-check mode: default.json has correct content"
+else
+  fail "drift-check mode: default.json content wrong"
 fi
 
 # --- Test 3: Drift-check mode + drift detected → exit 2, apply not called ---
@@ -323,6 +347,18 @@ if jq -e '.vpc_id.value == "vpc-123"' "$PROJECT/outputs/outputs.json" >/dev/null
   pass "apply-plan basic: outputs.json has correct content"
 else
   fail "apply-plan basic: outputs.json content wrong"
+fi
+
+if [[ -f "$PROJECT/outputs/default.json" ]]; then
+  pass "apply-plan basic: lifecycle-specific default.json created"
+else
+  fail "apply-plan basic: lifecycle-specific default.json not created"
+fi
+
+if jq -e '.vpc_id.value == "vpc-123"' "$PROJECT/outputs/default.json" >/dev/null 2>&1; then
+  pass "apply-plan basic: default.json has correct content"
+else
+  fail "apply-plan basic: default.json content wrong"
 fi
 
 # --- Test 5: Provider cache cleaned before init ---
