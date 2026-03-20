@@ -3,7 +3,7 @@
 # ============================================================================
 
 provider "aws" {
-  region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
+  region = var.cloud_provider == "aws" ? (var.bootstrap_state_region != "" ? var.bootstrap_state_region : var.aws_region) : "us-west-2"
 
   assume_role {
     role_arn    = var.cloud_provider == "aws" ? var.bootstrap_role : null
@@ -13,7 +13,7 @@ provider "aws" {
 
 provider "aws" {
   alias  = "platform-account"
-  region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
+  region = var.cloud_provider == "aws" ? (var.bootstrap_state_region != "" ? var.bootstrap_state_region : var.aws_region) : "us-west-2"
 }
 
 # ============================================================================
