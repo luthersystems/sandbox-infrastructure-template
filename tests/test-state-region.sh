@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validates that state-access patterns use bootstrap_state_region (not bare
-# var.aws_region) so Terraform connects to the correct S3 region even when
-# aws_region diverges from the actual state bucket location.
+# Validates that downstream remote-state data sources read their region from
+# cloud-provision outputs (not bare var.aws_region), so Terraform connects to
+# the correct S3 state bucket regardless of the project's resource region.
 #
-# Checks:
-#   1. cloud-provision/providers.tf provider region lines use bootstrap_state_region
-#   2. Remote-state data sources in downstream stages read region from the
-#      cloud-provision output, not var.aws_region
+# Note: the AWS *provider* region in cloud-provision/providers.tf must use
+# var.aws_region — that is the project's resource region, NOT the state bucket
+# region. Only backend/remote-state configs need bootstrap_state_region.
 
 PASS=0
 FAIL=0
@@ -19,7 +18,7 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF_DIR="$SCRIPT_DIR/tf"
 
-# --- Check 1: cloud-provision provider region lines ---
+# --- Check 1: cloud-provision provider must use var.aws_region ---
 echo "Checking cloud-provision/providers.tf provider regions..."
 
 PROVIDERS_FILE="$TF_DIR/cloud-provision/providers.tf"
@@ -27,16 +26,16 @@ PROVIDERS_FILE="$TF_DIR/cloud-provision/providers.tf"
 if [[ ! -f "$PROVIDERS_FILE" ]]; then
   fail "cloud-provision/providers.tf not found"
 else
-  # Extract lines that set region inside provider blocks (ignore comments)
-  # A bare 'var.aws_region' without bootstrap_state_region is the bug pattern.
+  # The provider region must use var.aws_region (the project resource region).
+  # Using bootstrap_state_region here is incorrect — that is the state bucket
+  # region, not where resources should be created.
   bad_lines="$(grep -n 'region\s*=' "$PROVIDERS_FILE" \
-    | grep 'var\.aws_region' \
-    | grep -v 'bootstrap_state_region' || true)"
+    | grep 'bootstrap_state_region' || true)"
 
   if [[ -z "$bad_lines" ]]; then
-    pass "cloud-provision/providers.tf: all provider region lines use bootstrap_state_region"
+    pass "cloud-provision/providers.tf: provider region uses var.aws_region (not bootstrap_state_region)"
   else
-    fail "cloud-provision/providers.tf: bare var.aws_region in provider region (should use bootstrap_state_region):"
+    fail "cloud-provision/providers.tf: provider region should use var.aws_region, not bootstrap_state_region:"
     echo "$bad_lines" | sed 's/^/         /'
   fi
 fi
