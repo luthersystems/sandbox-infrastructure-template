@@ -4,7 +4,7 @@ data "terraform_remote_state" "vm_provision" {
   config = {
     bucket               = data.terraform_remote_state.cloud_provision.outputs.state_backend_vm.bucket
     key                  = data.terraform_remote_state.cloud_provision.outputs.state_backend_vm.key
-    region               = var.aws_region
+    region               = data.terraform_remote_state.cloud_provision.outputs.state_backend_vm.region
     workspace_key_prefix = data.terraform_remote_state.cloud_provision.outputs.state_backend_vm.workspace_key_prefix
     kms_key_id           = data.terraform_remote_state.cloud_provision.outputs.state_backend_vm.kms_key_id
 
