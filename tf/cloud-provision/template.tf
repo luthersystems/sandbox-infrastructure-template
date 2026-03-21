@@ -12,7 +12,7 @@ locals {
 
   state = local.is_aws ? {
     bucket = try(module.bootstrap[0].aws_s3_bucket_tfstate, "")
-    region = var.bootstrap_state_region != "" ? var.bootstrap_state_region : var.aws_region
+    region = var.aws_region
   } : {}
 
   state_backend_vm = local.is_aws ? merge(local.state, {
