@@ -50,7 +50,11 @@ fi
 # Resolve project root for output path
 : "${MARS_PROJECT_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export MARS_PROJECT_ROOT
-echo "template_version=$(cat "$MARS_PROJECT_ROOT/.template_version" 2>/dev/null | tr -d '[:space:]')"
+if command -v getTfVar &>/dev/null; then
+  echo "template_version=$(getTfVar template_ref)"
+else
+  echo "template_version=unknown"
+fi
 
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 
@@ -122,16 +126,18 @@ echo "$drift" | jq -r "$_drift_filter"
 
 # Write drift report
 mkdir -p "$OUTPUTS_DIR"
-if [[ -n "$stage_name" ]]; then
-  drift_file="$OUTPUTS_DIR/drift-${stage_name}.json"
-else
-  drift_file="$OUTPUTS_DIR/drift.json"
-fi
-jq -n --argjson drift "$drift" --argjson count "$drift_count" \
-  '{ drift_detected: true, drift_count: $count, resources: $drift }' \
-  > "$drift_file"
+_drift_report="$(jq -n --argjson drift "$drift" --argjson count "$drift_count" \
+  '{ drift_detected: true, drift_count: $count, resources: $drift }')"
 
-echo "Drift report written to $drift_file"
+# Always write drift.json (Argo artifact path expects this)
+echo "$_drift_report" > "$OUTPUTS_DIR/drift.json"
+
+if [[ -n "$stage_name" ]]; then
+  echo "$_drift_report" > "$OUTPUTS_DIR/drift-${stage_name}.json"
+  echo "Drift report written to $OUTPUTS_DIR/drift-${stage_name}.json (and drift.json)"
+else
+  echo "Drift report written to $OUTPUTS_DIR/drift.json"
+fi
 
 if [[ "$ignore_drift" == "true" ]]; then
   echo "WARNING: Drift ignored (--ignore-drift flag set)."
