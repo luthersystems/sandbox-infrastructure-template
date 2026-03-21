@@ -50,11 +50,7 @@ fi
 # Resolve project root for output path
 : "${MARS_PROJECT_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export MARS_PROJECT_ROOT
-if command -v getTfVar &>/dev/null; then
-  echo "template_version=$(getTfVar template_ref)"
-else
-  echo "template_version=unknown"
-fi
+echo "template_version=${TEMPLATE_VERSION:-unknown}"
 
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 

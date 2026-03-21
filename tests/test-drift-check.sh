@@ -476,6 +476,36 @@ else
   fail "nested: drift.json should not exist for nested false-positive drift"
 fi
 
+# ============================================================
+# Test 14: TEMPLATE_VERSION env var is used when set
+# ============================================================
+echo ""
+echo "Test 14: TEMPLATE_VERSION env var..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(TEMPLATE_VERSION="v1.2.3" run_drift_check '{"resource_drift": []}')"
+
+if echo "$result" | grep -q "template_version=v1.2.3"; then
+  pass "env var: template_version=v1.2.3 printed"
+else
+  fail "env var: expected template_version=v1.2.3 in output"
+fi
+
+# ============================================================
+# Test 15: Without TEMPLATE_VERSION, falls back to unknown
+# ============================================================
+echo ""
+echo "Test 15: No TEMPLATE_VERSION falls back to unknown..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(unset TEMPLATE_VERSION; run_drift_check '{"resource_drift": []}')"
+
+if echo "$result" | grep -q "template_version=unknown"; then
+  pass "fallback: template_version=unknown printed"
+else
+  fail "fallback: expected template_version=unknown in output"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"

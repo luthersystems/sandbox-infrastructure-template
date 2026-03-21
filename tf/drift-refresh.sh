@@ -45,4 +45,6 @@ terraform show -json refresh.tfplan > "$MARS_PROJECT_ROOT/outputs/tfplan-${lifec
 echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json"
 
 # Check for drift (always fails on drift — no --ignore-drift)
+export TEMPLATE_VERSION
+TEMPLATE_VERSION="$(getTfVar template_ref)"
 bash "$SCRIPT_DIR/drift-check.sh" refresh.tfplan --stage "$lifecycle"
