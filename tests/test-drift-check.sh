@@ -347,6 +347,122 @@ else
   fail "no stage: drift-.json should not exist"
 fi
 
+# ============================================================
+# Test 11: All-false-positive drift (null vs empty) — exit 0, no drift.json
+# ============================================================
+echo ""
+echo "Test 11: All-false-positive drift (null vs empty equivalences)..."
+
+rm -rf "$WORKDIR/outputs"
+false_positive_plan='{"resource_drift": [
+  {
+    "address": "aws_s3_bucket.example",
+    "type": "aws_s3_bucket",
+    "change": {
+      "before": {"cors_rule": null, "grant": null, "lifecycle_rule": null, "logging": null, "replication_configuration": null, "server_side_encryption_configuration": [], "versioning": [{"enabled": false, "mfa_delete": false}], "website": null, "policy": null},
+      "after":  {"cors_rule": [],   "grant": [],   "lifecycle_rule": [],   "logging": {},   "replication_configuration": "",  "server_side_encryption_configuration": [], "versioning": [{"enabled": false, "mfa_delete": false}], "website": [],   "policy": ""}
+    }
+  }
+]}'
+result="$(run_drift_check "$false_positive_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "false-positive: exit code 0 (no real drift)"
+else
+  fail "false-positive: expected exit 0, got $exit_code"
+fi
+
+if [[ ! -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "false-positive: drift.json not created"
+else
+  fail "false-positive: drift.json should not exist for false-positive only drift"
+fi
+
+# ============================================================
+# Test 12: Mixed real + false-positive drift — exit 2, only real drift in report
+# ============================================================
+echo ""
+echo "Test 12: Mixed real and false-positive drift..."
+
+rm -rf "$WORKDIR/outputs"
+mixed_plan='{"resource_drift": [
+  {
+    "address": "aws_s3_bucket.false_positive",
+    "type": "aws_s3_bucket",
+    "change": {
+      "before": {"cors_rule": null, "tags": {"env": "prod"}},
+      "after":  {"cors_rule": [],   "tags": {"env": "prod"}}
+    }
+  },
+  {
+    "address": "aws_instance.real_drift",
+    "type": "aws_instance",
+    "change": {
+      "before": {"instance_type": "t3.micro", "tags": {"Name": "old"}},
+      "after":  {"instance_type": "t3.small", "tags": {"Name": "new"}}
+    }
+  }
+]}'
+result="$(run_drift_check "$mixed_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "mixed: exit code 2 (real drift present)"
+else
+  fail "mixed: expected exit 2, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "mixed: drift.json created"
+else
+  fail "mixed: drift.json not created"
+fi
+
+if jq -e '.drift_count == 1' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "mixed: drift_count is 1 (false positive filtered out)"
+else
+  fail "mixed: drift_count should be 1"
+fi
+
+if jq -e '.resources[0].address == "aws_instance.real_drift"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "mixed: only real drift resource in report"
+else
+  fail "mixed: expected aws_instance.real_drift in report"
+fi
+
+# ============================================================
+# Test 13: Nested null-vs-empty inside objects/arrays — exit 0
+# ============================================================
+echo ""
+echo "Test 13: Nested null-vs-empty inside objects and arrays..."
+
+rm -rf "$WORKDIR/outputs"
+nested_plan='{"resource_drift": [
+  {
+    "address": "aws_lb.example",
+    "type": "aws_lb",
+    "change": {
+      "before": {"access_logs": [{"bucket": "", "enabled": false, "prefix": null}], "subnet_mapping": [{"outpost_arn": null}], "tags": {}},
+      "after":  {"access_logs": [{"bucket": "", "enabled": false, "prefix": ""}],  "subnet_mapping": [{"outpost_arn": ""}],  "tags": null}
+    }
+  }
+]}'
+result="$(run_drift_check "$nested_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "nested: exit code 0 (no real drift)"
+else
+  fail "nested: expected exit 0, got $exit_code"
+fi
+
+if [[ ! -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "nested: drift.json not created"
+else
+  fail "nested: drift.json should not exist for nested false-positive drift"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
