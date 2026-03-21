@@ -273,16 +273,23 @@ else
   fail "stage flag: drift-cloud-provision.json not created"
 fi
 
-if [[ ! -f "$WORKDIR/outputs/drift.json" ]]; then
-  pass "stage flag: drift.json NOT created (correct)"
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "stage flag: drift.json ALSO created (Argo compat)"
 else
-  fail "stage flag: drift.json should not exist when --stage is used"
+  fail "stage flag: drift.json should also exist when --stage is used"
 fi
 
 if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift-cloud-provision.json" >/dev/null 2>&1; then
   pass "stage flag: drift_detected is true"
 else
   fail "stage flag: drift_detected field missing or wrong"
+fi
+
+# Verify both files have identical content
+if diff -q "$WORKDIR/outputs/drift.json" "$WORKDIR/outputs/drift-cloud-provision.json" >/dev/null 2>&1; then
+  pass "stage flag: drift.json and drift-cloud-provision.json are identical"
+else
+  fail "stage flag: drift.json and drift-cloud-provision.json differ"
 fi
 
 # ============================================================
@@ -305,6 +312,12 @@ if [[ -f "$WORKDIR/outputs/drift-mystack.json" ]]; then
   pass "stage+ignore: drift-mystack.json created"
 else
   fail "stage+ignore: drift-mystack.json not created"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "stage+ignore: drift.json ALSO created (Argo compat)"
+else
+  fail "stage+ignore: drift.json should also exist when --stage is used"
 fi
 
 if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift-mystack.json" >/dev/null 2>&1; then
