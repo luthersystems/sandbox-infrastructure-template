@@ -57,7 +57,37 @@ OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 # Convert binary plan to JSON and check for drift
 plan_json="$(terraform show -json "$plan_file")"
 
-drift="$(echo "$plan_json" | jq '.resource_drift // []')"
+# jq function to normalize null-equivalent values so that null vs [] / {} / false / 0 / ""
+# comparisons don't produce false-positive drift.
+# shellcheck disable=SC2016
+_normalize='
+def normalize_empty:
+  if . == null then null
+  elif . == [] then null
+  elif . == {} then null
+  elif . == false then null
+  elif . == 0 then null
+  elif . == "" then null
+  elif type == "array" then map(normalize_empty)
+  elif type == "object" then with_entries(.value |= normalize_empty)
+  else .
+  end;
+'
+
+# Extract resource_drift, filtering out entries where all attribute diffs are
+# null-vs-empty (false positives from AWS API response normalization).
+drift="$(echo "$plan_json" | jq "$_normalize"'
+[
+  (.resource_drift // [])[] |
+  . as $entry |
+  if ($entry.change == null) then $entry
+  else
+    (($entry.change.before // {}) | normalize_empty) as $nb |
+    (($entry.change.after  // {}) | normalize_empty) as $na |
+    select($nb != $na)
+  end
+]
+')"
 drift_count="$(echo "$drift" | jq 'length')"
 
 if [[ "$drift_count" -eq 0 ]]; then
@@ -70,8 +100,9 @@ echo ""
 
 # Print human-readable drift summary showing changed attributes per resource.
 # The jq filter uses single quotes intentionally — jq handles \() interpolation.
+# Uses normalize_empty to skip null-vs-empty attribute diffs in display.
 # shellcheck disable=SC2016
-_drift_filter='
+_drift_filter="$_normalize"'
   .[] |
   "  \(.address)",
   (
@@ -81,7 +112,7 @@ _drift_filter='
       $before[] |
       . as $b |
       ($after | map(select(.key == $b.key)) | .[0]) as $a |
-      select(($a.value == $b.value) | not) |
+      select(($b.value | normalize_empty) != ($a.value | normalize_empty)) |
       "    \(.key): \($b.value | tojson) -> \($a.value | tojson)"
     ] | .[]
   ),
