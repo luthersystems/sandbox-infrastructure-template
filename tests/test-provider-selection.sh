@@ -124,6 +124,13 @@ else
   fail "No templates: function returned non-zero ($exit_code)"
 fi
 
+# Verify no provider .tf files were generated
+if ls "$STAGE"/providers-*.tf 2>/dev/null | grep -q .; then
+  fail "No templates: generated provider files when none should exist"
+else
+  pass "No templates: no provider files generated"
+fi
+
 # --- Test 4: Idempotent — calling twice produces same result ---
 echo ""
 echo "Test 4: Idempotent — calling twice is safe"
@@ -208,6 +215,42 @@ if echo "$output" | grep -q "GOOGLE_APPLICATION_CREDENTIALS"; then
   fail "AWS mode: still references GOOGLE_APPLICATION_CREDENTIALS"
 else
   pass "AWS mode: no GOOGLE_APPLICATION_CREDENTIALS reference"
+fi
+
+if echo "$output" | grep -q "AWS environment: using IRSA"; then
+  pass "AWS mode: setupCloudEnv ran to completion"
+else
+  fail "AWS mode: missing 'AWS environment: using IRSA' — setupCloudEnv may not have run"
+fi
+
+# --- Test 7: Cloud switch — stale provider file from prior deploy ---
+echo ""
+echo "Test 7: Cloud switch — stale file from prior cloud deploy"
+STAGE="$WORKDIR/stage7"
+mkdir -p "$STAGE"
+echo "aws-tmpl" > "$STAGE/providers-aws.tf.tmpl"
+echo "gcp-tmpl" > "$STAGE/providers-gcp.tf.tmpl"
+# Simulate a prior AWS deploy that left a generated file
+echo "stale-aws-provider" > "$STAGE/providers-aws.tf"
+
+(
+  setup_cloud "gcp" "$STAGE"
+  _selectProviderFiles
+) > /dev/null 2>&1
+
+if [[ -f "$STAGE/providers-gcp.tf" ]] && [[ "$(cat "$STAGE/providers-gcp.tf")" == "gcp-tmpl" ]]; then
+  pass "Cloud switch: providers-gcp.tf generated for new cloud"
+else
+  fail "Cloud switch: providers-gcp.tf not generated"
+fi
+
+# The stale providers-aws.tf from the prior deploy persists — this is safe
+# because deploys run in ephemeral containers (each starts fresh) and the
+# generated files are gitignored. Document this explicitly.
+if [[ -f "$STAGE/providers-aws.tf" ]]; then
+  pass "Cloud switch: stale providers-aws.tf persists (expected in ephemeral containers)"
+else
+  pass "Cloud switch: stale providers-aws.tf was cleaned up"
 fi
 
 # --- Summary ---

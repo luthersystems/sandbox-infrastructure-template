@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Validates that every assume_role block in providers.tf includes external_id.
+# Validates that every assume_role block in providers.tf / providers-aws.tf.tmpl includes external_id.
 # This prevents regressions where new providers are added without
 # confused-deputy protection.
 
