@@ -1,0 +1,15 @@
+# GCP provider configuration — activated at deploy time by _selectProviderFiles()
+terraform {
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "google" {
+  project                     = var.cloud_provider == "gcp" ? var.gcp_project_id : null
+  region                      = var.cloud_provider == "gcp" ? var.gcp_region : null
+  impersonate_service_account = var.cloud_provider == "gcp" && var.gcp_impersonate_service_account != "" ? var.gcp_impersonate_service_account : null
+}

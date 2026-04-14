@@ -46,6 +46,8 @@ CUSTOM_AUTH="${CUSTOM_AUTH:-token}"
 PRESERVE_PATTERNS=(
   "backend.tf"
   "providers.tf"
+  "providers-aws.tf.tmpl"
+  "providers-gcp.tf.tmpl"
   "__customer_*.tf"
 )
 

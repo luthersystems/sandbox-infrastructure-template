@@ -32,7 +32,7 @@ while IFS= read -r providers_file; do
   else
     fail "$stage/providers.tf: found $assume_role_count assume_role block(s) but only $external_id_count external_id line(s)"
   fi
-done < <(find "$TF_DIR" -name providers.tf -type f | sort)
+done < <(find "$TF_DIR" \( -name 'providers.tf' -o -name 'providers-aws.tf.tmpl' \) -type f | sort)
 
 # Verify aws_external_id variable is declared in each stage that uses assume_role
 echo ""
@@ -51,7 +51,7 @@ while IFS= read -r providers_file; do
   else
     fail "$stage: aws_external_id variable NOT declared (but assume_role blocks exist)"
   fi
-done < <(find "$TF_DIR" -name providers.tf -type f | sort)
+done < <(find "$TF_DIR" \( -name 'providers.tf' -o -name 'providers-aws.tf.tmpl' \) -type f | sort)
 
 # --- Summary ---
 echo ""
