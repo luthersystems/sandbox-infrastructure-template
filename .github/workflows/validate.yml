@@ -31,6 +31,14 @@ jobs:
         with:
           terraform_version: "1.7.5"
 
+      - name: Activate provider templates
+        run: |
+          for tmpl in providers-*.tf.tmpl; do
+            [ -e "$tmpl" ] || continue
+            cp "$tmpl" "${tmpl%.tmpl}"
+          done
+        working-directory: tf/${{ matrix.dir }}
+
       - name: Terraform Init
         run: terraform init -backend=false -input=false
         working-directory: tf/${{ matrix.dir }}

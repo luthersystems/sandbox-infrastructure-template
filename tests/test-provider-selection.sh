@@ -125,7 +125,10 @@ else
 fi
 
 # Verify no provider .tf files were generated
-if ls "$STAGE"/providers-*.tf 2>/dev/null | grep -q .; then
+shopt -s nullglob
+generated=("$STAGE"/providers-*.tf)
+shopt -u nullglob
+if [[ ${#generated[@]} -gt 0 ]]; then
   fail "No templates: generated provider files when none should exist"
 else
   pass "No templates: no provider files generated"
