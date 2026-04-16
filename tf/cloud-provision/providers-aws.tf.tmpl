@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.0"
@@ -40,4 +44,10 @@ provider "aws" {
 provider "aws" {
   alias  = "platform-account"
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
+}
+
+# Stub Google provider — required because main.tf references google_*
+# resources (with count = 0 on AWS). No credentials needed; Terraform
+# only authenticates when it actually makes API calls.
+provider "google" {
 }
