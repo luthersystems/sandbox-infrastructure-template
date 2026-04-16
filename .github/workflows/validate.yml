@@ -48,6 +48,33 @@ jobs:
         run: terraform validate
         working-directory: tf/${{ matrix.dir }}
 
+  terraform-validate-gcp:
+    name: "terraform validate (cloud-provision GCP)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Activate GCP templates for validation
+        run: |
+          for tmpl in providers-gcp.tf.tmpl gcp-resources.tf.tmpl; do
+            if [ -e "$tmpl" ]; then cp "$tmpl" "${tmpl%.tmpl}"; fi
+          done
+        working-directory: tf/cloud-provision
+
+      - name: Terraform Init
+        run: terraform init -backend=false -input=false
+        working-directory: tf/cloud-provision
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: tf/cloud-provision
+
   terraform-fmt:
     name: terraform fmt
     runs-on: ubuntu-latest

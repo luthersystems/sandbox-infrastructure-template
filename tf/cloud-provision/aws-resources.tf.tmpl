@@ -3,7 +3,7 @@
 
 locals {
   admin_role_name = "${var.short_project_id}-luther-terraform"
-  admin_role_arn  = local.is_aws ? module.bootstrap[0].admin_role : ""
+  admin_role_arn  = module.bootstrap[0].admin_role
 }
 
 # ============================================================================
@@ -11,7 +11,7 @@ locals {
 # ============================================================================
 
 module "bootstrap" {
-  count  = local.is_aws ? 1 : 0
+  count  = 1
   source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=v55.15.2"
 
   admin_role_name     = local.admin_role_name
@@ -31,14 +31,14 @@ module "bootstrap" {
 }
 
 data "aws_route53_zone" "parent" {
-  count = local.is_aws && var.create_dns ? 1 : 0
+  count = var.create_dns ? 1 : 0
 
   provider = aws.platform-account
   name     = local.base_domain
 }
 
 resource "aws_route53_record" "subdomain_ns" {
-  count = local.is_aws && var.create_dns ? 1 : 0
+  count = var.create_dns ? 1 : 0
 
   provider = aws.platform-account
   zone_id  = data.aws_route53_zone.parent[0].zone_id
@@ -60,8 +60,6 @@ locals {
 }
 
 data "aws_iam_policy_document" "inspector_assume" {
-  count = local.is_aws ? 1 : 0
-
   statement {
     sid    = "AllowTerraformSAAssume"
     effect = "Allow"
@@ -76,11 +74,9 @@ data "aws_iam_policy_document" "inspector_assume" {
 }
 
 resource "aws_iam_role" "insideout_inspector" {
-  count = local.is_aws ? 1 : 0
-
   name                 = local.inspector_role_name
   description          = "Read-only role for InsideOut infrastructure inspection"
-  assume_role_policy   = data.aws_iam_policy_document.inspector_assume[0].json
+  assume_role_policy   = data.aws_iam_policy_document.inspector_assume.json
   max_session_duration = 3600 # 1 hour
 
   tags = {
@@ -95,9 +91,7 @@ resource "aws_iam_role" "insideout_inspector" {
 }
 
 resource "aws_iam_role_policy_attachment" "inspector_readonly" {
-  count = local.is_aws ? 1 : 0
-
-  role       = aws_iam_role.insideout_inspector[0].name
+  role       = aws_iam_role.insideout_inspector.name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
@@ -109,36 +103,36 @@ locals {
   state_workspace_vm  = "vm"
   state_workspace_k8s = "k8s"
 
-  state_kms_key_id = local.is_aws ? try(module.bootstrap[0].aws_kms_key_id, "") : ""
+  state_kms_key_id = try(module.bootstrap[0].aws_kms_key_id, "")
   state_role_arn   = local.admin_role_arn
 
-  state = local.is_aws ? {
+  state = {
     bucket = try(module.bootstrap[0].aws_s3_bucket_tfstate, "")
     region = var.aws_region
-  } : {}
+  }
 
-  state_backend_vm = local.is_aws ? merge(local.state, {
+  state_backend_vm = merge(local.state, {
     workspace_key_prefix = local.state_workspace_vm
     key                  = format("terraform_%s.tfstate", local.state_workspace_vm)
     kms_key_id           = local.state_kms_key_id,
     role_arn             = local.state_role_arn,
-  }) : {}
+  })
 
-  state_backend_k8s = local.is_aws ? merge(local.state, {
+  state_backend_k8s = merge(local.state, {
     workspace_key_prefix = local.state_workspace_k8s
     key                  = format("terraform_%s.tfstate", local.state_workspace_k8s)
     kms_key_id           = local.state_kms_key_id,
     role_arn             = local.state_role_arn,
-  }) : {}
+  })
 
   state_workspace_custom = "custom"
 
-  state_backend_custom = local.is_aws ? merge(local.state, {
+  state_backend_custom = merge(local.state, {
     workspace_key_prefix = local.state_workspace_custom
     key                  = format("terraform_%s.tfstate", local.state_workspace_custom)
     kms_key_id           = local.state_kms_key_id,
     role_arn             = local.state_role_arn,
-  }) : {}
+  })
 }
 
 output "state_workspace_vm" {
@@ -150,19 +144,16 @@ output "state_backend_vm" {
 }
 
 resource "local_file" "vm_backend_template" {
-  count    = local.is_aws ? 1 : 0
   content  = templatefile("backend.tf.tftpl", local.state_backend_vm)
   filename = "${path.module}/../vm-provision/backend.tf"
 }
 
 resource "local_file" "k8s_backend_template" {
-  count    = local.is_aws ? 1 : 0
   content  = templatefile("backend.tf.tftpl", local.state_backend_k8s)
   filename = "${path.module}/../k8s-provision/backend.tf"
 }
 
 resource "local_file" "custom_backend_template" {
-  count    = local.is_aws ? 1 : 0
   content  = templatefile("backend.tf.tftpl", local.state_backend_custom)
   filename = "${path.module}/../custom-stack-provision/backend.tf"
 }
@@ -172,21 +163,21 @@ resource "local_file" "custom_backend_template" {
 # ============================================================================
 
 output "terraform_role" {
-  description = "AWS IAM role ARN for Terraform (empty for GCP)"
+  description = "AWS IAM role ARN for Terraform"
   value       = local.admin_role_arn
 }
 
 output "domain" {
   description = "Domain name for the deployment"
-  value       = local.is_aws ? module.bootstrap[0].domain : var.domain
+  value       = module.bootstrap[0].domain
 }
 
 output "inspector_role_arn" {
-  description = "ARN of the InsideOut inspector role (AWS only)"
-  value       = local.is_aws ? local.inspector_role_arn : ""
+  description = "ARN of the InsideOut inspector role"
+  value       = local.inspector_role_arn
 }
 
 output "inspector_role_name" {
-  description = "Name of the InsideOut inspector role (AWS only)"
-  value       = local.is_aws ? local.inspector_role_name_out : ""
+  description = "Name of the InsideOut inspector role"
+  value       = local.inspector_role_name_out
 }
