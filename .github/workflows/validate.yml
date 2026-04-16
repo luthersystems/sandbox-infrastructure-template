@@ -33,10 +33,12 @@ jobs:
 
       - name: Activate provider templates
         run: |
-          for tmpl in providers-*.tf.tmpl; do
-            [ -e "$tmpl" ] || continue
-            cp "$tmpl" "${tmpl%.tmpl}"
-          done
+          # Copy the AWS template for CI validation (it includes stub Google
+          # provider for dual-cloud HCL compatibility). Only one template can
+          # be active at a time due to the single required_providers constraint.
+          if [ -e providers-aws.tf.tmpl ]; then
+            cp providers-aws.tf.tmpl providers-aws.tf
+          fi
         working-directory: tf/${{ matrix.dir }}
 
       - name: Terraform Init
