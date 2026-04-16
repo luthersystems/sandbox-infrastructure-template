@@ -36,7 +36,7 @@ jobs:
           # Copy AWS templates for CI validation. GCP templates are
           # validated at deploy time when the GCP provider is active.
           for tmpl in providers-aws.tf.tmpl aws-resources.tf.tmpl; do
-            [ -e "$tmpl" ] && cp "$tmpl" "${tmpl%.tmpl}"
+            if [ -e "$tmpl" ]; then cp "$tmpl" "${tmpl%.tmpl}"; fi
           done
         working-directory: tf/${{ matrix.dir }}
 
