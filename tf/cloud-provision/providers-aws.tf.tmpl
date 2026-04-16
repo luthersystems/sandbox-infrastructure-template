@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 5.0"
+    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.0"
@@ -40,4 +44,10 @@ provider "aws" {
 provider "aws" {
   alias  = "platform-account"
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
+}
+
+# Stub Google provider — declared so terraform can read existing state that
+# references google_* resources (now in gcp-resources.tf.tmpl). No API calls
+# are made; credentials are satisfied by a silent stub in shell_utils.sh.
+provider "google" {
 }
