@@ -1,12 +1,8 @@
-# AWS provider configuration — activated at deploy time by _selectProviderFiles()
+# AWS provider configuration — activated at deploy time by _selectCloudFiles()
 terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-    google = {
-      source  = "hashicorp/google"
       version = "~> 5.0"
     }
     random = {
@@ -44,10 +40,4 @@ provider "aws" {
 provider "aws" {
   alias  = "platform-account"
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
-}
-
-# Stub Google provider — required because main.tf references google_*
-# resources (with count = 0 on AWS). No credentials needed; Terraform
-# only authenticates when it actually makes API calls.
-provider "google" {
 }

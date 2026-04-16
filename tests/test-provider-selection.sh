@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Tests for _selectProviderFiles() in shell_utils.sh.
+# Tests for _selectCloudFiles() in shell_utils.sh.
 # Validates that the correct cloud provider templates are copied at deploy time.
 
 PASS=0
@@ -45,7 +45,7 @@ setup_cloud() {
 }
 
 # ============================================================
-echo "=== _selectProviderFiles tests ==="
+echo "=== _selectCloudFiles tests ==="
 # ============================================================
 
 # --- Test 1: AWS mode copies only providers-aws.tf ---
@@ -58,7 +58,7 @@ echo "gcp-provider-content" > "$STAGE/providers-gcp.tf.tmpl"
 
 (
   setup_cloud "aws" "$STAGE"
-  _selectProviderFiles
+  _selectCloudFiles
 ) > /dev/null 2>&1
 
 if [[ -f "$STAGE/providers-aws.tf" ]] && [[ "$(cat "$STAGE/providers-aws.tf")" == "aws-provider-content" ]]; then
@@ -90,7 +90,7 @@ echo "gcp-provider-content" > "$STAGE/providers-gcp.tf.tmpl"
 
 (
   setup_cloud "gcp" "$STAGE"
-  _selectProviderFiles
+  _selectCloudFiles
 ) > /dev/null 2>&1
 
 if [[ -f "$STAGE/providers-gcp.tf" ]] && [[ "$(cat "$STAGE/providers-gcp.tf")" == "gcp-provider-content" ]]; then
@@ -114,7 +114,7 @@ mkdir -p "$STAGE"
 
 (
   setup_cloud "aws" "$STAGE"
-  _selectProviderFiles
+  _selectCloudFiles
 ) > /dev/null 2>&1
 exit_code=$?
 
@@ -144,8 +144,8 @@ echo "gcp-content" > "$STAGE/providers-gcp.tf.tmpl"
 
 (
   setup_cloud "aws" "$STAGE"
-  _selectProviderFiles
-  _selectProviderFiles
+  _selectCloudFiles
+  _selectCloudFiles
 ) > /dev/null 2>&1
 
 if [[ -f "$STAGE/providers-aws.tf" ]] && [[ "$(cat "$STAGE/providers-aws.tf")" == "aws-content" ]]; then
@@ -238,7 +238,7 @@ echo "stale-aws-provider" > "$STAGE/providers-aws.tf"
 
 (
   setup_cloud "gcp" "$STAGE"
-  _selectProviderFiles
+  _selectCloudFiles
 ) > /dev/null 2>&1
 
 if [[ -f "$STAGE/providers-gcp.tf" ]] && [[ "$(cat "$STAGE/providers-gcp.tf")" == "gcp-tmpl" ]]; then

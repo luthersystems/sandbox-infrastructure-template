@@ -1,0 +1,150 @@
+# GCP resources — activated at deploy time by _selectCloudFiles()
+# Only present when cloud_provider = gcp.
+
+# ============================================================================
+# GCP Bootstrap: Terraform state bucket
+# ============================================================================
+
+resource "google_storage_bucket" "tfstate" {
+  count = local.is_gcp ? 1 : 0
+
+  name          = "${var.short_project_id}-tfstate"
+  location      = var.gcp_region
+  force_destroy = false
+
+  uniform_bucket_level_access = true
+
+  versioning {
+    enabled = true
+  }
+}
+
+# ============================================================================
+# GCP Inspector Service Account
+# ============================================================================
+
+locals {
+  # GCP inspector service account ID (max 30 chars, lowercase, hyphens allowed)
+  gcp_inspector_sa_id  = "insideout-inspector-${var.short_project_id}"
+  gcp_management_sa_id = "insideout-mgmt-${var.short_project_id}"
+
+  # Extract deployment SA email from credentials for token creator binding
+  gcp_deployment_sa_email = local.is_gcp ? jsondecode(base64decode(var.gcp_credentials_b64)).client_email : ""
+
+  gcp_inspector_sa_email   = try(google_service_account.insideout_inspector[0].email, "")
+  gcp_inspector_sa_id_out  = try(google_service_account.insideout_inspector[0].account_id, "")
+  gcp_management_sa_email  = try(google_service_account.insideout_management[0].email, "")
+  gcp_management_sa_id_out = try(google_service_account.insideout_management[0].account_id, "")
+}
+
+# Create a dedicated read-only service account for inspection
+resource "google_service_account" "insideout_inspector" {
+  count = local.is_gcp ? 1 : 0
+
+  account_id   = local.gcp_inspector_sa_id
+  display_name = "InsideOut Inspector - ${var.project_id}"
+  description  = "Read-only service account for InsideOut infrastructure inspection"
+  project      = var.gcp_project_id
+}
+
+# Grant Viewer role (read-only access to most resources)
+resource "google_project_iam_member" "inspector_viewer" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/viewer"
+  member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
+}
+
+# Grant Storage Object Viewer for GCS bucket contents
+resource "google_project_iam_member" "inspector_storage_viewer" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
+}
+
+# Grant Secret Manager Viewer for secret metadata (not values)
+resource "google_project_iam_member" "inspector_secretmanager_viewer" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.viewer"
+  member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
+}
+
+# Grant Cloud Run Viewer for inspecting Cloud Run services
+resource "google_project_iam_member" "inspector_run_viewer" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/run.viewer"
+  member  = "serviceAccount:${google_service_account.insideout_inspector[0].email}"
+}
+
+# Allow the deployment SA to generate tokens for the inspector SA
+resource "google_service_account_iam_member" "inspector_token_creator" {
+  count = local.is_gcp ? 1 : 0
+
+  service_account_id = google_service_account.insideout_inspector[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${local.gcp_deployment_sa_email}"
+}
+
+# Create a dedicated management service account for steady-state write operations.
+resource "google_service_account" "insideout_management" {
+  count = local.is_gcp ? 1 : 0
+
+  account_id   = local.gcp_management_sa_id
+  display_name = "InsideOut Management - ${var.project_id}"
+  description  = "Project-scoped management service account for impersonated InsideOut Terraform operations"
+  project      = var.gcp_project_id
+}
+
+# Broad v1 write access for Terraform when Oracle impersonates this service account.
+resource "google_project_iam_member" "management_owner" {
+  count = local.is_gcp ? 1 : 0
+
+  project = var.gcp_project_id
+  role    = "roles/owner"
+  member  = "serviceAccount:${google_service_account.insideout_management[0].email}"
+}
+
+# Allow the deployment SA to impersonate the management SA for write access.
+resource "google_service_account_iam_member" "management_token_creator" {
+  count = local.is_gcp ? 1 : 0
+
+  service_account_id = google_service_account.insideout_management[0].name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${local.gcp_deployment_sa_email}"
+}
+
+# ============================================================================
+# GCP Outputs
+# ============================================================================
+
+output "gcp_tfstate_bucket" {
+  description = "GCS bucket for Terraform state (GCP only)"
+  value       = local.is_gcp ? google_storage_bucket.tfstate[0].name : ""
+}
+
+output "gcp_inspector_sa_email" {
+  description = "Email of the GCP inspector service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_inspector_sa_email : ""
+}
+
+output "gcp_inspector_sa_id" {
+  description = "ID of the GCP inspector service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_inspector_sa_id_out : ""
+}
+
+output "gcp_management_sa_email" {
+  description = "Email of the GCP management service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_management_sa_email : ""
+}
+
+output "gcp_management_sa_id" {
+  description = "ID of the GCP management service account (GCP only)"
+  value       = local.is_gcp ? local.gcp_management_sa_id_out : ""
+}

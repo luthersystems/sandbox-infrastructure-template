@@ -31,14 +31,12 @@ jobs:
         with:
           terraform_version: "1.7.5"
 
-      - name: Activate provider templates
+      - name: Activate cloud templates for validation
         run: |
-          # Copy the AWS template for CI validation (it includes stub Google
-          # provider for dual-cloud HCL compatibility). Only one template can
-          # be active at a time due to the single required_providers constraint.
-          if [ -e providers-aws.tf.tmpl ]; then
-            cp providers-aws.tf.tmpl providers-aws.tf
-          fi
+          # Copy the AWS provider template for CI. GCP resources are
+          # validated separately at deploy time when the GCP template
+          # is active — mixing both would cause duplicate providers.
+          [ -e providers-aws.tf.tmpl ] && cp providers-aws.tf.tmpl providers-aws.tf
         working-directory: tf/${{ matrix.dir }}
 
       - name: Terraform Init

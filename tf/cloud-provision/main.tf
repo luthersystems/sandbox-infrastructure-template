@@ -50,24 +50,8 @@ resource "aws_route53_record" "subdomain_ns" {
   records  = module.bootstrap[0].aws_route53_zone_name_servers
 }
 
-# ============================================================================
-# GCP Resources (only created when cloud_provider = gcp)
-# ============================================================================
-
-# GCP bootstrap: Create a GCS bucket for Terraform state
-resource "google_storage_bucket" "tfstate" {
-  count = local.is_gcp ? 1 : 0
-
-  name          = "${var.short_project_id}-tfstate"
-  location      = var.gcp_region
-  force_destroy = false
-
-  uniform_bucket_level_access = true
-
-  versioning {
-    enabled = true
-  }
-}
+# GCP resources (google_storage_bucket, etc.) are in gcp-resources.tf.tmpl
+# and only activated for GCP deployments via _selectCloudFiles().
 
 # ============================================================================
 # Outputs
@@ -91,9 +75,4 @@ output "project_id" {
 output "cloud_provider" {
   description = "Cloud provider used for this deployment"
   value       = var.cloud_provider
-}
-
-output "gcp_tfstate_bucket" {
-  description = "GCS bucket for Terraform state (GCP only)"
-  value       = local.is_gcp ? google_storage_bucket.tfstate[0].name : ""
 }

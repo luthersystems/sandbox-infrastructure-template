@@ -250,26 +250,27 @@ isAWS() {
 }
 
 # ============================================================================
-# Provider File Selection
+# Cloud-Specific File Selection
 # ============================================================================
 
-# _selectProviderFiles copies the active cloud's provider template(s) into
-# the current directory.  Templates are stored as providers-<cloud>.tf.tmpl
-# and are invisible to Terraform.  The generated providers-<cloud>.tf files
-# are gitignored so they never get committed.
+# _selectCloudFiles copies all cloud-specific .tf.tmpl templates for the
+# active cloud into the current directory.  Matches two naming conventions:
+#   providers-<cloud>.tf.tmpl  (provider declarations)
+#   <cloud>-resources.tf.tmpl  (cloud-only resources, outputs, locals)
 #
-# Designed for future mix/match mode: to activate multiple providers, call
-# this once per cloud or extend the function to accept a list.
-_selectProviderFiles() {
-  local cloud tmpl target
+# The generated .tf files are gitignored so they never get committed.
+# Designed for future mix/match mode: call once per cloud or extend the list.
+_selectCloudFiles() {
+  local cloud
   cloud=$(getCloudProvider)
 
-  tmpl="providers-${cloud}.tf.tmpl"
-  if [[ -e "$tmpl" ]]; then
+  local tmpl target
+  for tmpl in "providers-${cloud}.tf.tmpl" "${cloud}-resources.tf.tmpl"; do
+    [[ -e "$tmpl" ]] || continue
     target="${tmpl%.tmpl}"
     cp "$tmpl" "$target"
-    echo "Activated provider: $target"
-  fi
+    echo "Activated: $target"
+  done
 }
 
 # ============================================================================
@@ -363,8 +364,8 @@ setupCloudEnv() {
 
   echo "Setting up environment for cloud provider: $cloud"
 
-  # Activate the provider template for the target cloud (copies .tf.tmpl -> .tf)
-  _selectProviderFiles
+  # Activate cloud-specific templates (copies .tf.tmpl -> .tf)
+  _selectCloudFiles
 
   case "$cloud" in
     gcp)
@@ -399,12 +400,8 @@ setupCloudEnv() {
 
     aws)
       # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
-      # The Google provider is declared as a stub (for count=0 GCP resources
-      # in dual-cloud HCL) but still validates credentials at init time.
-      # Export a minimal service-account JSON so it doesn't error out.
-      _GCP_STUB_CREDS=$(mktemp /tmp/gcp-stub-XXXXXX)
-      printf '%s\n' '{"type":"service_account","project_id":"unused","private_key_id":"unused","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----\n","client_email":"stub@unused.iam.gserviceaccount.com","client_id":"0","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}' > "$_GCP_STUB_CREDS"
-      export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_STUB_CREDS"
+      # GCP resources are in gcp-resources.tf.tmpl and only present for GCP
+      # deploys, so no Google provider or credentials are needed.
       echo "AWS environment: using IRSA"
       ;;
 
