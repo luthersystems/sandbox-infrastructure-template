@@ -1,4 +1,12 @@
 # AWS provider configuration — activated at deploy time by _selectProviderFiles()
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
 
 provider "aws" {
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
