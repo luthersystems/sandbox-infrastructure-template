@@ -399,8 +399,12 @@ setupCloudEnv() {
 
     aws)
       # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
-      # No dummy GCP credentials needed — the GCP provider is only activated
-      # when cloud_provider=gcp (via _selectProviderFiles above).
+      # The Google provider is declared as a stub (for count=0 GCP resources
+      # in dual-cloud HCL) but still validates credentials at init time.
+      # Export a minimal service-account JSON so it doesn't error out.
+      _GCP_STUB_CREDS=$(mktemp /tmp/gcp-stub-XXXXXX)
+      printf '%s\n' '{"type":"service_account","project_id":"unused","private_key_id":"unused","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----\n","client_email":"stub@unused.iam.gserviceaccount.com","client_id":"0","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}' > "$_GCP_STUB_CREDS"
+      export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_STUB_CREDS"
       echo "AWS environment: using IRSA"
       ;;
 
