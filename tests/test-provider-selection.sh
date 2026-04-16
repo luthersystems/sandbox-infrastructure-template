@@ -247,13 +247,14 @@ else
   fail "Cloud switch: providers-gcp.tf not generated"
 fi
 
-# The stale providers-aws.tf from the prior deploy persists — this is safe
-# because deploys run in ephemeral containers (each starts fresh) and the
-# generated files are gitignored. Document this explicitly.
+# _selectCloudFiles only copies the new cloud's templates — it does NOT
+# clean up stale files from a prior cloud. This is safe because deploys
+# run in ephemeral containers (each starts fresh) and the generated
+# files are gitignored.
 if [[ -f "$STAGE/providers-aws.tf" ]]; then
-  pass "Cloud switch: stale providers-aws.tf persists (expected in ephemeral containers)"
+  pass "Cloud switch: stale providers-aws.tf persists (expected — no cleanup in ephemeral containers)"
 else
-  pass "Cloud switch: stale providers-aws.tf was cleaned up"
+  fail "Cloud switch: stale providers-aws.tf was unexpectedly cleaned up"
 fi
 
 # --- Summary ---

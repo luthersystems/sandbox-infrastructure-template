@@ -48,6 +48,8 @@ PRESERVE_PATTERNS=(
   "providers.tf"
   "providers-aws.tf.tmpl"
   "providers-gcp.tf.tmpl"
+  "aws-resources.tf.tmpl"
+  "gcp-resources.tf.tmpl"
   "__customer_*.tf"
 )
 
