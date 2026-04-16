@@ -55,8 +55,8 @@ resource "aws_route53_record" "subdomain_ns" {
 locals {
   inspector_role_name = "insideout-inspector-${var.project_id}"
 
-  inspector_role_arn      = try(aws_iam_role.insideout_inspector[0].arn, "")
-  inspector_role_name_out = try(aws_iam_role.insideout_inspector[0].name, "")
+  inspector_role_arn      = aws_iam_role.insideout_inspector.arn
+  inspector_role_name_out = aws_iam_role.insideout_inspector.name
 }
 
 data "aws_iam_policy_document" "inspector_assume" {
