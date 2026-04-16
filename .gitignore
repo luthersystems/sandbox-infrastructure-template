@@ -2,3 +2,7 @@ secrets/
 .tmp/
 .template_version
 tf/auto-vars/skip_remote_state.auto.tfvars.json
+
+# Generated at deploy time by _selectCloudFiles() from .tf.tmpl templates
+tf/*/providers-*.tf
+tf/*/*-resources.tf

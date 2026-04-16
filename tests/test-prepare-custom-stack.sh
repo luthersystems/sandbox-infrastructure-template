@@ -73,6 +73,8 @@ TARGET="$PROJECT/tf/custom-stack-provision"
 echo "existing-backend" > "$TARGET/backend.tf"
 echo "existing-providers" > "$TARGET/providers.tf"
 echo "existing-customer" > "$TARGET/__customer_foo.tf"
+echo "existing-aws-tmpl" > "$TARGET/providers-aws.tf.tmpl"
+echo "existing-gcp-tmpl" > "$TARGET/providers-gcp.tf.tmpl"
 echo "old-version" > "$TARGET/.terraform-version"
 echo "should-be-replaced" > "$TARGET/main.tf"
 
@@ -136,6 +138,18 @@ else
   fail "__customer_foo.tf not preserved (missing or content changed)"
 fi
 
+if [[ -f "$TARGET/providers-aws.tf.tmpl" ]] && [[ "$(cat "$TARGET/providers-aws.tf.tmpl")" == "existing-aws-tmpl" ]]; then
+  pass "providers-aws.tf.tmpl preserved"
+else
+  fail "providers-aws.tf.tmpl not preserved (missing or content changed)"
+fi
+
+if [[ -f "$TARGET/providers-gcp.tf.tmpl" ]] && [[ "$(cat "$TARGET/providers-gcp.tf.tmpl")" == "existing-gcp-tmpl" ]]; then
+  pass "providers-gcp.tf.tmpl preserved"
+else
+  fail "providers-gcp.tf.tmpl not preserved (missing or content changed)"
+fi
+
 # 3. Non-preserved files should come from the archive
 if [[ -f "$TARGET/main.tf" ]] && [[ "$(cat "$TARGET/main.tf")" == "new-main" ]]; then
   pass "main.tf replaced from archive"
@@ -174,6 +188,8 @@ mkdir -p "$TARGET"
 echo "existing-backend" > "$TARGET/backend.tf"
 echo "existing-providers" > "$TARGET/providers.tf"
 echo "existing-customer" > "$TARGET/__customer_foo.tf"
+echo "existing-aws-tmpl" > "$TARGET/providers-aws.tf.tmpl"
+echo "existing-gcp-tmpl" > "$TARGET/providers-gcp.tf.tmpl"
 echo "old-version" > "$TARGET/.terraform-version"
 echo "should-be-replaced" > "$TARGET/main.tf"
 echo "stale-content" > "$TARGET/stale-leftover.tf"
@@ -223,6 +239,18 @@ if [[ -f "$TARGET/__customer_foo.tf" ]] && [[ "$(cat "$TARGET/__customer_foo.tf"
   pass "repo mode: __customer_foo.tf preserved"
 else
   fail "repo mode: __customer_foo.tf not preserved (missing or content changed)"
+fi
+
+if [[ -f "$TARGET/providers-aws.tf.tmpl" ]] && [[ "$(cat "$TARGET/providers-aws.tf.tmpl")" == "existing-aws-tmpl" ]]; then
+  pass "repo mode: providers-aws.tf.tmpl preserved"
+else
+  fail "repo mode: providers-aws.tf.tmpl not preserved (missing or content changed)"
+fi
+
+if [[ -f "$TARGET/providers-gcp.tf.tmpl" ]] && [[ "$(cat "$TARGET/providers-gcp.tf.tmpl")" == "existing-gcp-tmpl" ]]; then
+  pass "repo mode: providers-gcp.tf.tmpl preserved"
+else
+  fail "repo mode: providers-gcp.tf.tmpl not preserved (missing or content changed)"
 fi
 
 # 6. Non-preserved files should come from the repo; stale files should be removed

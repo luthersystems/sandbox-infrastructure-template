@@ -250,6 +250,30 @@ isAWS() {
 }
 
 # ============================================================================
+# Cloud-Specific File Selection
+# ============================================================================
+
+# _selectCloudFiles copies all cloud-specific .tf.tmpl templates for the
+# active cloud into the current directory.  Matches two naming conventions:
+#   providers-<cloud>.tf.tmpl  (provider declarations)
+#   <cloud>-resources.tf.tmpl  (cloud-only resources, outputs, locals)
+#
+# The generated .tf files are gitignored so they never get committed.
+# Designed for future mix/match mode: call once per cloud or extend the list.
+_selectCloudFiles() {
+  local cloud
+  cloud=$(getCloudProvider)
+
+  local tmpl target
+  for tmpl in "providers-${cloud}.tf.tmpl" "${cloud}-resources.tf.tmpl"; do
+    [[ -e "$tmpl" ]] || continue
+    target="${tmpl%.tmpl}"
+    cp "$tmpl" "$target"
+    echo "Activated: $target"
+  done
+}
+
+# ============================================================================
 # GCP Credential Management
 # ============================================================================
 
@@ -303,40 +327,6 @@ cleanupGCPCredentials() {
 }
 
 # ============================================================================
-# Dummy GCP Credentials (for non-GCP environments)
-# ============================================================================
-
-# Temporary file path for dummy GCP credentials
-_GCP_DUMMY_CREDENTIALS_FILE=""
-
-# _setupDummyGCPCredentials creates a minimal service account JSON so the
-# Google Terraform provider doesn't fail looking for Application Default
-# Credentials.  Only needed when cloud_provider != gcp.
-_setupDummyGCPCredentials() {
-  _GCP_DUMMY_CREDENTIALS_FILE=$(mktemp /tmp/gcp-dummy-XXXXXX.json)
-  chmod 600 "$_GCP_DUMMY_CREDENTIALS_FILE"
-
-  local dummy_key
-  dummy_key=$(head -c 256 /dev/urandom 2>/dev/null | base64 | tr -d '\n' || echo "dW51c2VkCg==")
-
-  cat > "$_GCP_DUMMY_CREDENTIALS_FILE" <<EOFCREDS
-{"type":"service_account","project_id":"unused","private_key_id":"unused","private_key":"-----BEGIN PRIVATE KEY-----\n${dummy_key}\n-----END PRIVATE KEY-----\n","client_email":"unused@unused.iam.gserviceaccount.com","client_id":"0","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}
-EOFCREDS
-
-  export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_DUMMY_CREDENTIALS_FILE"
-  echo "Dummy GCP credentials configured: $GOOGLE_APPLICATION_CREDENTIALS"
-}
-
-# _cleanupDummyGCPCredentials removes the temporary dummy credential file
-_cleanupDummyGCPCredentials() {
-  if [[ -n "$_GCP_DUMMY_CREDENTIALS_FILE" ]] && [[ -f "$_GCP_DUMMY_CREDENTIALS_FILE" ]]; then
-    rm -f "$_GCP_DUMMY_CREDENTIALS_FILE"
-    echo "Cleaned up dummy GCP credentials file"
-  fi
-  _GCP_DUMMY_CREDENTIALS_FILE=""
-}
-
-# ============================================================================
 # AWS Jump Role
 # ============================================================================
 
@@ -374,6 +364,9 @@ setupCloudEnv() {
 
   echo "Setting up environment for cloud provider: $cloud"
 
+  # Activate cloud-specific templates (copies .tf.tmpl -> .tf)
+  _selectCloudFiles
+
   case "$cloud" in
     gcp)
       # Setup GCP credentials
@@ -407,10 +400,9 @@ setupCloudEnv() {
 
     aws)
       # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
-      # Create dummy GCP credentials so the Google provider doesn't fail
-      # looking for Application Default Credentials.
+      # No GCP provider or credentials needed — all cloud-specific resources
+      # and providers are isolated in .tf.tmpl template files.
       echo "AWS environment: using IRSA"
-      _setupDummyGCPCredentials
       ;;
 
     *)
@@ -434,9 +426,6 @@ cleanupCloudEnv() {
   case "$cloud" in
     gcp)
       cleanupGCPCredentials
-      ;;
-    aws)
-      _cleanupDummyGCPCredentials
       ;;
   esac
 }
