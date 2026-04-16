@@ -55,6 +55,8 @@ STAGE="$WORKDIR/stage1"
 mkdir -p "$STAGE"
 echo "aws-provider-content" > "$STAGE/providers-aws.tf.tmpl"
 echo "gcp-provider-content" > "$STAGE/providers-gcp.tf.tmpl"
+echo "aws-resources-content" > "$STAGE/aws-resources.tf.tmpl"
+echo "gcp-resources-content" > "$STAGE/gcp-resources.tf.tmpl"
 
 (
   setup_cloud "aws" "$STAGE"
@@ -67,14 +69,27 @@ else
   fail "AWS mode: providers-aws.tf not generated or has wrong content"
 fi
 
+if [[ -f "$STAGE/aws-resources.tf" ]] && [[ "$(cat "$STAGE/aws-resources.tf")" == "aws-resources-content" ]]; then
+  pass "AWS mode: aws-resources.tf generated from template"
+else
+  fail "AWS mode: aws-resources.tf not generated or has wrong content"
+fi
+
 if [[ ! -f "$STAGE/providers-gcp.tf" ]]; then
   pass "AWS mode: providers-gcp.tf not generated (correct)"
 else
   fail "AWS mode: providers-gcp.tf was generated (should not be)"
 fi
 
+if [[ ! -f "$STAGE/gcp-resources.tf" ]]; then
+  pass "AWS mode: gcp-resources.tf not generated (correct)"
+else
+  fail "AWS mode: gcp-resources.tf was generated (should not be)"
+fi
+
 # Templates should be untouched
-if [[ -f "$STAGE/providers-aws.tf.tmpl" ]] && [[ -f "$STAGE/providers-gcp.tf.tmpl" ]]; then
+if [[ -f "$STAGE/providers-aws.tf.tmpl" ]] && [[ -f "$STAGE/providers-gcp.tf.tmpl" ]] \
+  && [[ -f "$STAGE/aws-resources.tf.tmpl" ]] && [[ -f "$STAGE/gcp-resources.tf.tmpl" ]]; then
   pass "AWS mode: template files preserved"
 else
   fail "AWS mode: template files were modified or removed"
@@ -87,6 +102,8 @@ STAGE="$WORKDIR/stage2"
 mkdir -p "$STAGE"
 echo "aws-provider-content" > "$STAGE/providers-aws.tf.tmpl"
 echo "gcp-provider-content" > "$STAGE/providers-gcp.tf.tmpl"
+echo "aws-resources-content" > "$STAGE/aws-resources.tf.tmpl"
+echo "gcp-resources-content" > "$STAGE/gcp-resources.tf.tmpl"
 
 (
   setup_cloud "gcp" "$STAGE"
@@ -99,10 +116,22 @@ else
   fail "GCP mode: providers-gcp.tf not generated or has wrong content"
 fi
 
+if [[ -f "$STAGE/gcp-resources.tf" ]] && [[ "$(cat "$STAGE/gcp-resources.tf")" == "gcp-resources-content" ]]; then
+  pass "GCP mode: gcp-resources.tf generated from template"
+else
+  fail "GCP mode: gcp-resources.tf not generated or has wrong content"
+fi
+
 if [[ ! -f "$STAGE/providers-aws.tf" ]]; then
   pass "GCP mode: providers-aws.tf not generated (correct)"
 else
   fail "GCP mode: providers-aws.tf was generated (should not be)"
+fi
+
+if [[ ! -f "$STAGE/aws-resources.tf" ]]; then
+  pass "GCP mode: aws-resources.tf not generated (correct)"
+else
+  fail "GCP mode: aws-resources.tf was generated (should not be)"
 fi
 
 # --- Test 3: No templates present (e.g., account-provision stage) ---
