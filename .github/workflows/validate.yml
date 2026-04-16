@@ -33,10 +33,11 @@ jobs:
 
       - name: Activate cloud templates for validation
         run: |
-          # Copy the AWS provider template for CI. GCP resources are
-          # validated separately at deploy time when the GCP template
-          # is active — mixing both would cause duplicate providers.
-          [ -e providers-aws.tf.tmpl ] && cp providers-aws.tf.tmpl providers-aws.tf
+          # Copy AWS templates for CI validation. GCP templates are
+          # validated at deploy time when the GCP provider is active.
+          for tmpl in providers-aws.tf.tmpl aws-resources.tf.tmpl; do
+            [ -e "$tmpl" ] && cp "$tmpl" "${tmpl%.tmpl}"
+          done
         working-directory: tf/${{ matrix.dir }}
 
       - name: Terraform Init

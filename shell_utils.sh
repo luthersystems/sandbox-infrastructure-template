@@ -400,12 +400,8 @@ setupCloudEnv() {
 
     aws)
       # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
-      # GCP resources are in gcp-resources.tf.tmpl and only present for GCP
-      # deploys. The Google provider is still declared (stub) for backward
-      # compatibility with existing state, so provide silent stub credentials.
-      _GCP_STUB_CREDS=$(mktemp /tmp/gcp-stub-XXXXXX)
-      printf '%s\n' '{"type":"service_account","project_id":"unused","private_key_id":"unused","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----\n","client_email":"stub@unused.iam.gserviceaccount.com","client_id":"0","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token"}' > "$_GCP_STUB_CREDS"
-      export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_STUB_CREDS"
+      # No GCP provider or credentials needed — all cloud-specific resources
+      # and providers are isolated in .tf.tmpl template files.
       echo "AWS environment: using IRSA"
       ;;
 
