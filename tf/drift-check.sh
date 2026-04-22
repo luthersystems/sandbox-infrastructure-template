@@ -61,6 +61,7 @@ fi
 : "${MARS_PROJECT_ROOT:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export MARS_PROJECT_ROOT
 echo "template_version=${TEMPLATE_VERSION:-unknown}"
+echo "presets_version=${PRESETS_VERSION:-unknown}"
 
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 
@@ -156,7 +157,16 @@ _drift_report="$(jq -n \
   --argjson drift "$drift" \
   --argjson count "$drift_count" \
   --argjson changes "$has_plan_changes" \
-  '{ drift_detected: true, drift_count: $count, actionable: ($changes > 0), resources: $drift }')"
+  --arg tmpl "${TEMPLATE_VERSION:-}" \
+  --arg pres "${PRESETS_VERSION:-}" \
+  '{
+    drift_detected: true,
+    drift_count: $count,
+    actionable: ($changes > 0),
+    template_version: (if $tmpl == "" then null else $tmpl end),
+    presets_version: (if $pres == "" then null else $pres end),
+    resources: $drift
+  }')"
 
 # Always write drift.json (Argo artifact path expects this)
 echo "$_drift_report" > "$OUTPUTS_DIR/drift.json"

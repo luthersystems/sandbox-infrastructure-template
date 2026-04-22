@@ -27,6 +27,7 @@ export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 exportTemplateVersion
+exportPresetsVersion
 
 # Source utils.sh (expects $1 = workspace/lifecycle)
 set -- "$lifecycle"

@@ -446,3 +446,20 @@ exportTemplateVersion() {
   TEMPLATE_VERSION="$(getTfVar template_ref)"
   echo "template_version=${TEMPLATE_VERSION:-unknown}"
 }
+
+# logPresetsVersion logs the insideout-terraform-presets module version.
+# Reads presets_ref from TF auto-vars (written alongside template_ref).
+logPresetsVersion() {
+  local ver
+  ver=$(getTfVar "presets_ref")
+  echo "presets_version=${ver:-unknown}"
+}
+
+# exportPresetsVersion exports PRESETS_VERSION and logs presets_version=<sha>.
+# Use in scripts that invoke child processes (e.g. drift-check.sh) which read
+# PRESETS_VERSION from env. For log-only use, prefer logPresetsVersion.
+exportPresetsVersion() {
+  export PRESETS_VERSION
+  PRESETS_VERSION="$(getTfVar presets_ref)"
+  echo "presets_version=${PRESETS_VERSION:-unknown}"
+}

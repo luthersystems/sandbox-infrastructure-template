@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shell_utils provides: getTfVar, mustGetTfVar, log helpers, etc.
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 logTemplateVersion
+logPresetsVersion
 
 log() { echo "[prepare-custom-stack] $*" >&2; }
 

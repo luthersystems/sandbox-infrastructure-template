@@ -500,13 +500,13 @@ else
 fi
 
 # ============================================================
-# Test 14: TEMPLATE_VERSION env var is used when set
+# Test 14: TEMPLATE_VERSION / PRESETS_VERSION env vars are used when set
 # ============================================================
 echo ""
-echo "Test 14: TEMPLATE_VERSION env var..."
+echo "Test 14: TEMPLATE_VERSION + PRESETS_VERSION env vars..."
 
 rm -rf "$WORKDIR/outputs"
-result="$(TEMPLATE_VERSION="v1.2.3" run_drift_check '{"resource_drift": []}')"
+result="$(TEMPLATE_VERSION="v1.2.3" PRESETS_VERSION="v1.4.2" run_drift_check '{"resource_drift": []}')"
 
 if echo "$result" | grep -q "template_version=v1.2.3"; then
   pass "env var: template_version=v1.2.3 printed"
@@ -514,19 +514,31 @@ else
   fail "env var: expected template_version=v1.2.3 in output"
 fi
 
+if echo "$result" | grep -q "presets_version=v1.4.2"; then
+  pass "env var: presets_version=v1.4.2 printed"
+else
+  fail "env var: expected presets_version=v1.4.2 in output"
+fi
+
 # ============================================================
-# Test 15: Without TEMPLATE_VERSION, falls back to unknown
+# Test 15: Without env vars, falls back to unknown
 # ============================================================
 echo ""
-echo "Test 15: No TEMPLATE_VERSION falls back to unknown..."
+echo "Test 15: No TEMPLATE_VERSION/PRESETS_VERSION falls back to unknown..."
 
 rm -rf "$WORKDIR/outputs"
-result="$(unset TEMPLATE_VERSION; run_drift_check '{"resource_drift": []}')"
+result="$(unset TEMPLATE_VERSION PRESETS_VERSION; run_drift_check '{"resource_drift": []}')"
 
 if echo "$result" | grep -q "template_version=unknown"; then
   pass "fallback: template_version=unknown printed"
 else
   fail "fallback: expected template_version=unknown in output"
+fi
+
+if echo "$result" | grep -q "presets_version=unknown"; then
+  pass "fallback: presets_version=unknown printed"
+else
+  fail "fallback: expected presets_version=unknown in output"
 fi
 
 # ============================================================
@@ -670,7 +682,9 @@ echo ""
 echo "Test 19: Drift + --strict + no resource_changes (refresh-only alarm)..."
 
 rm -rf "$WORKDIR/outputs"
-result="$(run_drift_check "$refresh_only_plan" --strict)"
+# Seed provenance env vars so we can pin that --strict mode still emits them.
+result="$(TEMPLATE_VERSION="v-strict-t" PRESETS_VERSION="v-strict-p" \
+  run_drift_check "$refresh_only_plan" --strict)"
 exit_code="$(echo "$result" | tail -1)"
 
 if [[ "$exit_code" -eq 2 ]]; then
@@ -693,6 +707,17 @@ if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; t
   pass "strict refresh-only: actionable stays false (strict ≠ actionable)"
 else
   fail "strict refresh-only: actionable should be false (no resource_changes)"
+fi
+
+# Pin the invariant that provenance fields survive the --strict exit path
+# (drift-refresh.sh depends on this for its standalone-alarm workflow).
+# A refactor that moved the strict exit above the jq block would drop
+# provenance silently; this assertion catches that.
+if jq -e '.template_version == "v-strict-t" and .presets_version == "v-strict-p"' \
+   "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "strict refresh-only: drift.json carries template_version + presets_version"
+else
+  fail "strict refresh-only: drift.json missing provenance fields"
 fi
 
 # ============================================================
@@ -882,6 +907,68 @@ if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; th
   pass "mixed-actions: actionable is true (at least one non-no-op/read)"
 else
   fail "mixed-actions: actionable should be true with any actionable entry"
+fi
+
+# ============================================================
+# Test 29: drift.json includes template_version and presets_version
+# provenance fields (sourced from env vars exported by parent).
+# ============================================================
+echo ""
+echo "Test 29: drift.json provenance fields..."
+
+provenance_plan='{
+  "resource_drift": [{"address": "aws_s3_bucket.example", "type": "aws_s3_bucket"}],
+  "resource_changes": [{"address": "aws_s3_bucket.example", "change": {"actions": ["update"]}}]
+}'
+
+# Both env vars set.
+rm -rf "$WORKDIR/outputs"
+TEMPLATE_VERSION="deadbeef" PRESETS_VERSION="v1.4.2" \
+  run_drift_check "$provenance_plan" >/dev/null || true
+
+if jq -e '.template_version == "deadbeef"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift.json: template_version field populated"
+else
+  fail "drift.json: expected template_version=\"deadbeef\""
+fi
+
+if jq -e '.presets_version == "v1.4.2"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift.json: presets_version field populated"
+else
+  fail "drift.json: expected presets_version=\"v1.4.2\""
+fi
+
+# Neither env var set — both fields should be JSON null (distinct from absent).
+rm -rf "$WORKDIR/outputs"
+(
+  unset TEMPLATE_VERSION PRESETS_VERSION
+  run_drift_check "$provenance_plan" >/dev/null || true
+)
+
+if jq -e '.template_version == null' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift.json: template_version null when env unset"
+else
+  fail "drift.json: template_version should be null when env unset"
+fi
+
+if jq -e '.presets_version == null' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift.json: presets_version null when env unset"
+else
+  fail "drift.json: presets_version should be null when env unset"
+fi
+
+# Only one set — the other stays null.
+rm -rf "$WORKDIR/outputs"
+(
+  unset PRESETS_VERSION
+  TEMPLATE_VERSION="only-template" run_drift_check "$provenance_plan" >/dev/null || true
+)
+
+if jq -e '.template_version == "only-template" and .presets_version == null' \
+   "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift.json: independent null-handling for each provenance field"
+else
+  fail "drift.json: expected template_version=\"only-template\" with presets_version=null"
 fi
 
 # --- Summary ---

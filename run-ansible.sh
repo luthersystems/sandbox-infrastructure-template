@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$SCRIPT_DIR}"
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 logTemplateVersion
+logPresetsVersion
 echo "docker version"
 docker --version
 

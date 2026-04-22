@@ -240,6 +240,35 @@ else
   fail "drift-check mode: default.json content wrong"
 fi
 
+# drift.json stub: no drift → drift-check.sh does not write a report,
+# apply-with-outputs.sh writes a uniform full-schema stub so consumers always
+# see the same fields. template_ref / presets_ref are not in auto-vars for
+# this test, so provenance fields should be null (not absent).
+if jq -e '.drift_detected == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift-check mode: stub drift.json has drift_detected=false"
+else
+  fail "drift-check mode: stub drift.json missing drift_detected=false"
+fi
+
+if jq -e '.actionable == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift-check mode: stub drift.json has actionable=false"
+else
+  fail "drift-check mode: stub drift.json missing actionable=false"
+fi
+
+if jq -e '.template_version == null and .presets_version == null' \
+   "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift-check mode: stub drift.json has null provenance fields (env unset)"
+else
+  fail "drift-check mode: stub drift.json provenance fields wrong"
+fi
+
+if jq -e '.resources == []' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift-check mode: stub drift.json has empty resources array"
+else
+  fail "drift-check mode: stub drift.json resources field wrong"
+fi
+
 # --- Test 3: Drift-check mode + drift detected → exit 2, apply not called ---
 echo ""
 echo "Test 3: Drift-check mode with drift..."
@@ -602,12 +631,13 @@ echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
 # ============================================================
 # Issue #93 regression: TEMPLATE_VERSION stamped in drift-check
 # child process (was appearing as "unknown" in production logs).
+# PRESETS_VERSION mirrors this via exportPresetsVersion.
 # ============================================================
 echo ""
-echo "=== Issue #93 regression: TEMPLATE_VERSION stamping ==="
+echo "=== Issue #93 regression: TEMPLATE_VERSION + PRESETS_VERSION stamping ==="
 
-# Stamp a template_ref into auto-vars so getTfVar picks it up.
-echo '{"cloud_provider": "aws", "template_ref": "abcdef1234567890"}' \
+# Stamp both refs into auto-vars so getTfVar picks them up.
+echo '{"cloud_provider": "aws", "template_ref": "abcdef1234567890", "presets_ref": "v1.4.2"}' \
   > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 
 # --- Test 14: apply-with-outputs.sh drift-check: template_version stamped ---
@@ -624,18 +654,42 @@ set -e
 # Parent script logs once via exportTemplateVersion, child drift-check.sh
 # logs once via its own template_version=${TEMPLATE_VERSION:-unknown} echo.
 # Exact count 2 guards against the parent double-logging while the child is
-# silent (which a >=2 assertion would miss).
-tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
+# silent (which a >=2 assertion would miss). Use -F (fixed string) so the
+# literal dots in the version ref aren't regex-interpreted.
+tv_count="$(echo "$output" | grep -cF "template_version=abcdef1234567890" || true)"
 if [[ "$tv_count" -eq 2 ]]; then
   pass "apply-with-outputs: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
 else
   fail "apply-with-outputs: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
 fi
 
-if echo "$output" | grep -q "template_version=unknown"; then
+if echo "$output" | grep -qF "template_version=unknown"; then
   fail "apply-with-outputs: drift-check still logged template_version=unknown"
 else
   pass "apply-with-outputs: no template_version=unknown in output"
+fi
+
+pv_count="$(echo "$output" | grep -cF "presets_version=v1.4.2" || true)"
+if [[ "$pv_count" -eq 2 ]]; then
+  pass "apply-with-outputs: presets_version=<ref> appears exactly 2 times (parent + child drift-check)"
+else
+  fail "apply-with-outputs: expected 2 presets_version=<ref> lines, got $pv_count. Output: $output"
+fi
+
+if echo "$output" | grep -qF "presets_version=unknown"; then
+  fail "apply-with-outputs: drift-check still logged presets_version=unknown"
+else
+  pass "apply-with-outputs: no presets_version=unknown in output"
+fi
+
+# Integration assertion: drift.json written through the apply-with-outputs
+# → drift-check.sh chain contains both provenance fields populated from the
+# exported env vars.
+if jq -e '.template_version == "abcdef1234567890" and .presets_version == "v1.4.2"' \
+   "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "apply-with-outputs: drift.json contains both provenance fields via env propagation"
+else
+  fail "apply-with-outputs: drift.json missing or wrong provenance fields. Contents: $(cat "$PROJECT/outputs/drift.json" 2>&1)"
 fi
 
 # --- Test 15: apply-plan.sh drift-check: template_version stamped ---
@@ -649,17 +703,30 @@ output="$(run_script apply-plan.sh default --plan-file myplan --check-drift 2>&1
 exit_code=$?
 set -e
 
-tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
+tv_count="$(echo "$output" | grep -cF "template_version=abcdef1234567890" || true)"
 if [[ "$tv_count" -eq 2 ]]; then
   pass "apply-plan: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
 else
   fail "apply-plan: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
 fi
 
-if echo "$output" | grep -q "template_version=unknown"; then
+if echo "$output" | grep -qF "template_version=unknown"; then
   fail "apply-plan: drift-check still logged template_version=unknown"
 else
   pass "apply-plan: no template_version=unknown in output"
+fi
+
+pv_count="$(echo "$output" | grep -cF "presets_version=v1.4.2" || true)"
+if [[ "$pv_count" -eq 2 ]]; then
+  pass "apply-plan: presets_version=<ref> appears exactly 2 times (parent + child drift-check)"
+else
+  fail "apply-plan: expected 2 presets_version=<ref> lines, got $pv_count. Output: $output"
+fi
+
+if echo "$output" | grep -qF "presets_version=unknown"; then
+  fail "apply-plan: drift-check still logged presets_version=unknown"
+else
+  pass "apply-plan: no presets_version=unknown in output"
 fi
 
 # Restore common auto-vars for any later tests (none currently, but defensive).
