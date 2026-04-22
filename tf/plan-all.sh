@@ -23,6 +23,7 @@ export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 logTemplateVersion
+logPresetsVersion
 
 STAGES="${PLAN_STAGES:-cloud-provision custom-stack-provision}"
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"

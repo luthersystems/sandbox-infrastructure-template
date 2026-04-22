@@ -45,6 +45,7 @@ export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 exportTemplateVersion
+exportPresetsVersion
 
 captureOutputs() {
   mkdir -p "$MARS_PROJECT_ROOT/outputs"
@@ -93,9 +94,21 @@ else
   captureOutputs
 fi
 
-# Write empty drift.json stub if not already present so Argo doesn't
-# warn about a missing optional artifact.
+# Write drift.json stub if drift-check didn't produce one (not invoked, or
+# invoked but no drift). Mirrors the full drift-check.sh schema so consumers
+# get the same shape regardless of whether drift occurred, including the
+# template_version / presets_version provenance fields.
 if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
   mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  echo '{}' > "$MARS_PROJECT_ROOT/outputs/drift.json"
+  jq -n \
+    --arg tmpl "${TEMPLATE_VERSION:-}" \
+    --arg pres "${PRESETS_VERSION:-}" \
+    '{
+      drift_detected: false,
+      drift_count: 0,
+      actionable: false,
+      template_version: (if $tmpl == "" then null else $tmpl end),
+      presets_version: (if $pres == "" then null else $pres end),
+      resources: []
+    }' > "$MARS_PROJECT_ROOT/outputs/drift.json"
 fi
