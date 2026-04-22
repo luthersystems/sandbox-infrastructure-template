@@ -53,7 +53,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
-logTemplateVersion
+exportTemplateVersion
 
 # Source utils.sh (expects $1 = workspace/lifecycle)
 set -- "$lifecycle"

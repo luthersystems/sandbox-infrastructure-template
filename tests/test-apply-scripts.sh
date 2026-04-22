@@ -244,7 +244,10 @@ fi
 echo ""
 echo "Test 3: Drift-check mode with drift..."
 
-echo '{"resource_drift": [{"address": "aws_s3_bucket.test"}]}' > "$TF_SHOW_OUTPUT"
+echo '{
+  "resource_drift": [{"address": "aws_s3_bucket.test"}],
+  "resource_changes": [{"address": "aws_s3_bucket.test", "change": {"actions": ["update"]}}]
+}' > "$TF_SHOW_OUTPUT"
 
 set +e
 output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
@@ -278,7 +281,10 @@ echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
 echo ""
 echo "Test 3b: Drift-check mode with --ignore-drift..."
 
-echo '{"resource_drift": [{"address": "aws_s3_bucket.test"}]}' > "$TF_SHOW_OUTPUT"
+echo '{
+  "resource_drift": [{"address": "aws_s3_bucket.test"}],
+  "resource_changes": [{"address": "aws_s3_bucket.test", "change": {"actions": ["update"]}}]
+}' > "$TF_SHOW_OUTPUT"
 
 set +e
 output="$(run_script apply-with-outputs.sh default --check-drift --ignore-drift 2>&1)"
@@ -410,7 +416,10 @@ fi
 echo ""
 echo "Test 7: apply-plan with drift detected..."
 
-echo '{"resource_drift": [{"address": "aws_vpc.main"}]}' > "$TF_SHOW_OUTPUT"
+echo '{
+  "resource_drift": [{"address": "aws_vpc.main"}],
+  "resource_changes": [{"address": "aws_vpc.main", "change": {"actions": ["update"]}}]
+}' > "$TF_SHOW_OUTPUT"
 echo "fake-plan" > "$PROJECT/tf/default/myplan.tfplan"
 
 set +e
@@ -505,6 +514,150 @@ if grep -q "terraform plan -refresh-only -out=refresh.tfplan" "$CMD_LOG"; then
 else
   fail "drift-refresh: plan command arguments wrong"
 fi
+
+# ============================================================
+# Issue #93 regression tests: Computed-attr drift + no-op plan
+# should not block apply.
+# ============================================================
+echo ""
+echo "=== Issue #93 regression: false-positive drift gate ==="
+
+# --- Test 12: apply-with-outputs.sh drift-check: drift + plan no-op → exit 0 ---
+echo ""
+echo "Test 12: apply-with-outputs drift-check with drift but plan no-op (issue #93)..."
+
+echo '{
+  "resource_drift": [
+    {"address": "module.aws_iam.aws_iam_role.writer"},
+    {"address": "module.aws_rds.aws_db_instance.primary"}
+  ],
+  "resource_changes": [
+    {"address": "module.aws_iam.aws_iam_role.writer", "change": {"actions": ["no-op"]}},
+    {"address": "module.aws_rds.aws_db_instance.primary", "change": {"actions": ["no-op"]}}
+  ]
+}' > "$TF_SHOW_OUTPUT"
+
+set +e
+output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
+exit_code=$?
+set -e
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "noop-plan drift: exit code 0 (apply not blocked)"
+else
+  fail "noop-plan drift: expected exit 0, got $exit_code. Output: $output"
+fi
+
+if grep -q "terraform apply -input=false apply.tfplan" "$CMD_LOG"; then
+  pass "noop-plan drift: terraform apply proceeded"
+else
+  fail "noop-plan drift: terraform apply not called"
+fi
+
+if echo "$output" | grep -q "drift detected but plan has no actionable changes"; then
+  pass "noop-plan drift: INFO line printed"
+else
+  fail "noop-plan drift: expected INFO line about no actionable changes"
+fi
+
+# Reset
+echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
+
+# --- Test 13: apply-plan.sh drift-check: drift + plan no-op → exit 0 ---
+echo ""
+echo "Test 13: apply-plan drift-check with drift but plan no-op (issue #93)..."
+
+echo '{
+  "resource_drift": [{"address": "aws_vpc.main"}],
+  "resource_changes": [{"address": "aws_vpc.main", "change": {"actions": ["no-op"]}}]
+}' > "$TF_SHOW_OUTPUT"
+echo "fake-plan" > "$PROJECT/tf/default/myplan.tfplan"
+
+set +e
+output="$(run_script apply-plan.sh default --plan-file myplan --check-drift 2>&1)"
+exit_code=$?
+set -e
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "apply-plan noop drift: exit code 0"
+else
+  fail "apply-plan noop drift: expected exit 0, got $exit_code. Output: $output"
+fi
+
+if grep -q "terraform apply -input=false myplan.tfplan" "$CMD_LOG"; then
+  pass "apply-plan noop drift: terraform apply proceeded"
+else
+  fail "apply-plan noop drift: terraform apply not called"
+fi
+
+# Reset
+echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
+
+# ============================================================
+# Issue #93 regression: TEMPLATE_VERSION stamped in drift-check
+# child process (was appearing as "unknown" in production logs).
+# ============================================================
+echo ""
+echo "=== Issue #93 regression: TEMPLATE_VERSION stamping ==="
+
+# Stamp a template_ref into auto-vars so getTfVar picks it up.
+echo '{"cloud_provider": "aws", "template_ref": "abcdef1234567890"}' \
+  > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+
+# --- Test 14: apply-with-outputs.sh drift-check: template_version stamped ---
+echo ""
+echo "Test 14: apply-with-outputs drift-check stamps template_version..."
+
+echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
+
+set +e
+output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
+exit_code=$?
+set -e
+
+# Parent script logs once via exportTemplateVersion, child drift-check.sh
+# logs once via its own template_version=${TEMPLATE_VERSION:-unknown} echo.
+# Exact count 2 guards against the parent double-logging while the child is
+# silent (which a >=2 assertion would miss).
+tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
+if [[ "$tv_count" -eq 2 ]]; then
+  pass "apply-with-outputs: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
+else
+  fail "apply-with-outputs: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
+fi
+
+if echo "$output" | grep -q "template_version=unknown"; then
+  fail "apply-with-outputs: drift-check still logged template_version=unknown"
+else
+  pass "apply-with-outputs: no template_version=unknown in output"
+fi
+
+# --- Test 15: apply-plan.sh drift-check: template_version stamped ---
+echo ""
+echo "Test 15: apply-plan drift-check stamps template_version..."
+
+echo "fake-plan" > "$PROJECT/tf/default/myplan.tfplan"
+
+set +e
+output="$(run_script apply-plan.sh default --plan-file myplan --check-drift 2>&1)"
+exit_code=$?
+set -e
+
+tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
+if [[ "$tv_count" -eq 2 ]]; then
+  pass "apply-plan: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
+else
+  fail "apply-plan: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
+fi
+
+if echo "$output" | grep -q "template_version=unknown"; then
+  fail "apply-plan: drift-check still logged template_version=unknown"
+else
+  pass "apply-plan: no template_version=unknown in output"
+fi
+
+# Restore common auto-vars for any later tests (none currently, but defensive).
+echo '{"cloud_provider": "aws"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 
 # --- Summary ---
 echo ""

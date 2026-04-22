@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Tests for logTemplateVersion() in shell_utils.sh.
+# Tests for logTemplateVersion() and exportTemplateVersion() in shell_utils.sh.
 
 PASS=0
 FAIL=0
@@ -103,6 +103,85 @@ if [[ "$output" == "template_version=unknown" ]]; then
   pass "empty value: outputs template_version=unknown"
 else
   fail "empty value: expected 'template_version=unknown', got '$output'"
+fi
+
+# ============================================================
+# Test 5: exportTemplateVersion logs AND exports TEMPLATE_VERSION
+# ============================================================
+echo "Test 5: exportTemplateVersion exports env var..."
+
+set_template_ref "abcdef12"
+
+# Child process sees TEMPLATE_VERSION from env after exportTemplateVersion runs.
+child_sees="$(
+  export MARS_PROJECT_ROOT="$PROJECT"
+  # shellcheck disable=SC1091
+  . "$PROJECT/shell_utils.sh"
+  exportTemplateVersion >/dev/null
+  bash -c 'echo "${TEMPLATE_VERSION:-NOTSET}"'
+)"
+
+if [[ "$child_sees" == "abcdef12" ]]; then
+  pass "export: child process sees TEMPLATE_VERSION=abcdef12"
+else
+  fail "export: expected child to see 'abcdef12', got '$child_sees'"
+fi
+
+# Also still logs the same line.
+log_output="$(
+  export MARS_PROJECT_ROOT="$PROJECT"
+  # shellcheck disable=SC1091
+  . "$PROJECT/shell_utils.sh"
+  exportTemplateVersion
+)"
+
+if [[ "$log_output" == "template_version=abcdef12" ]]; then
+  pass "export: log line matches template_version=abcdef12"
+else
+  fail "export: expected log 'template_version=abcdef12', got '$log_output'"
+fi
+
+# ============================================================
+# Test 6: exportTemplateVersion falls back to unknown when template_ref missing
+# ============================================================
+echo "Test 6: exportTemplateVersion falls back to unknown..."
+
+echo '{}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+
+log_output="$(
+  export MARS_PROJECT_ROOT="$PROJECT"
+  # shellcheck disable=SC1091
+  . "$PROJECT/shell_utils.sh"
+  exportTemplateVersion
+)"
+
+if [[ "$log_output" == "template_version=unknown" ]]; then
+  pass "export fallback: logs template_version=unknown"
+else
+  fail "export fallback: expected 'template_version=unknown', got '$log_output'"
+fi
+
+# ============================================================
+# Test 7: logTemplateVersion does NOT export TEMPLATE_VERSION
+# Guards against accidental cross-contamination from the two helpers.
+# ============================================================
+echo "Test 7: logTemplateVersion does not export..."
+
+set_template_ref "should-not-leak"
+
+child_sees="$(
+  export MARS_PROJECT_ROOT="$PROJECT"
+  unset TEMPLATE_VERSION
+  # shellcheck disable=SC1091
+  . "$PROJECT/shell_utils.sh"
+  logTemplateVersion >/dev/null
+  bash -c 'echo "${TEMPLATE_VERSION:-NOTSET}"'
+)"
+
+if [[ "$child_sees" == "NOTSET" ]]; then
+  pass "logTemplateVersion: does not export (child sees NOTSET)"
+else
+  fail "logTemplateVersion: unexpectedly exported TEMPLATE_VERSION; child saw '$child_sees'"
 fi
 
 # --- Summary ---
