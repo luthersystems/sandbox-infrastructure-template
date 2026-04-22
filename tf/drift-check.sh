@@ -100,22 +100,24 @@ drift="$(echo "$plan_json" | jq "$_normalize"'
 ')"
 drift_count="$(echo "$drift" | jq 'length')"
 
+if [[ "$drift_count" -eq 0 ]]; then
+  echo "No resource drift detected."
+  exit 0
+fi
+
 # Count plan changes that terraform would actually apply. Equivalent to
 # `terraform plan -detailed-exitcode` exit 2 vs 0. Computed attributes show up
 # in resource_drift but not in resource_changes, so this filters the common
 # false-positive pattern of provider-populated attrs (inline_policy,
 # managed_policy_arns, association_id, latest_restorable_time, etc.).
+# Missing/null change.actions falls through the select and counts as
+# actionable (fail-safe toward blocking apply).
 has_plan_changes="$(echo "$plan_json" | jq '
   [
     (.resource_changes // [])[] |
     select(.change.actions != ["no-op"] and .change.actions != ["read"])
   ] | length
 ')"
-
-if [[ "$drift_count" -eq 0 ]]; then
-  echo "No resource drift detected."
-  exit 0
-fi
 
 echo "Drift detected: $drift_count resource(s) have drifted."
 echo ""

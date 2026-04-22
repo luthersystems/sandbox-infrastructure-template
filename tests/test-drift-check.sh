@@ -578,7 +578,16 @@ echo "Test 17: Drift + plan has only data-source reads..."
 
 rm -rf "$WORKDIR/outputs"
 read_plan='{
-  "resource_drift": [{"address": "aws_s3_bucket.example"}],
+  "resource_drift": [
+    {
+      "address": "aws_s3_bucket.example",
+      "type": "aws_s3_bucket",
+      "change": {
+        "before": {"tags": {"env": "prod"}},
+        "after":  {"tags": {"env": "staging"}}
+      }
+    }
+  ],
   "resource_changes": [
     {"address": "data.aws_caller_identity.current", "change": {"actions": ["read"]}}
   ]
@@ -599,7 +608,18 @@ echo ""
 echo "Test 18: Drift + resource_changes key absent (refresh-only shape)..."
 
 rm -rf "$WORKDIR/outputs"
-refresh_only_plan='{"resource_drift": [{"address": "aws_s3_bucket.example"}]}'
+refresh_only_plan='{
+  "resource_drift": [
+    {
+      "address": "aws_s3_bucket.example",
+      "type": "aws_s3_bucket",
+      "change": {
+        "before": {"versioning": [{"enabled": true}]},
+        "after":  {"versioning": [{"enabled": false}]}
+      }
+    }
+  ]
+}'
 result="$(run_drift_check "$refresh_only_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
@@ -650,25 +670,62 @@ else
 fi
 
 # ============================================================
-# Test 21: Drift + --ignore-drift + plan has changes — exit 0
-# --ignore-drift still wins over the gate (existing behavior).
+# Test 21: Flag ordering — --strict and --stage interleaved with other flags
+# Guards against arg-parser regressions where position matters.
 # ============================================================
 echo ""
-echo "Test 21: Drift + --ignore-drift with actionable plan..."
+echo "Test 21: Flag ordering variations..."
 
+# Variant A: --strict before --stage
 rm -rf "$WORKDIR/outputs"
-result="$(run_drift_check "$drift_plan" --ignore-drift)"
+result="$(run_drift_check "$refresh_only_plan" --strict --stage myorder-a)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "flag order A (--strict --stage): exit code 2"
+else
+  fail "flag order A (--strict --stage): expected exit 2, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift-myorder-a.json" ]]; then
+  pass "flag order A: drift-myorder-a.json created"
+else
+  fail "flag order A: stage file not created"
+fi
+
+# Variant B: --stage before --strict
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$refresh_only_plan" --stage myorder-b --strict)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "flag order B (--stage --strict): exit code 2"
+else
+  fail "flag order B (--stage --strict): expected exit 2, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift-myorder-b.json" ]]; then
+  pass "flag order B: drift-myorder-b.json created"
+else
+  fail "flag order B: stage file not created"
+fi
+
+# Variant C: --ignore-drift before --strict (ignore still wins)
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$refresh_only_plan" --ignore-drift --strict)"
 exit_code="$(echo "$result" | tail -1)"
 
 if [[ "$exit_code" -eq 0 ]]; then
-  pass "ignore-drift + changes: exit code 0 (ignore-drift wins)"
+  pass "flag order C (--ignore-drift --strict): exit 0 (ignore wins)"
 else
-  fail "ignore-drift + changes: expected exit 0, got $exit_code"
+  fail "flag order C (--ignore-drift --strict): expected exit 0, got $exit_code"
 fi
 
 # ============================================================
-# Test 22: Drift + --strict + --ignore-drift — exit 0
-# --ignore-drift takes precedence over --strict.
+# Test 22: Drift + --strict + --ignore-drift — exit 0 via ignore-drift path
+# --ignore-drift takes precedence over --strict. Assert BOTH exit 0 and the
+# WARNING log line fires — without the log check, a mutation making --strict
+# a silent no-op would still pass via the INFO branch.
 # ============================================================
 echo ""
 echo "Test 22: Drift + --strict + --ignore-drift..."
@@ -682,6 +739,58 @@ if [[ "$exit_code" -eq 0 ]]; then
 else
   fail "strict + ignore-drift: expected exit 0, got $exit_code"
 fi
+
+if echo "$result" | grep -q "WARNING: Drift ignored"; then
+  pass "strict + ignore-drift: WARNING line fired (ignore-drift path)"
+else
+  fail "strict + ignore-drift: expected 'WARNING: Drift ignored' log; got: $result"
+fi
+
+# Confirm we did NOT hit the INFO branch (mutually exclusive with ignore-drift).
+if echo "$result" | grep -q "drift detected but plan has no actionable changes"; then
+  fail "strict + ignore-drift: INFO branch fired (should be WARNING)"
+else
+  pass "strict + ignore-drift: INFO branch did NOT fire"
+fi
+
+# ============================================================
+# Tests 23-27: Action-kind coverage — every actionable action in
+# resource_changes[] must block apply. Guards against a mutation that
+# accidentally treats delete/create/replace as non-actionable.
+# ============================================================
+for action_case in \
+  'delete|["delete"]' \
+  'create|["create"]' \
+  'replace-forward|["create","delete"]' \
+  'replace-reverse|["delete","create"]' \
+  'missing-actions|null'; do
+  name="${action_case%%|*}"
+  actions="${action_case#*|}"
+  echo ""
+  echo "Test action-kind: $name (actions=$actions)..."
+
+  rm -rf "$WORKDIR/outputs"
+  if [[ "$actions" == "null" ]]; then
+    # Missing change.actions entirely — fail-safe should treat as actionable.
+    action_plan='{
+      "resource_drift": [{"address": "aws_x.y", "change": {"before": {"k": "a"}, "after": {"k": "b"}}}],
+      "resource_changes": [{"address": "aws_x.y", "change": {}}]
+    }'
+  else
+    action_plan='{
+      "resource_drift": [{"address": "aws_x.y", "change": {"before": {"k": "a"}, "after": {"k": "b"}}}],
+      "resource_changes": [{"address": "aws_x.y", "change": {"actions": '"$actions"'}}]
+    }'
+  fi
+  result="$(run_drift_check "$action_plan")"
+  exit_code="$(echo "$result" | tail -1)"
+
+  if [[ "$exit_code" -eq 2 ]]; then
+    pass "action-kind $name: exit 2 (treated as actionable)"
+  else
+    fail "action-kind $name: expected exit 2, got $exit_code. Output: $result"
+  fi
+done
 
 # --- Summary ---
 echo ""

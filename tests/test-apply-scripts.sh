@@ -615,13 +615,15 @@ output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
 exit_code=$?
 set -e
 
-# The parent script also logs template_version=, so drift-check should log
-# the same SHA (not "unknown"). Grep for exactly the parent-logged SHA.
+# Parent script logs once via exportTemplateVersion, child drift-check.sh
+# logs once via its own template_version=${TEMPLATE_VERSION:-unknown} echo.
+# Exact count 2 guards against the parent double-logging while the child is
+# silent (which a >=2 assertion would miss).
 tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
-if [[ "$tv_count" -ge 2 ]]; then
-  pass "apply-with-outputs: template_version=<sha> appears >=2 times (parent + child drift-check)"
+if [[ "$tv_count" -eq 2 ]]; then
+  pass "apply-with-outputs: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
 else
-  fail "apply-with-outputs: template_version not propagated to drift-check; got $tv_count occurrences. Output: $output"
+  fail "apply-with-outputs: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
 fi
 
 if echo "$output" | grep -q "template_version=unknown"; then
@@ -642,10 +644,10 @@ exit_code=$?
 set -e
 
 tv_count="$(echo "$output" | grep -c "template_version=abcdef1234567890" || true)"
-if [[ "$tv_count" -ge 2 ]]; then
-  pass "apply-plan: template_version=<sha> appears >=2 times (parent + child drift-check)"
+if [[ "$tv_count" -eq 2 ]]; then
+  pass "apply-plan: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
 else
-  fail "apply-plan: template_version not propagated to drift-check; got $tv_count occurrences. Output: $output"
+  fail "apply-plan: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
 fi
 
 if echo "$output" | grep -q "template_version=unknown"; then
