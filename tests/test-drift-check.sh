@@ -94,7 +94,13 @@ echo ""
 echo "Test 2: Drift detected..."
 
 rm -rf "$WORKDIR/outputs"
-drift_plan='{"resource_drift": [{"address": "aws_s3_bucket.example", "type": "aws_s3_bucket"}]}'
+# drift_plan includes an actionable resource_changes entry so the plan-change
+# gate in drift-check.sh treats drift as apply-blocking (exit 2). Tests that
+# want to exercise the "drift but plan is no-op" gate use other fixtures below.
+drift_plan='{
+  "resource_drift": [{"address": "aws_s3_bucket.example", "type": "aws_s3_bucket"}],
+  "resource_changes": [{"address": "aws_s3_bucket.example", "change": {"actions": ["update"]}}]
+}'
 result="$(run_drift_check "$drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
@@ -399,24 +405,29 @@ echo ""
 echo "Test 12: Mixed real and false-positive drift..."
 
 rm -rf "$WORKDIR/outputs"
-mixed_plan='{"resource_drift": [
-  {
-    "address": "aws_s3_bucket.false_positive",
-    "type": "aws_s3_bucket",
-    "change": {
-      "before": {"cors_rule": null, "tags": {"env": "prod"}},
-      "after":  {"cors_rule": [],   "tags": {"env": "prod"}}
+mixed_plan='{
+  "resource_drift": [
+    {
+      "address": "aws_s3_bucket.false_positive",
+      "type": "aws_s3_bucket",
+      "change": {
+        "before": {"cors_rule": null, "tags": {"env": "prod"}},
+        "after":  {"cors_rule": [],   "tags": {"env": "prod"}}
+      }
+    },
+    {
+      "address": "aws_instance.real_drift",
+      "type": "aws_instance",
+      "change": {
+        "before": {"instance_type": "t3.micro", "tags": {"Name": "old"}},
+        "after":  {"instance_type": "t3.small", "tags": {"Name": "new"}}
+      }
     }
-  },
-  {
-    "address": "aws_instance.real_drift",
-    "type": "aws_instance",
-    "change": {
-      "before": {"instance_type": "t3.micro", "tags": {"Name": "old"}},
-      "after":  {"instance_type": "t3.small", "tags": {"Name": "new"}}
-    }
-  }
-]}'
+  ],
+  "resource_changes": [
+    {"address": "aws_instance.real_drift", "change": {"actions": ["update"]}}
+  ]
+}'
 result="$(run_drift_check "$mixed_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
@@ -504,6 +515,172 @@ if echo "$result" | grep -q "template_version=unknown"; then
   pass "fallback: template_version=unknown printed"
 else
   fail "fallback: expected template_version=unknown in output"
+fi
+
+# ============================================================
+# Test 16: Drift + resource_changes all no-op — exit 0 (INFO-only)
+# Reproduces the issue #93 production scenario: terraform plan reports
+# "No changes" but resource_drift lists provider-populated Computed attrs.
+# Drift should be reported but not block apply.
+# ============================================================
+echo ""
+echo "Test 16: Drift + plan is no-op (Computed-attr false-positive gate)..."
+
+rm -rf "$WORKDIR/outputs"
+noop_plan='{
+  "resource_drift": [
+    {
+      "address": "module.aws_iam.aws_iam_role.writer",
+      "type": "aws_iam_role",
+      "change": {
+        "before": {"managed_policy_arns": []},
+        "after":  {"managed_policy_arns": ["arn:aws:iam::aws:policy/example"]}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.aws_iam.aws_iam_role.writer", "change": {"actions": ["no-op"]}}
+  ]
+}'
+result="$(run_drift_check "$noop_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "noop-plan: exit code 0 (not blocking apply)"
+else
+  fail "noop-plan: expected exit 0, got $exit_code"
+fi
+
+if echo "$result" | grep -q "drift detected but plan has no actionable changes"; then
+  pass "noop-plan: INFO line printed"
+else
+  fail "noop-plan: expected INFO line about no actionable changes"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "noop-plan: drift.json still written (diagnostic artifact)"
+else
+  fail "noop-plan: drift.json should exist even when not blocking"
+fi
+
+if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "noop-plan: drift_detected is true in report"
+else
+  fail "noop-plan: drift_detected should still be true"
+fi
+
+# ============================================================
+# Test 17: Drift + resource_changes all "read" — exit 0
+# Data-source refreshes are not actionable.
+# ============================================================
+echo ""
+echo "Test 17: Drift + plan has only data-source reads..."
+
+rm -rf "$WORKDIR/outputs"
+read_plan='{
+  "resource_drift": [{"address": "aws_s3_bucket.example"}],
+  "resource_changes": [
+    {"address": "data.aws_caller_identity.current", "change": {"actions": ["read"]}}
+  ]
+}'
+result="$(run_drift_check "$read_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "read-only: exit code 0"
+else
+  fail "read-only: expected exit 0, got $exit_code"
+fi
+
+# ============================================================
+# Test 18: Drift + resource_changes absent — exit 0
+# ============================================================
+echo ""
+echo "Test 18: Drift + resource_changes key absent (refresh-only shape)..."
+
+rm -rf "$WORKDIR/outputs"
+refresh_only_plan='{"resource_drift": [{"address": "aws_s3_bucket.example"}]}'
+result="$(run_drift_check "$refresh_only_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "refresh-only shape: exit code 0"
+else
+  fail "refresh-only shape: expected exit 0, got $exit_code"
+fi
+
+# ============================================================
+# Test 19: Drift + --strict + resource_changes absent — exit 2
+# drift-refresh.sh invariant: standalone alarm still fires.
+# ============================================================
+echo ""
+echo "Test 19: Drift + --strict + no resource_changes (refresh-only alarm)..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$refresh_only_plan" --strict)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "strict refresh-only: exit code 2"
+else
+  fail "strict refresh-only: expected exit 2, got $exit_code"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "strict refresh-only: drift.json created"
+else
+  fail "strict refresh-only: drift.json not created"
+fi
+
+# ============================================================
+# Test 20: Drift + --strict + resource_changes all no-op — exit 2
+# --strict bypasses the plan-change gate entirely.
+# ============================================================
+echo ""
+echo "Test 20: Drift + --strict + plan all no-op..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$noop_plan" --strict)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "strict noop-plan: exit code 2"
+else
+  fail "strict noop-plan: expected exit 2, got $exit_code"
+fi
+
+# ============================================================
+# Test 21: Drift + --ignore-drift + plan has changes — exit 0
+# --ignore-drift still wins over the gate (existing behavior).
+# ============================================================
+echo ""
+echo "Test 21: Drift + --ignore-drift with actionable plan..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$drift_plan" --ignore-drift)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "ignore-drift + changes: exit code 0 (ignore-drift wins)"
+else
+  fail "ignore-drift + changes: expected exit 0, got $exit_code"
+fi
+
+# ============================================================
+# Test 22: Drift + --strict + --ignore-drift — exit 0
+# --ignore-drift takes precedence over --strict.
+# ============================================================
+echo ""
+echo "Test 22: Drift + --strict + --ignore-drift..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$drift_plan" --strict --ignore-drift)"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "strict + ignore-drift: exit code 0"
+else
+  fail "strict + ignore-drift: expected exit 0, got $exit_code"
 fi
 
 # --- Summary ---

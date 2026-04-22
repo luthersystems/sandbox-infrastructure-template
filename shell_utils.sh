@@ -437,3 +437,12 @@ logTemplateVersion() {
   ver=$(getTfVar "template_ref")
   echo "template_version=${ver:-unknown}"
 }
+
+# exportTemplateVersion exports TEMPLATE_VERSION and logs template_version=<sha>.
+# Use in scripts that invoke child processes (e.g. drift-check.sh) which read
+# TEMPLATE_VERSION from env. For log-only use, prefer logTemplateVersion.
+exportTemplateVersion() {
+  export TEMPLATE_VERSION
+  TEMPLATE_VERSION="$(getTfVar template_ref)"
+  echo "template_version=${TEMPLATE_VERSION:-unknown}"
+}

@@ -2,12 +2,20 @@
 # shellcheck shell=bash
 # drift-check.sh — Check a terraform plan file for resource drift.
 #
-# Usage: bash drift-check.sh <plan-file> [--ignore-drift]
+# Usage: bash drift-check.sh <plan-file> [--ignore-drift] [--stage <name>] [--strict]
 #
 # Exit codes:
-#   0 — No drift detected (or drift ignored via --ignore-drift)
+#   0 — No drift detected, drift ignored via --ignore-drift, or drift found but
+#       the plan has no actionable changes (all resource_changes are no-op/read)
+#       and --strict was not passed. Drift is still reported and drift.json is
+#       still written in all these cases.
 #   1 — Error (missing plan file, jq failure, etc.)
-#   2 — Drift detected
+#   2 — Drift detected AND (--strict OR plan has actionable changes).
+#
+# Refresh-only plans (from `terraform plan -refresh-only`) always have no
+# actionable changes, so drift-check is informational on them by default. Pass
+# --strict to alarm on any drift regardless — used by drift-refresh.sh as a
+# standalone manual-edit detector.
 #
 # If drift is found, writes a JSON report to $MARS_PROJECT_ROOT/outputs/drift.json.
 # Does NOT source utils.sh — operates on a plan file already in the CWD.
@@ -15,7 +23,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: drift-check.sh <plan-file> [--ignore-drift]" >&2
+  echo "Usage: drift-check.sh <plan-file> [--ignore-drift] [--stage <name>] [--strict]" >&2
   exit 1
 fi
 
@@ -24,9 +32,11 @@ shift
 
 ignore_drift=false
 stage_name=""
+strict=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ignore-drift) ignore_drift=true; shift ;;
+    --strict) strict=true; shift ;;
     --stage)
       if [[ $# -lt 2 ]]; then
         echo "ERROR: --stage requires a value" >&2
@@ -90,6 +100,18 @@ drift="$(echo "$plan_json" | jq "$_normalize"'
 ')"
 drift_count="$(echo "$drift" | jq 'length')"
 
+# Count plan changes that terraform would actually apply. Equivalent to
+# `terraform plan -detailed-exitcode` exit 2 vs 0. Computed attributes show up
+# in resource_drift but not in resource_changes, so this filters the common
+# false-positive pattern of provider-populated attrs (inline_policy,
+# managed_policy_arns, association_id, latest_restorable_time, etc.).
+has_plan_changes="$(echo "$plan_json" | jq '
+  [
+    (.resource_changes // [])[] |
+    select(.change.actions != ["no-op"] and .change.actions != ["read"])
+  ] | length
+')"
+
 if [[ "$drift_count" -eq 0 ]]; then
   echo "No resource drift detected."
   exit 0
@@ -137,6 +159,11 @@ fi
 
 if [[ "$ignore_drift" == "true" ]]; then
   echo "WARNING: Drift ignored (--ignore-drift flag set)."
+  exit 0
+fi
+
+if [[ "$strict" != "true" && "$has_plan_changes" -eq 0 ]]; then
+  echo "INFO: drift detected but plan has no actionable changes (0 to add/change/destroy); not blocking apply."
   exit 0
 fi
 
