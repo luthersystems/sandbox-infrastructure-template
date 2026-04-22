@@ -560,6 +560,12 @@ else
   fail "noop-plan drift: expected INFO line about no actionable changes"
 fi
 
+if [[ -f "$PROJECT/outputs/drift.json" ]] && jq -e '.actionable == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "noop-plan drift: drift.json actionable=false (issue #95)"
+else
+  fail "noop-plan drift: drift.json should have actionable=false"
+fi
+
 # Reset
 echo '{"resource_drift": []}' > "$TF_SHOW_OUTPUT"
 

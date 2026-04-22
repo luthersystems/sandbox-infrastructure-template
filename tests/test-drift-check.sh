@@ -141,6 +141,12 @@ else
   fail "drift: resource address not in drift.json"
 fi
 
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift: actionable is true (plan has update action)"
+else
+  fail "drift: actionable should be true for plan with actionable changes"
+fi
+
 # ============================================================
 # Test 3: Drift + --ignore-drift — exit 0, drift.json created
 # ============================================================
@@ -167,6 +173,12 @@ if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1
   pass "ignore-drift: drift_detected is true in drift.json"
 else
   fail "ignore-drift: drift.json content wrong"
+fi
+
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "ignore-drift: actionable field preserved"
+else
+  fail "ignore-drift: actionable field missing or wrong"
 fi
 
 # ============================================================
@@ -569,6 +581,12 @@ else
   fail "noop-plan: drift_detected should still be true"
 fi
 
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "noop-plan: actionable is false (Computed-attr / no-op plan)"
+else
+  fail "noop-plan: actionable should be false when plan has no actionable changes"
+fi
+
 # ============================================================
 # Test 17: Drift + resource_changes all "read" — exit 0
 # Data-source refreshes are not actionable.
@@ -650,6 +668,16 @@ if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
   pass "strict refresh-only: drift.json created"
 else
   fail "strict refresh-only: drift.json not created"
+fi
+
+# actionable tracks resource_changes[] content, NOT strict-mode alarm semantics
+# (issue #95 Option 1). Consumers needing the strict signal key off workflow
+# exit status instead. Without this assertion, a mutation that conflated
+# --strict with actionable=true would silently pass.
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "strict refresh-only: actionable stays false (strict ≠ actionable)"
+else
+  fail "strict refresh-only: actionable should be false (no resource_changes)"
 fi
 
 # ============================================================
