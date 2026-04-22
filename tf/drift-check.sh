@@ -144,10 +144,19 @@ _drift_filter="$_normalize"'
 '
 echo "$drift" | jq -r "$_drift_filter"
 
-# Write drift report
+# Write drift report. `actionable` mirrors the exit-code gate: true when
+# resource_changes[] has a non-no-op/read entry (plan would actually change
+# something). Consumers (ui-core Job.drift_actionable) use it to distinguish
+# "drift detected, apply ran" from "drift detected, apply blocked" without
+# cross-referencing job status. In --strict mode, actionable stays false when
+# resource_changes[] is empty — the field reflects plan content only, not the
+# alarm semantics of strict mode.
 mkdir -p "$OUTPUTS_DIR"
-_drift_report="$(jq -n --argjson drift "$drift" --argjson count "$drift_count" \
-  '{ drift_detected: true, drift_count: $count, resources: $drift }')"
+_drift_report="$(jq -n \
+  --argjson drift "$drift" \
+  --argjson count "$drift_count" \
+  --argjson changes "$has_plan_changes" \
+  '{ drift_detected: true, drift_count: $count, actionable: ($changes > 0), resources: $drift }')"
 
 # Always write drift.json (Argo artifact path expects this)
 echo "$_drift_report" > "$OUTPUTS_DIR/drift.json"

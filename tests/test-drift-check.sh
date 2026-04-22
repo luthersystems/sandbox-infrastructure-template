@@ -141,6 +141,12 @@ else
   fail "drift: resource address not in drift.json"
 fi
 
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift: actionable is true (plan has update action)"
+else
+  fail "drift: actionable should be true for plan with actionable changes"
+fi
+
 # ============================================================
 # Test 3: Drift + --ignore-drift — exit 0, drift.json created
 # ============================================================
@@ -167,6 +173,12 @@ if jq -e '.drift_detected == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1
   pass "ignore-drift: drift_detected is true in drift.json"
 else
   fail "ignore-drift: drift.json content wrong"
+fi
+
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "ignore-drift: actionable field preserved"
+else
+  fail "ignore-drift: actionable field missing or wrong"
 fi
 
 # ============================================================
@@ -569,6 +581,12 @@ else
   fail "noop-plan: drift_detected should still be true"
 fi
 
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "noop-plan: actionable is false (Computed-attr / no-op plan)"
+else
+  fail "noop-plan: actionable should be false when plan has no actionable changes"
+fi
+
 # ============================================================
 # Test 17: Drift + resource_changes all "read" — exit 0
 # Data-source refreshes are not actionable.
@@ -601,6 +619,15 @@ else
   fail "read-only: expected exit 0, got $exit_code"
 fi
 
+# Purest test of issue #95 "read is not actionable" semantic. Without this a
+# mutation treating ["read"] as actionable in the jq expression would pass
+# (exit 0 comes from the plan-change gate, not the field computation).
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "read-only: actionable is false (read is not actionable)"
+else
+  fail "read-only: actionable should be false for ['read']-only plans"
+fi
+
 # ============================================================
 # Test 18: Drift + resource_changes absent — exit 0
 # ============================================================
@@ -629,6 +656,12 @@ else
   fail "refresh-only shape: expected exit 0, got $exit_code"
 fi
 
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "refresh-only shape: actionable is false (no resource_changes)"
+else
+  fail "refresh-only shape: actionable should be false"
+fi
+
 # ============================================================
 # Test 19: Drift + --strict + resource_changes absent — exit 2
 # drift-refresh.sh invariant: standalone alarm still fires.
@@ -652,6 +685,16 @@ else
   fail "strict refresh-only: drift.json not created"
 fi
 
+# actionable tracks resource_changes[] content, NOT strict-mode alarm semantics
+# (issue #95 Option 1). Consumers needing the strict signal key off workflow
+# exit status instead. Without this assertion, a mutation that conflated
+# --strict with actionable=true would silently pass.
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "strict refresh-only: actionable stays false (strict ≠ actionable)"
+else
+  fail "strict refresh-only: actionable should be false (no resource_changes)"
+fi
+
 # ============================================================
 # Test 20: Drift + --strict + resource_changes all no-op — exit 2
 # --strict bypasses the plan-change gate entirely.
@@ -667,6 +710,14 @@ if [[ "$exit_code" -eq 2 ]]; then
   pass "strict noop-plan: exit code 2"
 else
   fail "strict noop-plan: expected exit 2, got $exit_code"
+fi
+
+# Guards against a mutation like `actionable: ($changes > 0 or $strict_mode)`.
+# Test 19 covers resource_changes absent; this covers present-but-all-no-op.
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "strict noop-plan: actionable stays false (strict ≠ actionable)"
+else
+  fail "strict noop-plan: actionable should be false (plan is no-op)"
 fi
 
 # ============================================================
@@ -790,7 +841,48 @@ for action_case in \
   else
     fail "action-kind $name: expected exit 2, got $exit_code. Output: $result"
   fi
+
+  # Partial-match mutations (e.g. `select(.change.actions | contains(["create"]))`)
+  # could preserve exit codes but corrupt actionable counting per action kind.
+  if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+    pass "action-kind $name: actionable is true"
+  else
+    fail "action-kind $name: actionable should be true"
+  fi
 done
+
+# ============================================================
+# Test 28: Mixed actions in resource_changes — any actionable entry wins
+# Guards the counting path for plans that mix no-op and real changes.
+# ============================================================
+echo ""
+echo "Test 28: Mixed actions (some no-op, some update) — actionable=true..."
+
+rm -rf "$WORKDIR/outputs"
+mixed_actions_plan='{
+  "resource_drift": [
+    {"address": "aws_x.y", "change": {"before": {"k": "a"}, "after": {"k": "b"}}}
+  ],
+  "resource_changes": [
+    {"address": "aws_a.b", "change": {"actions": ["no-op"]}},
+    {"address": "aws_c.d", "change": {"actions": ["read"]}},
+    {"address": "aws_x.y", "change": {"actions": ["update"]}}
+  ]
+}'
+result="$(run_drift_check "$mixed_actions_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "mixed-actions: exit code 2 (actionable entry present)"
+else
+  fail "mixed-actions: expected exit 2, got $exit_code"
+fi
+
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "mixed-actions: actionable is true (at least one non-no-op/read)"
+else
+  fail "mixed-actions: actionable should be true with any actionable entry"
+fi
 
 # --- Summary ---
 echo ""
