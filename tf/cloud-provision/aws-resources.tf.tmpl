@@ -143,6 +143,16 @@ output "state_backend_vm" {
   value = local.state_backend_vm
 }
 
+output "state_workspace_custom" {
+  description = "Workspace key prefix for the custom-stack remote backend."
+  value       = local.state_workspace_custom
+}
+
+output "state_backend_custom" {
+  description = "Per-stack remote backend config for custom-stack-provision. Cloud-agnostic name; on AWS the map is {bucket, region, key, workspace_key_prefix, kms_key_id, role_arn}."
+  value       = local.state_backend_custom
+}
+
 resource "local_file" "vm_backend_template" {
   content  = templatefile("backend.tf.tftpl", local.state_backend_vm)
   filename = "${path.module}/../vm-provision/backend.tf"
