@@ -119,11 +119,13 @@ output "gcp_tfstate_bucket" {
 }
 
 output "state_workspace_custom" {
-  value = local.gcp_state_workspace_custom
+  description = "Workspace prefix for the custom-stack remote backend."
+  value       = local.gcp_state_workspace_custom
 }
 
 output "state_backend_custom" {
-  value = local.gcp_state_backend_custom
+  description = "Per-stack remote backend config for custom-stack-provision. Cloud-agnostic name; on GCP the map is {bucket, prefix}."
+  value       = local.gcp_state_backend_custom
 }
 
 output "gcp_inspector_sa_email" {
