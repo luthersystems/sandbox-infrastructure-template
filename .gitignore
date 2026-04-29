@@ -2,6 +2,7 @@ secrets/
 .tmp/
 .template_version
 tf/auto-vars/skip_remote_state.auto.tfvars.json
+.claude/scheduled_tasks.lock
 
 # Generated at deploy time by _selectCloudFiles() from .tf.tmpl templates
 tf/*/providers-*.tf
