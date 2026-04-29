@@ -143,6 +143,14 @@ output "state_backend_vm" {
   value = local.state_backend_vm
 }
 
+output "state_workspace_custom" {
+  value = local.state_workspace_custom
+}
+
+output "state_backend_custom" {
+  value = local.state_backend_custom
+}
+
 resource "local_file" "vm_backend_template" {
   content  = templatefile("backend.tf.tftpl", local.state_backend_vm)
   filename = "${path.module}/../vm-provision/backend.tf"

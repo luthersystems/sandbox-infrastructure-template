@@ -18,6 +18,24 @@ resource "google_storage_bucket" "tfstate" {
 }
 
 # ============================================================================
+# GCP State Backend Configuration
+# ============================================================================
+
+locals {
+  gcp_state_workspace_custom = "custom"
+
+  gcp_state_backend_custom = {
+    bucket = google_storage_bucket.tfstate.name
+    prefix = local.gcp_state_workspace_custom
+  }
+}
+
+resource "local_file" "gcp_custom_backend_template" {
+  content  = templatefile("backend-gcs.tf.tftpl", local.gcp_state_backend_custom)
+  filename = "${path.module}/../custom-stack-provision/backend.tf"
+}
+
+# ============================================================================
 # GCP Inspector Service Account
 # ============================================================================
 
@@ -98,6 +116,14 @@ resource "google_service_account_iam_member" "management_token_creator" {
 output "gcp_tfstate_bucket" {
   description = "GCS bucket for Terraform state"
   value       = google_storage_bucket.tfstate.name
+}
+
+output "state_workspace_custom" {
+  value = local.gcp_state_workspace_custom
+}
+
+output "state_backend_custom" {
+  value = local.gcp_state_backend_custom
 }
 
 output "gcp_inspector_sa_email" {
