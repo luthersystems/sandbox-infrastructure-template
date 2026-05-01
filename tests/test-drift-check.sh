@@ -823,7 +823,7 @@ else
 fi
 
 # Confirm we did NOT hit the INFO branch (mutually exclusive with ignore-drift).
-if echo "$result" | grep -q "drift detected but plan has no actionable changes"; then
+if echo "$result" | grep -q "drift detected but no drifted resource is being applied"; then
   fail "strict + ignore-drift: INFO branch fired (should be WARNING)"
 else
   pass "strict + ignore-drift: INFO branch did NOT fire"
@@ -1077,6 +1077,74 @@ if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; th
   pass "real-drift-plus-unrelated: actionable is true (drifted address has update action)"
 else
   fail "real-drift-plus-unrelated: actionable should be true"
+fi
+
+# Mirror Test 30's invariance check: drift_count and resources are unfiltered
+# regardless of the actionable join. A regression that filtered resources down
+# to the actionable subset would corrupt the diagnostic surface.
+if jq -e '.drift_count == 1 and (.resources | length) == 1' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "real-drift-plus-unrelated: drift_count and resources preserve diagnostic content"
+else
+  fail "real-drift-plus-unrelated: drift_count/resources should reflect the unfiltered drift entry"
+fi
+
+# ============================================================
+# Test 32: Heterogeneous drift list — two drift entries, only one whose
+# address has an actionable resource_changes entry. Catches mutations
+# where the address-join filter handles N=1 lists but not N>1 (e.g. a
+# stray .[0] reduction, or an `all`-instead-of-`any` predicate). Without
+# this, mutating the jq filter to `[$drift[0]] | select(...) | length`
+# would survive Tests 30/31 because both have length-1 drift lists.
+# ============================================================
+echo ""
+echo "Test 32: Heterogeneous drift list (one no-op, one actionable)..."
+
+rm -rf "$WORKDIR/outputs"
+mixed_drift_plan='{
+  "resource_drift": [
+    {
+      "address": "module.gcp_firestore.google_firestore_database.database",
+      "type": "google_firestore_database",
+      "change": {
+        "before": {"etag": "old"},
+        "after":  {"etag": "new"}
+      }
+    },
+    {
+      "address": "module.gcp_iam.google_project_iam_member.binding",
+      "type": "google_project_iam_member",
+      "change": {
+        "before": {"member": "user:old@example.com"},
+        "after":  {"member": "user:tampered@example.com"}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.gcp_firestore.google_firestore_database.database", "change": {"actions": ["no-op"]}},
+    {"address": "module.gcp_iam.google_project_iam_member.binding",        "change": {"actions": ["update"]}}
+  ]
+}'
+result="$(run_drift_check "$mixed_drift_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "heterogeneous-drift: exit code 2 (one drift entry is actionable)"
+else
+  fail "heterogeneous-drift: expected exit 2, got $exit_code"
+fi
+
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "heterogeneous-drift: actionable is true (the iam binding drift matches an update action)"
+else
+  fail "heterogeneous-drift: actionable should be true with one actionable drift in the list"
+fi
+
+# Both drift entries survive — drift_count/resources is unfiltered. A regression
+# that joined the filter into the resources output would shrink to length 1.
+if jq -e '.drift_count == 2 and (.resources | length) == 2' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "heterogeneous-drift: both drift entries preserved in report (unfiltered)"
+else
+  fail "heterogeneous-drift: drift_count should be 2 and resources length 2"
 fi
 
 # --- Summary ---
