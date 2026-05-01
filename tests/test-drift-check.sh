@@ -575,10 +575,10 @@ else
   fail "noop-plan: expected exit 0, got $exit_code"
 fi
 
-if echo "$result" | grep -q "drift detected but plan has no actionable changes"; then
+if echo "$result" | grep -q "drift detected but no drifted resource is being applied"; then
   pass "noop-plan: INFO line printed"
 else
-  fail "noop-plan: expected INFO line about no actionable changes"
+  fail "noop-plan: expected INFO line about no drifted resource being applied"
 fi
 
 if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
@@ -969,6 +969,114 @@ if jq -e '.template_version == "only-template" and .presets_version == null' \
   pass "drift.json: independent null-handling for each provenance field"
 else
   fail "drift.json: expected template_version=\"only-template\" with presets_version=null"
+fi
+
+# ============================================================
+# Test 30: Computed-attr drift on idle resource + actionable change on
+# UNRELATED resource — must NOT block (issue #102 / insideout#209).
+# Reproduces the canonical scenario: operator runs tfdeploy to add a new
+# component while existing resources have benign computed-attr drift
+# (firestore.etag, storage_bucket.updated, etc.). Pre-fix, has_plan_changes
+# > 0 because of the new component, so drift on the idle resource gated
+# the apply. Post-fix, the address-join filter sees that the drifted
+# resource is no-op and the actionable resource isn't drifted, so the
+# drift is correctly classified as informational.
+# ============================================================
+echo ""
+echo "Test 30: Drift on idle resource + actionable change elsewhere..."
+
+rm -rf "$WORKDIR/outputs"
+issue_209_plan='{
+  "resource_drift": [
+    {
+      "address": "module.gcp_firestore.google_firestore_database.database",
+      "type": "google_firestore_database",
+      "change": {
+        "before": {"etag": "IOOtxuGkl5QDMN34r+Gkl5QD"},
+        "after":  {"etag": "IK2w2PHFl5QDMIHQkeKkl5QD"}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.gcp_firestore.google_firestore_database.database", "change": {"actions": ["no-op"]}},
+    {"address": "module.gcp_new_component.google_storage_bucket.bucket",   "change": {"actions": ["create"]}}
+  ]
+}'
+result="$(run_drift_check "$issue_209_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "issue-209: exit code 0 (idle-resource drift not blocking)"
+else
+  fail "issue-209: expected exit 0, got $exit_code"
+fi
+
+if echo "$result" | grep -q "drift detected but no drifted resource is being applied"; then
+  pass "issue-209: INFO line fires"
+else
+  fail "issue-209: expected INFO line; got: $result"
+fi
+
+if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
+  pass "issue-209: drift.json still written (diagnostic artifact)"
+else
+  fail "issue-209: drift.json not created"
+fi
+
+if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "issue-209: actionable is false (drifted resource is no-op in plan)"
+else
+  fail "issue-209: actionable should be false — drifted resource is not in actionable resource_changes"
+fi
+
+# Diagnostic content survives — drift_count + resources reflect the unfiltered
+# null-vs-empty drift. ui-core's "Detected && !Actionable → informational"
+# rendering depends on this.
+if jq -e '.drift_count == 1 and (.resources | length) == 1' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "issue-209: drift_count and resources preserve diagnostic content"
+else
+  fail "issue-209: drift_count/resources should still reflect the drift entry"
+fi
+
+# ============================================================
+# Test 31: Drift on resource + actionable change on SAME resource +
+# unrelated actionable change — must block. Mirror of #30 but with the
+# join hitting. Guards against an over-eager filter that drops drift on
+# resources Terraform plans to overwrite.
+# ============================================================
+echo ""
+echo "Test 31: Drift on resource that is also being applied (with unrelated change)..."
+
+rm -rf "$WORKDIR/outputs"
+real_drift_plan='{
+  "resource_drift": [
+    {
+      "address": "module.gcp_iam.google_project_iam_member.binding",
+      "type": "google_project_iam_member",
+      "change": {
+        "before": {"member": "user:old@example.com"},
+        "after":  {"member": "user:tampered@example.com"}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.gcp_iam.google_project_iam_member.binding",      "change": {"actions": ["update"]}},
+    {"address": "module.gcp_new_component.google_storage_bucket.bucket", "change": {"actions": ["create"]}}
+  ]
+}'
+result="$(run_drift_check "$real_drift_plan")"
+exit_code="$(echo "$result" | tail -1)"
+
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "real-drift-plus-unrelated: exit code 2 (drifted resource will be overwritten)"
+else
+  fail "real-drift-plus-unrelated: expected exit 2, got $exit_code"
+fi
+
+if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "real-drift-plus-unrelated: actionable is true (drifted address has update action)"
+else
+  fail "real-drift-plus-unrelated: actionable should be true"
 fi
 
 # --- Summary ---

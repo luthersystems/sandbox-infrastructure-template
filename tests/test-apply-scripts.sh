@@ -583,10 +583,10 @@ else
   fail "noop-plan drift: terraform apply not called"
 fi
 
-if echo "$output" | grep -q "drift detected but plan has no actionable changes"; then
+if echo "$output" | grep -q "drift detected but no drifted resource is being applied"; then
   pass "noop-plan drift: INFO line printed"
 else
-  fail "noop-plan drift: expected INFO line about no actionable changes"
+  fail "noop-plan drift: expected INFO line about no drifted resource being applied"
 fi
 
 if [[ -f "$PROJECT/outputs/drift.json" ]] && jq -e '.actionable == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then

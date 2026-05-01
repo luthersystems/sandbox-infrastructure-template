@@ -6,14 +6,17 @@
 #
 # Exit codes:
 #   0 — No drift detected, drift ignored via --ignore-drift, or drift found but
-#       the plan has no actionable changes (all resource_changes are no-op/read)
-#       and --strict was not passed. Drift is still reported and drift.json is
-#       still written in all these cases.
+#       no drifted resource is in the plan's actionable set (resource_changes[]
+#       entry for that address is no-op/read/absent) and --strict was not
+#       passed. Drift is still reported and drift.json is still written in all
+#       these cases.
 #   1 — Error (missing plan file, jq failure, etc.)
-#   2 — Drift detected AND (--strict OR plan has actionable changes).
+#   2 — Drift detected on a resource the plan will modify (resource_changes[]
+#       entry has a non-no-op/read action), OR --strict and any drift exists.
 #
-# Refresh-only plans (from `terraform plan -refresh-only`) always have no
-# actionable changes, so drift-check is informational on them by default. Pass
+# Refresh-only plans (from `terraform plan -refresh-only`) have no
+# resource_changes at all, so by definition no drift can be address-joined to
+# an actionable change — drift-check is informational on them by default. Pass
 # --strict to alarm on any drift regardless — used by drift-refresh.sh as a
 # standalone manual-edit detector.
 #
@@ -106,18 +109,24 @@ if [[ "$drift_count" -eq 0 ]]; then
   exit 0
 fi
 
-# Count plan changes that terraform would actually apply. Equivalent to
-# `terraform plan -detailed-exitcode` exit 2 vs 0. Computed attributes show up
-# in resource_drift but not in resource_changes, so this filters the common
-# false-positive pattern of provider-populated attrs (inline_policy,
-# managed_policy_arns, association_id, latest_restorable_time, etc.).
-# Missing/null change.actions falls through the select and counts as
-# actionable (fail-safe toward blocking apply).
-has_plan_changes="$(echo "$plan_json" | jq '
-  [
+# Address-join: a drift entry counts as actionable iff the same resource has
+# a non-no-op/read action in resource_changes[]. Computed attributes show up
+# in resource_drift but their resource_changes entry is no-op (Terraform
+# isn't going to do anything), so the join correctly drops them. Common
+# offenders: google_firestore_database.{etag,earliest_version_time},
+# google_storage_bucket.updated, aws_iam_role.{inline_policy,managed_policy_arns},
+# aws_db_instance.latest_restorable_time. No per-attribute allowlist needed —
+# Terraform's own plan tells us which drift matters (issue #102).
+#
+# Missing/null change.actions on a matched address falls through the select
+# and counts as actionable (fail-safe toward blocking apply).
+actionable_drift_count="$(echo "$plan_json" | jq --argjson drift "$drift" '
+  ([
     (.resource_changes // [])[] |
-    select(.change.actions != ["no-op"] and .change.actions != ["read"])
-  ] | length
+    select(.change.actions != ["no-op"] and .change.actions != ["read"]) |
+    .address
+  ] | unique) as $actionable_addrs |
+  [$drift[] | select(.address as $a | $actionable_addrs | index($a))] | length
 ')"
 
 echo "Drift detected: $drift_count resource(s) have drifted."
@@ -145,24 +154,25 @@ _drift_filter="$_normalize"'
 '
 echo "$drift" | jq -r "$_drift_filter"
 
-# Write drift report. `actionable` mirrors the exit-code gate: true when
-# resource_changes[] has a non-no-op/read entry (plan would actually change
-# something). Consumers (ui-core Job.drift_actionable) use it to distinguish
-# "drift detected, apply ran" from "drift detected, apply blocked" without
-# cross-referencing job status. In --strict mode, actionable stays false when
-# resource_changes[] is empty — the field reflects plan content only, not the
-# alarm semantics of strict mode.
+# Write drift report. `actionable` is true when at least one drifted resource
+# also has an actionable (non-no-op/read) entry in resource_changes[] — i.e.
+# Terraform plans to overwrite a resource that has out-of-band changes. This
+# matches ui-core's documented DriftStatus semantics: "Computed-attribute
+# false positives surface in resource_drift but not in resource_changes" →
+# Detected=true, Actionable=false → informational notice, not blocking.
+# In --strict mode, actionable still reflects plan content only (Option 1
+# from #95); strict-mode alarm is conveyed via exit code, not this field.
 mkdir -p "$OUTPUTS_DIR"
 _drift_report="$(jq -n \
   --argjson drift "$drift" \
   --argjson count "$drift_count" \
-  --argjson changes "$has_plan_changes" \
+  --argjson actionable "$actionable_drift_count" \
   --arg tmpl "${TEMPLATE_VERSION:-}" \
   --arg pres "${PRESETS_VERSION:-}" \
   '{
     drift_detected: true,
     drift_count: $count,
-    actionable: ($changes > 0),
+    actionable: ($actionable > 0),
     template_version: (if $tmpl == "" then null else $tmpl end),
     presets_version: (if $pres == "" then null else $pres end),
     resources: $drift
@@ -183,8 +193,8 @@ if [[ "$ignore_drift" == "true" ]]; then
   exit 0
 fi
 
-if [[ "$strict" != "true" && "$has_plan_changes" -eq 0 ]]; then
-  echo "INFO: drift detected but plan has no actionable changes (0 to add/change/destroy); not blocking apply."
+if [[ "$strict" != "true" && "$actionable_drift_count" -eq 0 ]]; then
+  echo "INFO: drift detected but no drifted resource is being applied; not blocking apply."
   exit 0
 fi
 
