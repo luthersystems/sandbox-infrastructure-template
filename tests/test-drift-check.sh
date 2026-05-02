@@ -1147,6 +1147,204 @@ else
   fail "heterogeneous-drift: drift_count should be 2 and resources length 2"
 fi
 
+# ============================================================
+# Tests 33-38: Per-resource enrichment for downstream classifier (issue #105).
+# drift.json must surface, on each resources[] entry:
+#   - type, name (passed through from terraform's resource_drift schema)
+#   - action: []string (joined from resource_changes), null when not in plan
+#   - change.before / change.after (raw, NOT normalized — the consumer wants
+#     the same payload terraform show -json produced)
+# These let the Go classifier in luthersystems/insideout-terraform-presets
+# run per-attribute rules without re-parsing the plan.
+# ============================================================
+
+# ============================================================
+# Test 33: Per-resource action[] populated from resource_changes
+# ============================================================
+echo ""
+echo "Test 33: Per-resource action[] joined from resource_changes..."
+
+rm -rf "$WORKDIR/outputs"
+enrich_plan='{
+  "resource_drift": [
+    {
+      "address": "module.iam.aws_iam_role.inspector",
+      "type": "aws_iam_role",
+      "name": "inspector",
+      "change": {
+        "before": {"managed_policy_arns": []},
+        "after":  {"managed_policy_arns": ["arn:aws:iam::aws:policy/ReadOnlyAccess"]}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.iam.aws_iam_role.inspector", "change": {"actions": ["update"]}}
+  ]
+}'
+run_drift_check "$enrich_plan" >/dev/null || true
+
+if jq -e '.resources[0].action == ["update"]' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: action[] joined from resource_changes"
+else
+  fail "enrich: expected action=[\"update\"], got $(jq '.resources[0].action' "$WORKDIR/outputs/drift.json")"
+fi
+
+if jq -e '.resources[0].type == "aws_iam_role"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: type passed through"
+else
+  fail "enrich: expected type=aws_iam_role"
+fi
+
+if jq -e '.resources[0].name == "inspector"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: name passed through"
+else
+  fail "enrich: expected name=inspector"
+fi
+
+# change.before / change.after must echo terraform show -json verbatim
+# (NOT normalize_empty'd). Classifier wants the raw payload.
+if jq -e '.resources[0].change.before.managed_policy_arns == []' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: change.before passed through unmodified (raw [], not null)"
+else
+  fail "enrich: expected change.before.managed_policy_arns=[], got $(jq '.resources[0].change.before' "$WORKDIR/outputs/drift.json")"
+fi
+
+if jq -e '.resources[0].change.after.managed_policy_arns == ["arn:aws:iam::aws:policy/ReadOnlyAccess"]' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: change.after passed through unmodified"
+else
+  fail "enrich: change.after wrong"
+fi
+
+# ============================================================
+# Test 34: action is null when address isn't in resource_changes
+# (refresh-only plans, idle-resource drift detected by other plans).
+# ============================================================
+echo ""
+echo "Test 34: action is null when address absent from resource_changes..."
+
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$refresh_only_plan" --strict)"
+
+if jq -e '.resources[0].action == null' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: action=null for refresh-only (no resource_changes)"
+else
+  fail "enrich: expected action=null, got $(jq '.resources[0].action' "$WORKDIR/outputs/drift.json")"
+fi
+
+# ============================================================
+# Test 35: Phantom-computed case (firestore etag) — action=["no-op"],
+# preserved verbatim so the downstream classifier can map address+attr→rule.
+# ============================================================
+echo ""
+echo "Test 35: Phantom-computed (firestore etag) action=[\"no-op\"]..."
+
+rm -rf "$WORKDIR/outputs"
+phantom_plan='{
+  "resource_drift": [
+    {
+      "address": "module.gcp_firestore.google_firestore_database.database",
+      "type": "google_firestore_database",
+      "name": "database",
+      "change": {
+        "before": {"etag": "old-etag"},
+        "after":  {"etag": "new-etag"}
+      }
+    }
+  ],
+  "resource_changes": [
+    {"address": "module.gcp_firestore.google_firestore_database.database", "change": {"actions": ["no-op"]}}
+  ]
+}'
+run_drift_check "$phantom_plan" >/dev/null || true
+
+if jq -e '.resources[0].action == ["no-op"]' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: action=[\"no-op\"] preserved (classifier sees benign)"
+else
+  fail "enrich: expected action=[\"no-op\"]"
+fi
+
+if jq -e '.resources[0].change.before.etag == "old-etag"' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: phantom etag before passed through"
+else
+  fail "enrich: phantom etag before missing"
+fi
+
+# ============================================================
+# Test 36: Heterogeneous drift list — each entry independently joined.
+# Drift A is no-op, Drift B is update — entries must each carry their own
+# action[]. Guards against a regression where the join scopes globally
+# (single action shared across all entries).
+# ============================================================
+echo ""
+echo "Test 36: Heterogeneous drift — each entry joined independently..."
+
+rm -rf "$WORKDIR/outputs"
+run_drift_check "$mixed_drift_plan" >/dev/null || true
+
+if jq -e '
+  (.resources[] | select(.address == "module.gcp_firestore.google_firestore_database.database").action) == ["no-op"]
+  and
+  (.resources[] | select(.address == "module.gcp_iam.google_project_iam_member.binding").action) == ["update"]
+' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: heterogeneous drift carries per-entry action[]"
+else
+  fail "enrich: heterogeneous join wrong: $(jq '[.resources[] | {address, action}]' "$WORKDIR/outputs/drift.json")"
+fi
+
+# ============================================================
+# Test 37: Replace-style action ([create, delete] / [delete, create]) is
+# preserved as the original ordered array. Pinned because the classifier
+# distinguishes forward vs reverse replacement for some rules.
+# ============================================================
+echo ""
+echo "Test 37: Replace-style action arrays preserved verbatim..."
+
+rm -rf "$WORKDIR/outputs"
+replace_plan='{
+  "resource_drift": [
+    {"address": "aws_x.y", "type": "aws_x", "name": "y", "change": {"before": {"k": "a"}, "after": {"k": "b"}}}
+  ],
+  "resource_changes": [
+    {"address": "aws_x.y", "change": {"actions": ["create", "delete"]}}
+  ]
+}'
+run_drift_check "$replace_plan" >/dev/null || true
+
+if jq -e '.resources[0].action == ["create", "delete"]' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: replace-forward action order preserved"
+else
+  fail "enrich: replace-forward order wrong"
+fi
+
+# ============================================================
+# Test 38: Backwards-compat invariant — top-level fields and exit codes
+# unchanged by the enrichment. Pin actionable + drift_count + drift_detected
+# alongside the new resources[].action so an old consumer (ui-core
+# parseDriftReport) keeps working unchanged. This is the non-regression
+# heart of #105 — pure addition.
+# ============================================================
+echo ""
+echo "Test 38: Top-level schema unchanged by enrichment (backwards compat)..."
+
+rm -rf "$WORKDIR/outputs"
+run_drift_check "$enrich_plan" >/dev/null || true
+
+if jq -e '
+  .drift_detected == true and
+  .drift_count == 1 and
+  .actionable == true and
+  (.resources | length) == 1 and
+  (.resources[0] | has("action")) and
+  (.resources[0] | has("type")) and
+  (.resources[0] | has("name")) and
+  (.resources[0].change | has("before")) and
+  (.resources[0].change | has("after"))
+' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "enrich: top-level + per-resource fields all present (additive)"
+else
+  fail "enrich: schema invariant violated: $(jq '.' "$WORKDIR/outputs/drift.json")"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"

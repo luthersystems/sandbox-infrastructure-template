@@ -85,8 +85,12 @@ resource "aws_iam_role" "insideout_inspector" {
     Purpose   = "insideout-inspection"
   }
 
+  # AWS doesn't soft-delete IAM roles like GCP does service accounts, but a
+  # delete-then-create cycle still breaks any STS session/oracle path that
+  # cached the role ARN/path. Mirror the GCP guard for consistency. See #106.
   lifecycle {
-    ignore_changes = [managed_policy_arns]
+    ignore_changes  = [managed_policy_arns]
+    prevent_destroy = true
   }
 }
 
