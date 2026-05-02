@@ -129,6 +129,25 @@ actionable_drift_count="$(echo "$plan_json" | jq --argjson drift "$drift" '
   [$drift[] | select(.address as $a | $actionable_addrs | index($a))] | length
 ')"
 
+# Enrich each drift entry with the joined action[] from resource_changes
+# (issue #105). The downstream classifier in luthersystems/insideout-terraform-presets
+# uses this — plus type, name, change.before, and change.after (all passed
+# through unmodified from terraform show -json) — to apply per-attribute
+# rules (phantom-computed, provider-noise, reconverge, actionable). action
+# is null when the address isn't in resource_changes[] (refresh-only plans
+# and addresses Terraform isn't touching). Independent of the actionable
+# rollup above so this enrichment can never regress the fail-safe gate
+# semantics — a future spec change to the action field need not move the
+# gate, and vice versa.
+addr_to_actions="$(echo "$plan_json" | jq '
+  reduce ((.resource_changes // [])[]) as $rc ({};
+    .[$rc.address] = ($rc.change.actions // null)
+  )
+')"
+drift="$(echo "$drift" | jq --argjson actions_map "$addr_to_actions" '
+  map(. + {action: ($actions_map[.address] // null)})
+')"
+
 echo "Drift detected: $drift_count resource(s) have drifted."
 echo ""
 

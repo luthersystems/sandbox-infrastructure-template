@@ -53,41 +53,73 @@ locals {
   gcp_management_sa_id_out = google_service_account.insideout_management.account_id
 }
 
+# GCP soft-deletes service accounts with a 30-day retention window. If
+# Terraform ever issues delete-then-create on these resources (e.g. a future
+# display_name change, taint, or operator-driven `terraform destroy`), the
+# create fails because the email is reserved by the soft-deleted SA. Recovery
+# requires `gcloud iam service-accounts undelete <unique-id>`, which the
+# template-driven workflow does not perform. prevent_destroy fails the plan
+# loudly instead of silently leaving the project unrecoverable for 30 days.
+# See issues #104, #106.
 resource "google_service_account" "insideout_inspector" {
   account_id   = local.gcp_inspector_sa_id
   display_name = "InsideOut Inspector - ${var.project_id}"
   description  = "Read-only service account for InsideOut infrastructure inspection"
   project      = var.gcp_project_id
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_project_iam_member" "inspector_viewer" {
   project = var.gcp_project_id
   role    = "roles/viewer"
   member  = "serviceAccount:${google_service_account.insideout_inspector.email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_project_iam_member" "inspector_storage_viewer" {
   project = var.gcp_project_id
   role    = "roles/storage.objectViewer"
   member  = "serviceAccount:${google_service_account.insideout_inspector.email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_project_iam_member" "inspector_secretmanager_viewer" {
   project = var.gcp_project_id
   role    = "roles/secretmanager.viewer"
   member  = "serviceAccount:${google_service_account.insideout_inspector.email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_project_iam_member" "inspector_run_viewer" {
   project = var.gcp_project_id
   role    = "roles/run.viewer"
   member  = "serviceAccount:${google_service_account.insideout_inspector.email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_service_account_iam_member" "inspector_token_creator" {
   service_account_id = google_service_account.insideout_inspector.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${local.gcp_deployment_sa_email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_service_account" "insideout_management" {
@@ -95,18 +127,30 @@ resource "google_service_account" "insideout_management" {
   display_name = "InsideOut Management - ${var.project_id}"
   description  = "Project-scoped management service account for impersonated InsideOut Terraform operations"
   project      = var.gcp_project_id
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_project_iam_member" "management_owner" {
   project = var.gcp_project_id
   role    = "roles/owner"
   member  = "serviceAccount:${google_service_account.insideout_management.email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_service_account_iam_member" "management_token_creator" {
   service_account_id = google_service_account.insideout_management.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = "serviceAccount:${local.gcp_deployment_sa_email}"
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ============================================================================
