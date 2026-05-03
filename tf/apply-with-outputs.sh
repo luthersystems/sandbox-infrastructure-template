@@ -69,12 +69,19 @@ if [[ "$check_drift" == "true" ]]; then
   terraform init -input=false
   terraform plan -out=apply.tfplan -input=false
 
-  # Check drift (may exit 2 if drift found and not ignored)
+  # Check drift. Drift-check exits 0 by default (issue #108) and writes
+  # apply_skipped into drift.json; we honor that here as the apply gate.
   drift_args=()
   if [[ "$ignore_drift" == "true" ]]; then
     drift_args+=("--ignore-drift")
   fi
   bash "$SCRIPT_DIR/drift-check.sh" apply.tfplan --stage "$lifecycle" "${drift_args[@]+"${drift_args[@]}"}"
+
+  apply_skipped="$(jq -r '.apply_skipped // false' "$MARS_PROJECT_ROOT/outputs/drift.json" 2>/dev/null || echo false)"
+  if [[ "$apply_skipped" == "true" ]]; then
+    echo "INFO: apply_skipped=true in drift.json; skipping terraform apply. Re-run with --ignore-drift to force."
+    exit 0
+  fi
 
   terraform apply -input=false apply.tfplan
   captureOutputs
@@ -107,6 +114,7 @@ if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
       drift_detected: false,
       drift_count: 0,
       actionable: false,
+      apply_skipped: false,
       template_version: (if $tmpl == "" then null else $tmpl end),
       presets_version: (if $pres == "" then null else $pres end),
       resources: []

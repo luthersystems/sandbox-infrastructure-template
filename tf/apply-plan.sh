@@ -82,6 +82,16 @@ if [[ "$check_drift" == "true" ]]; then
     drift_args+=("--ignore-drift")
   fi
   bash "$SCRIPT_DIR/drift-check.sh" "$plan_file" --stage "$lifecycle" "${drift_args[@]+"${drift_args[@]}"}"
+
+  # Pod-level apply gate (issue #108). drift-check.sh writes apply_skipped
+  # into drift.json based on actionable drift + --ignore-drift. We honor it
+  # here so the gate lives in the pod, not in drift-check's exit code.
+  # Reliable's force-apply UX flips this to false via --ignore-drift.
+  apply_skipped="$(jq -r '.apply_skipped // false' "$MARS_PROJECT_ROOT/outputs/drift.json" 2>/dev/null || echo false)"
+  if [[ "$apply_skipped" == "true" ]]; then
+    echo "INFO: apply_skipped=true in drift.json; skipping terraform apply. Re-run with --ignore-drift to force."
+    exit 0
+  fi
 fi
 
 terraform apply -input=false "$plan_file"
@@ -109,6 +119,7 @@ if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
       drift_detected: false,
       drift_count: 0,
       actionable: false,
+      apply_skipped: false,
       template_version: (if $tmpl == "" then null else $tmpl end),
       presets_version: (if $pres == "" then null else $pres end),
       resources: []

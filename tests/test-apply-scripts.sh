@@ -256,6 +256,12 @@ else
   fail "drift-check mode: stub drift.json missing actionable=false"
 fi
 
+if jq -e '.apply_skipped == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift-check mode: stub drift.json has apply_skipped=false (no drift, apply ran)"
+else
+  fail "drift-check mode: stub drift.json missing apply_skipped=false"
+fi
+
 if jq -e '.template_version == null and .presets_version == null' \
    "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
   pass "drift-check mode: stub drift.json has null provenance fields (env unset)"
@@ -269,9 +275,10 @@ else
   fail "drift-check mode: stub drift.json resources field wrong"
 fi
 
-# --- Test 3: Drift-check mode + drift detected → exit 2, apply not called ---
+# --- Test 3: Drift-check mode + drift detected → exit 0 (issue #108),
+# apply skipped via drift.json's apply_skipped flag, not exit code. ---
 echo ""
-echo "Test 3: Drift-check mode with drift..."
+echo "Test 3: Drift-check mode with actionable drift..."
 
 echo '{
   "resource_drift": [{"address": "aws_s3_bucket.test"}],
@@ -283,24 +290,36 @@ output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
 exit_code=$?
 set -e
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "drift detected: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "drift detected: exit code 0 (pod no longer gates at exit-2)"
 else
-  fail "drift detected: expected exit 2, got $exit_code. Output: $output"
+  fail "drift detected: expected exit 0, got $exit_code. Output: $output"
 fi
 
-# terraform apply should NOT appear after drift-check exits 2
-# The apply line may exist from the plan step, check specifically for "apply -input=false apply.tfplan"
+# Apply must NOT run despite the exit-0 — wrapper reads drift.json and skips.
+# This is the core invariant of the new gate location.
 if grep -q "terraform apply -input=false apply.tfplan" "$CMD_LOG"; then
-  fail "drift detected: terraform apply should not run"
+  fail "drift detected: terraform apply should not run when apply_skipped:true"
 else
-  pass "drift detected: terraform apply not called (correct)"
+  pass "drift detected: terraform apply not called (wrapper honored apply_skipped)"
 fi
 
 if [[ -f "$PROJECT/outputs/drift-default.json" ]]; then
   pass "drift detected: drift-default.json created"
 else
   fail "drift detected: drift-default.json not created"
+fi
+
+if jq -e '.apply_skipped == true' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift detected: drift.json has apply_skipped:true"
+else
+  fail "drift detected: expected apply_skipped:true in drift.json"
+fi
+
+if echo "$output" | grep -q "skipping terraform apply"; then
+  pass "drift detected: wrapper logged skip reason"
+else
+  fail "drift detected: expected 'skipping terraform apply' log; got: $output"
 fi
 
 # Reset show output
@@ -441,9 +460,10 @@ else
   fail "apply-plan drift-check: drift-check.sh not invoked"
 fi
 
-# --- Test 7: apply-plan with --check-drift + drift → exit 2 ---
+# --- Test 7: apply-plan with --check-drift + actionable drift →
+# exit 0 (issue #108), apply NOT called because apply_skipped:true. ---
 echo ""
-echo "Test 7: apply-plan with drift detected..."
+echo "Test 7: apply-plan with actionable drift detected..."
 
 echo '{
   "resource_drift": [{"address": "aws_vpc.main"}],
@@ -456,10 +476,56 @@ output="$(run_script apply-plan.sh default --plan-file myplan --check-drift 2>&1
 exit_code=$?
 set -e
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "apply-plan drift: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "apply-plan drift: exit code 0 (pod no longer gates at exit-2)"
 else
-  fail "apply-plan drift: expected exit 2, got $exit_code. Output: $output"
+  fail "apply-plan drift: expected exit 0, got $exit_code. Output: $output"
+fi
+
+if grep -q "terraform apply -input=false myplan.tfplan" "$CMD_LOG"; then
+  fail "apply-plan drift: terraform apply should not run when apply_skipped:true"
+else
+  pass "apply-plan drift: terraform apply not called (wrapper honored apply_skipped)"
+fi
+
+if jq -e '.apply_skipped == true' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "apply-plan drift: drift.json has apply_skipped:true"
+else
+  fail "apply-plan drift: expected apply_skipped:true in drift.json"
+fi
+
+# --- Test 7b: apply-plan + --check-drift + --ignore-drift → exit 0,
+# apply runs (force-apply path used by reliable). ---
+echo ""
+echo "Test 7b: apply-plan with --check-drift --ignore-drift (force apply)..."
+
+echo '{
+  "resource_drift": [{"address": "aws_vpc.main"}],
+  "resource_changes": [{"address": "aws_vpc.main", "change": {"actions": ["update"]}}]
+}' > "$TF_SHOW_OUTPUT"
+echo "fake-plan" > "$PROJECT/tf/default/myplan.tfplan"
+
+set +e
+output="$(run_script apply-plan.sh default --plan-file myplan --check-drift --ignore-drift 2>&1)"
+exit_code=$?
+set -e
+
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "apply-plan force: exit code 0"
+else
+  fail "apply-plan force: expected exit 0, got $exit_code. Output: $output"
+fi
+
+if grep -q "terraform apply -input=false myplan.tfplan" "$CMD_LOG"; then
+  pass "apply-plan force: terraform apply called (force-apply through drift)"
+else
+  fail "apply-plan force: terraform apply should run with --ignore-drift"
+fi
+
+if jq -e '.apply_skipped == false' "$PROJECT/outputs/drift.json" >/dev/null 2>&1; then
+  pass "apply-plan force: drift.json has apply_skipped:false"
+else
+  fail "apply-plan force: expected apply_skipped:false with --ignore-drift"
 fi
 
 # Reset
