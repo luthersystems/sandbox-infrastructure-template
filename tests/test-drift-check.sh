@@ -88,15 +88,16 @@ else
 fi
 
 # ============================================================
-# Test 2: Drift detected — exit 2, drift.json created
+# Test 2: Drift detected — exit 0 (issue #108), drift.json with
+# apply_skipped:true; the apply wrappers gate on that field, not exit code.
 # ============================================================
 echo ""
 echo "Test 2: Drift detected..."
 
 rm -rf "$WORKDIR/outputs"
-# drift_plan includes an actionable resource_changes entry so the plan-change
-# gate in drift-check.sh treats drift as apply-blocking (exit 2). Tests that
-# want to exercise the "drift but plan is no-op" gate use other fixtures below.
+# drift_plan includes an actionable resource_changes entry so the actionable
+# rollup in drift-check.sh sets apply_skipped:true. Tests that want to
+# exercise the "drift but plan is no-op" path use other fixtures below.
 drift_plan='{
   "resource_drift": [{"address": "aws_s3_bucket.example", "type": "aws_s3_bucket"}],
   "resource_changes": [{"address": "aws_s3_bucket.example", "change": {"actions": ["update"]}}]
@@ -104,10 +105,16 @@ drift_plan='{
 result="$(run_drift_check "$drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "drift: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "drift: exit code 0 (pod no longer gates at exit-2)"
 else
-  fail "drift: expected exit 2, got $exit_code"
+  fail "drift: expected exit 0, got $exit_code"
+fi
+
+if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "drift: apply_skipped is true (apply wrappers will skip)"
+else
+  fail "drift: apply_skipped should be true for actionable drift without --ignore-drift"
 fi
 
 if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
@@ -179,6 +186,14 @@ if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; th
   pass "ignore-drift: actionable field preserved"
 else
   fail "ignore-drift: actionable field missing or wrong"
+fi
+
+# Force-apply path: --ignore-drift must flip apply_skipped to false so
+# the apply wrappers run terraform apply despite drift.
+if jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "ignore-drift: apply_skipped is false (force-apply path)"
+else
+  fail "ignore-drift: apply_skipped should be false when --ignore-drift is set"
 fi
 
 # ============================================================
@@ -279,10 +294,10 @@ rm -rf "$WORKDIR/outputs"
 result="$(run_drift_check "$drift_plan" --stage cloud-provision)"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "stage flag: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "stage flag: exit code 0 (default no longer gates at exit-2)"
 else
-  fail "stage flag: expected exit 2, got $exit_code"
+  fail "stage flag: expected exit 0, got $exit_code"
 fi
 
 if [[ -f "$WORKDIR/outputs/drift-cloud-provision.json" ]]; then
@@ -360,10 +375,10 @@ rm -rf "$WORKDIR/outputs"
 result="$(run_drift_check "$drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "no stage: exit code 2 (drift detected)"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "no stage: exit code 0 (drift detected, default no longer gates at exit-2)"
 else
-  fail "no stage: expected exit 2, got $exit_code"
+  fail "no stage: expected exit 0, got $exit_code"
 fi
 
 if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
@@ -443,10 +458,10 @@ mixed_plan='{
 result="$(run_drift_check "$mixed_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "mixed: exit code 2 (real drift present)"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "mixed: exit code 0 (real drift present, default no longer gates)"
 else
-  fail "mixed: expected exit 2, got $exit_code"
+  fail "mixed: expected exit 0, got $exit_code"
 fi
 
 if [[ -f "$WORKDIR/outputs/drift.json" ]]; then
@@ -465,6 +480,12 @@ if jq -e '.resources[0].address == "aws_instance.real_drift"' "$WORKDIR/outputs/
   pass "mixed: only real drift resource in report"
 else
   fail "mixed: expected aws_instance.real_drift in report"
+fi
+
+if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "mixed: apply_skipped is true (real drift on actionable resource)"
+else
+  fail "mixed: apply_skipped should be true when real actionable drift present"
 fi
 
 # ============================================================
@@ -599,6 +620,12 @@ else
   fail "noop-plan: actionable should be false when plan has no actionable changes"
 fi
 
+if jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "noop-plan: apply_skipped is false (non-actionable drift, apply runs)"
+else
+  fail "noop-plan: apply_skipped should be false when actionable=false"
+fi
+
 # ============================================================
 # Test 17: Drift + resource_changes all "read" — exit 0
 # Data-source refreshes are not actionable.
@@ -640,6 +667,12 @@ else
   fail "read-only: actionable should be false for ['read']-only plans"
 fi
 
+if jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "read-only: apply_skipped is false (read-only plan, apply runs)"
+else
+  fail "read-only: apply_skipped should be false when actionable=false"
+fi
+
 # ============================================================
 # Test 18: Drift + resource_changes absent — exit 0
 # ============================================================
@@ -672,6 +705,12 @@ if jq -e '.actionable == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; t
   pass "refresh-only shape: actionable is false (no resource_changes)"
 else
   fail "refresh-only shape: actionable should be false"
+fi
+
+if jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "refresh-only shape: apply_skipped is false (no actionable changes)"
+else
+  fail "refresh-only shape: apply_skipped should be false when actionable=false"
 fi
 
 # ============================================================
@@ -831,8 +870,11 @@ fi
 
 # ============================================================
 # Tests 23-27: Action-kind coverage — every actionable action in
-# resource_changes[] must block apply. Guards against a mutation that
-# accidentally treats delete/create/replace as non-actionable.
+# resource_changes[] must mark drift as actionable + apply_skipped:true.
+# Guards against a mutation that accidentally treats delete/create/replace
+# as non-actionable. After issue #108 the gate moved from drift-check's
+# exit code (was exit 2) to drift.json's apply_skipped field, so the
+# assertion target is apply_skipped:true rather than exit 2.
 # ============================================================
 for action_case in \
   'delete|["delete"]' \
@@ -861,10 +903,10 @@ for action_case in \
   result="$(run_drift_check "$action_plan")"
   exit_code="$(echo "$result" | tail -1)"
 
-  if [[ "$exit_code" -eq 2 ]]; then
-    pass "action-kind $name: exit 2 (treated as actionable)"
+  if [[ "$exit_code" -eq 0 ]]; then
+    pass "action-kind $name: exit 0 (default no longer gates at exit-2)"
   else
-    fail "action-kind $name: expected exit 2, got $exit_code. Output: $result"
+    fail "action-kind $name: expected exit 0, got $exit_code. Output: $result"
   fi
 
   # Partial-match mutations (e.g. `select(.change.actions | contains(["create"]))`)
@@ -873,6 +915,12 @@ for action_case in \
     pass "action-kind $name: actionable is true"
   else
     fail "action-kind $name: actionable should be true"
+  fi
+
+  if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+    pass "action-kind $name: apply_skipped is true (apply wrappers will skip)"
+  else
+    fail "action-kind $name: apply_skipped should be true for actionable drift"
   fi
 done
 
@@ -897,16 +945,22 @@ mixed_actions_plan='{
 result="$(run_drift_check "$mixed_actions_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "mixed-actions: exit code 2 (actionable entry present)"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "mixed-actions: exit code 0 (default no longer gates at exit-2)"
 else
-  fail "mixed-actions: expected exit 2, got $exit_code"
+  fail "mixed-actions: expected exit 0, got $exit_code"
 fi
 
 if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
   pass "mixed-actions: actionable is true (at least one non-no-op/read)"
 else
   fail "mixed-actions: actionable should be true with any actionable entry"
+fi
+
+if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "mixed-actions: apply_skipped is true (actionable drift on drifted resource)"
+else
+  fail "mixed-actions: apply_skipped should be true with any actionable entry"
 fi
 
 # ============================================================
@@ -1067,16 +1121,22 @@ real_drift_plan='{
 result="$(run_drift_check "$real_drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "real-drift-plus-unrelated: exit code 2 (drifted resource will be overwritten)"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "real-drift-plus-unrelated: exit code 0 (default no longer gates at exit-2)"
 else
-  fail "real-drift-plus-unrelated: expected exit 2, got $exit_code"
+  fail "real-drift-plus-unrelated: expected exit 0, got $exit_code"
 fi
 
 if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
   pass "real-drift-plus-unrelated: actionable is true (drifted address has update action)"
 else
   fail "real-drift-plus-unrelated: actionable should be true"
+fi
+
+if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "real-drift-plus-unrelated: apply_skipped is true (drifted resource will be overwritten)"
+else
+  fail "real-drift-plus-unrelated: apply_skipped should be true"
 fi
 
 # Mirror Test 30's invariance check: drift_count and resources are unfiltered
@@ -1127,16 +1187,22 @@ mixed_drift_plan='{
 result="$(run_drift_check "$mixed_drift_plan")"
 exit_code="$(echo "$result" | tail -1)"
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "heterogeneous-drift: exit code 2 (one drift entry is actionable)"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "heterogeneous-drift: exit code 0 (default no longer gates at exit-2)"
 else
-  fail "heterogeneous-drift: expected exit 2, got $exit_code"
+  fail "heterogeneous-drift: expected exit 0, got $exit_code"
 fi
 
 if jq -e '.actionable == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
   pass "heterogeneous-drift: actionable is true (the iam binding drift matches an update action)"
 else
   fail "heterogeneous-drift: actionable should be true with one actionable drift in the list"
+fi
+
+if jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "heterogeneous-drift: apply_skipped is true (one drift entry is actionable)"
+else
+  fail "heterogeneous-drift: apply_skipped should be true with one actionable drift"
 fi
 
 # Both drift entries survive — drift_count/resources is unfiltered. A regression
@@ -1343,6 +1409,75 @@ if jq -e '
   pass "enrich: top-level + per-resource fields all present (additive)"
 else
   fail "enrich: schema invariant violated: $(jq '.' "$WORKDIR/outputs/drift.json")"
+fi
+
+# ============================================================
+# Test 39: Issue #108 invariant — pod no longer gates apply at exit-2.
+# Locks down the full exit-code-vs-apply_skipped matrix in one place so
+# any regression to the old "drift detected → exit 2" behavior fails
+# loudly. Independent of Tests 2/8/10/12/23-28/30-32 which exercise the
+# same field individually.
+# ============================================================
+echo ""
+echo "Test 39: Issue #108 — exit-code vs apply_skipped matrix..."
+
+actionable_plan='{
+  "resource_drift": [{"address": "aws_a.b", "change": {"before": {"k": "x"}, "after": {"k": "y"}}}],
+  "resource_changes": [{"address": "aws_a.b", "change": {"actions": ["update"]}}]
+}'
+
+# Row 1: actionable drift, no flag → exit 0 + apply_skipped:true (NEW)
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$actionable_plan")"
+exit_code="$(echo "$result" | tail -1)"
+if [[ "$exit_code" -eq 0 ]] && jq -e '.apply_skipped == true' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "issue-108 default: exit 0 + apply_skipped:true (pod doesn't gate, wrappers will)"
+else
+  fail "issue-108 default: expected exit 0 + apply_skipped:true; got exit=$exit_code skipped=$(jq '.apply_skipped' "$WORKDIR/outputs/drift.json" 2>&1)"
+fi
+
+# Row 2: actionable drift + --ignore-drift → exit 0 + apply_skipped:false (force)
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$actionable_plan" --ignore-drift)"
+exit_code="$(echo "$result" | tail -1)"
+if [[ "$exit_code" -eq 0 ]] && jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "issue-108 force: --ignore-drift sets apply_skipped:false (reliable's force-apply path)"
+else
+  fail "issue-108 force: expected exit 0 + apply_skipped:false; got exit=$exit_code skipped=$(jq '.apply_skipped' "$WORKDIR/outputs/drift.json" 2>&1)"
+fi
+
+# Row 3: drift on no-op plan, no flag → exit 0 + apply_skipped:false
+rm -rf "$WORKDIR/outputs"
+noop_drift_plan='{
+  "resource_drift": [{"address": "aws_a.b", "change": {"before": {"k": "x"}, "after": {"k": "y"}}}],
+  "resource_changes": [{"address": "aws_a.b", "change": {"actions": ["no-op"]}}]
+}'
+result="$(run_drift_check "$noop_drift_plan")"
+exit_code="$(echo "$result" | tail -1)"
+if [[ "$exit_code" -eq 0 ]] && jq -e '.apply_skipped == false' "$WORKDIR/outputs/drift.json" >/dev/null 2>&1; then
+  pass "issue-108 noop: non-actionable drift → apply_skipped:false (apply runs)"
+else
+  fail "issue-108 noop: expected exit 0 + apply_skipped:false; got exit=$exit_code skipped=$(jq '.apply_skipped' "$WORKDIR/outputs/drift.json" 2>&1)"
+fi
+
+# Row 4: actionable drift + --strict → exit 2 (refresh standalone alarm path)
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$actionable_plan" --strict)"
+exit_code="$(echo "$result" | tail -1)"
+if [[ "$exit_code" -eq 2 ]]; then
+  pass "issue-108 strict: actionable + --strict → exit 2 (standalone refresh alarm preserved)"
+else
+  fail "issue-108 strict: expected exit 2, got $exit_code"
+fi
+
+# Row 5: --ignore-drift WARNING log fires (reliable force-apply trace).
+# Tightens Test 22 by asserting the log on the default-mode path too.
+rm -rf "$WORKDIR/outputs"
+result="$(run_drift_check "$actionable_plan" --ignore-drift)"
+if echo "$result" | grep -q "WARNING: Drift ignored"; then
+  pass "issue-108 force log: WARNING line fires under --ignore-drift"
+else
+  fail "issue-108 force log: expected 'WARNING: Drift ignored' in output; got: $result"
 fi
 
 # --- Summary ---

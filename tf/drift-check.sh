@@ -5,23 +5,30 @@
 # Usage: bash drift-check.sh <plan-file> [--ignore-drift] [--stage <name>] [--strict]
 #
 # Exit codes:
-#   0 — No drift detected, drift ignored via --ignore-drift, or drift found but
-#       no drifted resource is in the plan's actionable set (resource_changes[]
-#       entry for that address is no-op/read/absent) and --strict was not
-#       passed. Drift is still reported and drift.json is still written in all
-#       these cases.
-#   1 — Error (missing plan file, jq failure, etc.)
-#   2 — Drift detected on a resource the plan will modify (resource_changes[]
-#       entry has a non-no-op/read action), OR --strict and any drift exists.
+#   0 — Default. No drift, OR drift detected (the pod no longer gates apply
+#       at exit-2 — see issue #108). The decision to skip apply on
+#       actionable drift is conveyed via `apply_skipped: true` in drift.json
+#       and is enforced by the apply wrappers (apply-plan.sh,
+#       apply-with-outputs.sh), which read drift.json and skip
+#       `terraform apply` when set. `reliable` + ui-core render the
+#       per-resource verdict from the same artifact.
+#   1 — Error (missing plan file, jq failure, etc.).
+#   2 — `--strict` and drift exists. Reserved for the standalone refresh
+#       alarm path (drift-refresh.sh as a manual-edit detector). Apply paths
+#       never see exit 2 unless they explicitly opt in to --strict.
+#
+# `--ignore-drift` is the force-apply override — used end-to-end by reliable
+# (UI → /api/tf/start?ignore_drift=true → Oracle workflow argv → here).
+# When set: log WARNING, write `apply_skipped: false`, exit 0 — apply runs.
 #
 # Refresh-only plans (from `terraform plan -refresh-only`) have no
-# resource_changes at all, so by definition no drift can be address-joined to
-# an actionable change — drift-check is informational on them by default. Pass
-# --strict to alarm on any drift regardless — used by drift-refresh.sh as a
-# standalone manual-edit detector.
+# resource_changes at all, so actionable_drift_count is always 0 and
+# apply_skipped is always false in their drift.json. The strict alarm
+# signal for those is exit 2, not the apply_skipped field.
 #
-# If drift is found, writes a JSON report to $MARS_PROJECT_ROOT/outputs/drift.json.
-# Does NOT source utils.sh — operates on a plan file already in the CWD.
+# Always writes a JSON report to $MARS_PROJECT_ROOT/outputs/drift.json when
+# drift is detected. Does NOT source utils.sh — operates on a plan file
+# already in the CWD.
 
 set -euo pipefail
 
@@ -173,25 +180,39 @@ _drift_filter="$_normalize"'
 '
 echo "$drift" | jq -r "$_drift_filter"
 
-# Write drift report. `actionable` is true when at least one drifted resource
-# also has an actionable (non-no-op/read) entry in resource_changes[] — i.e.
-# Terraform plans to overwrite a resource that has out-of-band changes. This
-# matches ui-core's documented DriftStatus semantics: "Computed-attribute
-# false positives surface in resource_drift but not in resource_changes" →
-# Detected=true, Actionable=false → informational notice, not blocking.
-# In --strict mode, actionable still reflects plan content only (Option 1
-# from #95); strict-mode alarm is conveyed via exit code, not this field.
+# Write drift report. Two top-level booleans:
+#   actionable     — at least one drifted resource has a non-no-op/read entry
+#                    in resource_changes[]. Reflects plan content only; matches
+#                    ui-core's documented DriftStatus semantics ("Computed-
+#                    attribute false positives surface in resource_drift but
+#                    not in resource_changes" → Detected=true, Actionable=false).
+#   apply_skipped  — true iff `actionable && !ignore_drift`. The apply
+#                    wrappers (apply-plan.sh, apply-with-outputs.sh) read
+#                    this and skip `terraform apply` when set. This moves
+#                    the apply gate out of the pod's exit code (issue #108)
+#                    while still letting reliable's force-apply round-trip
+#                    (UI → ignore_drift=true → Oracle → --ignore-drift)
+#                    flip it back to false on demand.
 mkdir -p "$OUTPUTS_DIR"
+
+if [[ "$ignore_drift" != "true" && "$actionable_drift_count" -gt 0 ]]; then
+  apply_skipped_json=true
+else
+  apply_skipped_json=false
+fi
+
 _drift_report="$(jq -n \
   --argjson drift "$drift" \
   --argjson count "$drift_count" \
   --argjson actionable "$actionable_drift_count" \
+  --argjson skipped "$apply_skipped_json" \
   --arg tmpl "${TEMPLATE_VERSION:-}" \
   --arg pres "${PRESETS_VERSION:-}" \
   '{
     drift_detected: true,
     drift_count: $count,
     actionable: ($actionable > 0),
+    apply_skipped: $skipped,
     template_version: (if $tmpl == "" then null else $tmpl end),
     presets_version: (if $pres == "" then null else $pres end),
     resources: $drift
@@ -208,13 +229,20 @@ else
 fi
 
 if [[ "$ignore_drift" == "true" ]]; then
-  echo "WARNING: Drift ignored (--ignore-drift flag set)."
+  echo "WARNING: Drift ignored (--ignore-drift flag set); force-applying despite drift (apply_skipped=false)."
   exit 0
 fi
 
-if [[ "$strict" != "true" && "$actionable_drift_count" -eq 0 ]]; then
+if [[ "$strict" == "true" ]]; then
+  # Standalone refresh-only alarm path (drift-refresh.sh). Any drift exits 2
+  # so the caller's workflow step fails visibly. Apply paths do not pass
+  # --strict, so this never fires for them.
+  exit 2
+fi
+
+if [[ "$actionable_drift_count" -gt 0 ]]; then
+  echo "INFO: actionable drift detected; apply_skipped=true. Apply wrappers will skip terraform apply. See reliable + UI for verdict."
+else
   echo "INFO: drift detected but no drifted resource is being applied; not blocking apply."
-  exit 0
 fi
-
-exit 2
+exit 0
