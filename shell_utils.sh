@@ -284,12 +284,22 @@ _GCP_CREDENTIALS_FILE=""
 # and writes it to a temporary file with secure permissions.
 # Sets GOOGLE_APPLICATION_CREDENTIALS environment variable.
 # Returns: 0 on success, 1 on failure
+#
+# WIF short-circuit: when GOOGLE_OAUTH_ACCESS_TOKEN is already set in the
+# environment (Phase-2 ops where ui-core has minted an impersonated token via
+# Workload Identity Federation), there is nothing to do. The google provider
+# picks up the env var directly; no SA key file is needed.
 setupGCPCredentials() {
+  if [[ -n "${GOOGLE_OAUTH_ACCESS_TOKEN:-}" ]]; then
+    echo "GCP access token supplied via GOOGLE_OAUTH_ACCESS_TOKEN; skipping SA-key setup"
+    return 0
+  fi
+
   local creds_b64
   creds_b64=$(getTfVar "gcp_credentials_b64")
 
   if [[ -z "$creds_b64" || "$creds_b64" == "null" ]]; then
-    echo_error "ERROR: gcp_credentials_b64 not found in tfvars"
+    echo_error "ERROR: gcp_credentials_b64 not found in tfvars (and no GOOGLE_OAUTH_ACCESS_TOKEN set)"
     return 1
   fi
 

@@ -51,6 +51,14 @@ locals {
   gcp_inspector_sa_id_out  = google_service_account.insideout_inspector.account_id
   gcp_management_sa_email  = google_service_account.insideout_management.email
   gcp_management_sa_id_out = google_service_account.insideout_management.account_id
+
+  # WIF (Workload Identity Federation) lets the InsideOut Oracle pod
+  # (running on EKS with IRSA) impersonate insideout-mgmt / insideout-inspector
+  # for steady-state operations, eliminating the dependency on a long-lived
+  # customer SA key after first apply. Only created when ui-core supplies the
+  # platform identity vars; existing customers without these vars set keep
+  # the legacy SA-key-only flow.
+  ui_platform_wif_enabled = var.platform_aws_account_id != "" && var.platform_eks_role_name != ""
 }
 
 # GCP soft-deletes service accounts with a 30-day retention window. If
@@ -154,6 +162,92 @@ resource "google_service_account_iam_member" "management_token_creator" {
 }
 
 # ============================================================================
+# Workload Identity Federation (Oracle EKS → impersonate insideout-mgmt)
+# ============================================================================
+# Replaces the customer SA key as the outer authenticated principal for
+# steady-state Phase-2 ops (re-deploys, drift checks, inspector token mints).
+# The customer SA key is still used on first apply to create the resources
+# below; afterwards the federated principal alone can impersonate
+# insideout-mgmt / insideout-inspector and the customer key is no longer
+# required.
+#
+# The pool/provider/bindings are gated by `ui_platform_wif_enabled` so existing
+# projects whose ui-core build does not yet supply the platform identity vars
+# continue to work unchanged.
+
+resource "google_iam_workload_identity_pool" "ui_platform" {
+  count = local.ui_platform_wif_enabled ? 1 : 0
+
+  project                   = var.gcp_project_id
+  workload_identity_pool_id = "ui-platform-${var.short_project_id}"
+  display_name              = "InsideOut UI Platform"
+  description               = "InsideOut Oracle (EKS) federated principal pool for impersonating insideout-mgmt / insideout-inspector"
+
+  # Pools soft-delete with a 30-day window; matches the rationale on the SAs
+  # above (issues #104, #106). Recreating a pool with the same ID inside the
+  # retention window is not handled by this template.
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_iam_workload_identity_pool_provider" "ui_platform_aws" {
+  count = local.ui_platform_wif_enabled ? 1 : 0
+
+  project                            = var.gcp_project_id
+  workload_identity_pool_id          = google_iam_workload_identity_pool.ui_platform[0].workload_identity_pool_id
+  workload_identity_pool_provider_id = "ui-platform-aws"
+  display_name                       = "InsideOut Oracle (EKS IRSA)"
+  description                        = "Trusts the InsideOut platform AWS account; principalSet attribute.aws_role gates to the Oracle pod's IRSA role"
+
+  aws {
+    account_id = var.platform_aws_account_id
+  }
+
+  attribute_mapping = {
+    "google.subject"        = "assertion.arn"
+    "attribute.aws_role"    = "assertion.arn.extract('assumed-role/{role}/')"
+    "attribute.aws_account" = "assertion.account"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_service_account_iam_member" "management_token_creator_wif" {
+  count = local.ui_platform_wif_enabled ? 1 : 0
+
+  service_account_id = google_service_account.insideout_management.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member = format(
+    "principalSet://iam.googleapis.com/%s/attribute.aws_role/%s",
+    google_iam_workload_identity_pool.ui_platform[0].name,
+    var.platform_eks_role_name,
+  )
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "google_service_account_iam_member" "inspector_token_creator_wif" {
+  count = local.ui_platform_wif_enabled ? 1 : 0
+
+  service_account_id = google_service_account.insideout_inspector.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member = format(
+    "principalSet://iam.googleapis.com/%s/attribute.aws_role/%s",
+    google_iam_workload_identity_pool.ui_platform[0].name,
+    var.platform_eks_role_name,
+  )
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# ============================================================================
 # GCP Outputs
 # ============================================================================
 
@@ -190,4 +284,23 @@ output "gcp_management_sa_email" {
 output "gcp_management_sa_id" {
   description = "ID of the GCP management service account"
   value       = local.gcp_management_sa_id_out
+}
+
+output "gcp_wif_provider_resource_name" {
+  description = "Full resource name of the AWS-type Workload Identity Provider (projects/<num>/locations/global/workloadIdentityPools/<pool>/providers/<provider>). Empty when WIF is not enabled. Consumed by ui-core to construct the externalaccount audience for STS."
+  value       = local.ui_platform_wif_enabled ? google_iam_workload_identity_pool_provider.ui_platform_aws[0].name : ""
+}
+
+output "gcp_wif_pool_resource_name" {
+  description = "Full resource name of the Workload Identity Pool. Empty when WIF is not enabled."
+  value       = local.ui_platform_wif_enabled ? google_iam_workload_identity_pool.ui_platform[0].name : ""
+}
+
+output "gcp_wif_principal_set" {
+  description = "principalSet:// URI of the federated principal that holds tokenCreator on insideout-mgmt and insideout-inspector. Empty when WIF is not enabled."
+  value = local.ui_platform_wif_enabled ? format(
+    "principalSet://iam.googleapis.com/%s/attribute.aws_role/%s",
+    google_iam_workload_identity_pool.ui_platform[0].name,
+    var.platform_eks_role_name,
+  ) : ""
 }
