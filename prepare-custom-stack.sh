@@ -44,6 +44,23 @@ CUSTOM_REF="${CUSTOM_REF:-main}"
 CUSTOM_AUTH="${CUSTOM_AUTH:-token}"
 
 # --- Preserve key files in TARGET_DIR ------------------------------------------------------------
+# These patterns identify wrapper-owned files that must survive when the
+# customer's archive (or upstream git repo) is rsynced into TARGET_DIR.
+#
+# IMPORTANT: entries WITHOUT a wildcard are matched as LITERAL filenames
+# (rsync's --exclude pattern semantics + shell glob over a single filename).
+# In particular, "providers.tf" matches only the wrapper's own stub providers.tf
+# — it does NOT match archive-supplied sibling files like "providers-imported.tf"
+# or "providers-aliases.tf". This is intentional: the wrapper stub uses
+# wrapper-only Terraform vars (var.cloud_provider, local.terraform_role_arn,
+# etc.) and must always win, but the archive is allowed to ship additional
+# root-level provider configuration in "providers-*.tf" files (e.g. an
+# `alias = "imported"` block for reverse-Terraform imports). Terraform merges
+# provider configs across all .tf files in a module, so the wrapper's
+# providers.tf and the archive's providers-*.tf coexist cleanly.
+#
+# DO NOT change "providers.tf" to "providers*.tf" — that would silently drop
+# archive-supplied providers-*.tf files. See tests for the lock-in.
 PRESERVE_PATTERNS=(
   "backend.tf"
   "providers.tf"

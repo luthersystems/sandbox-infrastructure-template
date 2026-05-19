@@ -84,6 +84,14 @@ mkdir -p "$ARCHIVE_DIR"
 echo "new-main" > "$ARCHIVE_DIR/main.tf"
 echo "new-variables" > "$ARCHIVE_DIR/variables.tf"
 echo "1.8.0" > "$ARCHIVE_DIR/.terraform-version"
+# Archive may legitimately ship providers-*.tf siblings (e.g. reverse-import alias).
+# These MUST slip through PRESERVE_PATTERNS even though the wrapper preserves the
+# literal "providers.tf". They coexist because Terraform merges provider configs
+# across .tf files in the same module.
+echo 'provider "aws" { alias = "imported" }' > "$ARCHIVE_DIR/providers-imported.tf"
+echo 'provider "aws" { alias = "secondary" }' > "$ARCHIVE_DIR/providers-aliases.tf"
+# Archive's own providers.tf must STILL be dropped (wrapper's stub wins).
+echo 'provider "aws" { region = "evil-archive-region" }' > "$ARCHIVE_DIR/providers.tf"
 
 ARCHIVE_TGZ="$WORKDIR/payload.tgz"
 tar -czf "$ARCHIVE_TGZ" -C "$ARCHIVE_DIR" .
@@ -163,6 +171,27 @@ else
   fail "variables.tf not copied from archive"
 fi
 
+# Archive-supplied providers-imported.tf and providers-aliases.tf must survive
+# the PRESERVE_PATTERNS filter (literal "providers.tf" must not match siblings).
+if [[ -f "$TARGET/providers-imported.tf" ]] && grep -q 'alias = "imported"' "$TARGET/providers-imported.tf"; then
+  pass "providers-imported.tf from archive survived PRESERVE_PATTERNS"
+else
+  fail "providers-imported.tf from archive was dropped (PRESERVE_PATTERNS too broad)"
+fi
+
+if [[ -f "$TARGET/providers-aliases.tf" ]] && grep -q 'alias = "secondary"' "$TARGET/providers-aliases.tf"; then
+  pass "providers-aliases.tf from archive survived PRESERVE_PATTERNS"
+else
+  fail "providers-aliases.tf from archive was dropped (PRESERVE_PATTERNS too broad)"
+fi
+
+# Archive's own providers.tf must NOT clobber the wrapper's stub (literal match).
+if [[ -f "$TARGET/providers.tf" ]] && [[ "$(cat "$TARGET/providers.tf")" == "existing-providers" ]]; then
+  pass "wrapper providers.tf still wins over archive's providers.tf (literal preserve)"
+else
+  fail "wrapper providers.tf was overwritten by archive's providers.tf (PRESERVE_PATTERNS broke)"
+fi
+
 # --- Repo-mode test ---
 echo ""
 echo "Setting up repo-mode test..."
@@ -174,6 +203,10 @@ mkdir -p "$REPO_SRC"
 echo "repo-main" > "$REPO_SRC/main.tf"
 echo "repo-vars" > "$REPO_SRC/variables.tf"
 echo "1.9.0" > "$REPO_SRC/.terraform-version"
+# Same coverage as the archive case: repo-supplied providers-*.tf siblings must
+# pass through, but a repo's own providers.tf must NOT clobber the wrapper stub.
+echo 'provider "aws" { alias = "imported" }' > "$REPO_SRC/providers-imported.tf"
+echo 'provider "aws" { region = "evil-repo-region" }' > "$REPO_SRC/providers.tf"
 (
   cd "$REPO_SRC"
   git init -q -b main
@@ -270,6 +303,19 @@ if [[ ! -f "$TARGET/stale-leftover.tf" ]]; then
   pass "repo mode: stale file removed by rsync --delete"
 else
   fail "repo mode: stale file NOT removed (rsync --delete may be broken)"
+fi
+
+if [[ -f "$TARGET/providers-imported.tf" ]] && grep -q 'alias = "imported"' "$TARGET/providers-imported.tf"; then
+  pass "repo mode: providers-imported.tf from repo survived PRESERVE_PATTERNS"
+else
+  fail "repo mode: providers-imported.tf from repo was dropped (PRESERVE_PATTERNS too broad)"
+fi
+
+# Repo's own providers.tf must NOT clobber the wrapper stub (literal preserve).
+if [[ -f "$TARGET/providers.tf" ]] && [[ "$(cat "$TARGET/providers.tf")" == "existing-providers" ]]; then
+  pass "repo mode: wrapper providers.tf still wins over repo's providers.tf"
+else
+  fail "repo mode: wrapper providers.tf was overwritten by repo's providers.tf"
 fi
 
 # --- Error-path test: missing both archive and repo URL ---
