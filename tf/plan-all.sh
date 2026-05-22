@@ -104,17 +104,21 @@ for stage in $STAGES; do
 
   if [[ ! -f "$plan_file" ]]; then
     echo "WARNING: no plan JSON produced for stage $stage"
-    echo '{"add": 0, "change": 0, "destroy": 0, "has_changes": false}' > "$results_dir/$stage.json"
+    echo '{"add": 0, "change": 0, "destroy": 0, "import": 0, "has_changes": false}' > "$results_dir/$stage.json"
     continue
   fi
 
   # Extract resource change counts from plan JSON.
   # Filter out no-op actions (where actions == ["no-op"] or actions == ["read"]).
+  # Imports are counted from `change.actions[]` entries containing "import"
+  # (terraform JSON plan format v1+). A stage with imports-only is still a
+  # real change, so `has_changes` includes the import count.
   counts="$(jq '{
     add: [.resource_changes // [] | .[] | select(.change.actions | . != ["no-op"] and . != ["read"]) | select(.change.actions | contains(["create"]))] | length,
     change: [.resource_changes // [] | .[] | select(.change.actions | . != ["no-op"] and . != ["read"]) | select(.change.actions | contains(["update"]))] | length,
-    destroy: [.resource_changes // [] | .[] | select(.change.actions | . != ["no-op"] and . != ["read"]) | select(.change.actions | contains(["delete"]))] | length
-  } | . + {has_changes: ((.add + .change + .destroy) > 0)}' "$plan_file")"
+    destroy: [.resource_changes // [] | .[] | select(.change.actions | . != ["no-op"] and . != ["read"]) | select(.change.actions | contains(["delete"]))] | length,
+    import: [.resource_changes // [] | .[] | select(.change.actions | contains(["import"]))] | length
+  } | . + {has_changes: ((.add + .change + .destroy + .import) > 0)}' "$plan_file")"
 
   echo "$counts" > "$results_dir/$stage.json"
 
@@ -136,6 +140,7 @@ summary="$(
   total_add=0
   total_change=0
   total_destroy=0
+  total_import=0
 
   for stage in $STAGES; do
     stage_file="$results_dir/$stage.json"
@@ -147,6 +152,7 @@ summary="$(
         total_add=$((total_add + $(echo "$stage_data" | jq '.add')))
         total_change=$((total_change + $(echo "$stage_data" | jq '.change')))
         total_destroy=$((total_destroy + $(echo "$stage_data" | jq '.destroy')))
+        total_import=$((total_import + $(echo "$stage_data" | jq '.import // 0')))
       fi
       stages_json="$(echo "$stages_json" | jq --arg s "$stage" --argjson d "$stage_data" '.[$s] = $d')"
     fi
@@ -157,10 +163,11 @@ summary="$(
     --argjson total_add "$total_add" \
     --argjson total_change "$total_change" \
     --argjson total_destroy "$total_destroy" \
+    --argjson total_import "$total_import" \
     --argjson has_changes "$( [[ "$had_changes" == "true" ]] && echo "true" || echo "false" )" \
     '{
       stages: $stages,
-      total: { add: $total_add, change: $total_change, destroy: $total_destroy },
+      total: { add: $total_add, change: $total_change, destroy: $total_destroy, import: $total_import },
       has_changes: $has_changes
     }'
 )"
