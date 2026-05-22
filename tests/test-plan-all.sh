@@ -195,10 +195,16 @@ else
   fail "no changes: has_changes should be false"
 fi
 
-if jq -e '.total.add == 0 and .total.change == 0 and .total.destroy == 0' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+if jq -e '.total.add == 0 and .total.change == 0 and .total.destroy == 0 and .total.import == 0' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
   pass "no changes: totals are all zero"
 else
   fail "no changes: totals should be zero"
+fi
+
+if jq -e '.stages["cloud-provision"] | has("import")' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "no changes: per-stage import field present"
+else
+  fail "no changes: per-stage import field missing"
 fi
 
 # ============================================================
@@ -595,6 +601,97 @@ fi
 
 # Clean up
 rm -f "$STAGE_PLANS_DIR/cloud-provision.apply-fail"
+
+# ============================================================
+# Test 10: Import actions counted correctly
+# ============================================================
+echo ""
+echo "Test 10: Import actions..."
+
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+# custom-stack-provision: 1 import-only, 1 import+update, 1 create
+cat > "$STAGE_PLANS_DIR/custom-stack-provision.json" <<'EOF'
+{
+  "resource_changes": [
+    {"address": "aws_s3_bucket.imported", "change": {"actions": ["import"]}},
+    {"address": "aws_iam_role.imported_and_updated", "change": {"actions": ["import", "update"]}},
+    {"address": "aws_instance.new", "change": {"actions": ["create"]}}
+  ]
+}
+EOF
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+if jq -e '.has_changes == true' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import: has_changes is true"
+else
+  fail "import: has_changes should be true"
+fi
+
+if jq -e '.total.import == 2' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import: total import is 2"
+else
+  fail "import: total import should be 2, got $(jq '.total.import' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.total.add == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import: total add is 1 (import-only not counted as add)"
+else
+  fail "import: total add should be 1, got $(jq '.total.add' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.total.change == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import: total change is 1 (import+update counted as change)"
+else
+  fail "import: total change should be 1, got $(jq '.total.change' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.stages["custom-stack-provision"].import == 2' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import: per-stage import is 2"
+else
+  fail "import: per-stage import should be 2, got $(jq '.stages["custom-stack-provision"].import' "$PROJECT/outputs/plan-summary.json")"
+fi
+
+# ============================================================
+# Test 11: Import-only triggers has_changes (no add/change/destroy)
+# ============================================================
+echo ""
+echo "Test 11: Import-only stage marks has_changes=true..."
+
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+cat > "$STAGE_PLANS_DIR/custom-stack-provision.json" <<'EOF'
+{
+  "resource_changes": [
+    {"address": "aws_s3_bucket.imported", "change": {"actions": ["import"]}}
+  ]
+}
+EOF
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+if jq -e '.has_changes == true' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import-only: has_changes is true"
+else
+  fail "import-only: has_changes should be true"
+fi
+
+if jq -e '.stages["custom-stack-provision"].has_changes == true' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import-only: per-stage has_changes is true"
+else
+  fail "import-only: per-stage has_changes should be true"
+fi
+
+if jq -e '.total.add == 0 and .total.change == 0 and .total.destroy == 0 and .total.import == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "import-only: only import is non-zero"
+else
+  fail "import-only: totals incorrect. Got: $(jq -c '.total' "$PROJECT/outputs/plan-summary.json")"
+fi
 
 # --- Summary ---
 echo ""
