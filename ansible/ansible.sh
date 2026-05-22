@@ -3,7 +3,12 @@ set -euo pipefail
 
 ANSIBLE_PLAYBOOK_OPTS=${ANSIBLE_PLAYBOOK_OPTS:-""}
 
-MARS=/opt/mars/run.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+. "$MARS_PROJECT_ROOT/shell_utils.sh"
+
+MARS="$(resolveMarsBinary)"
 
 PLAYBOOK=$1
 

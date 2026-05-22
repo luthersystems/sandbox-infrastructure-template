@@ -15,6 +15,15 @@ echo_error() {
   echo "$1" >&2
 }
 
+resolveMarsBinary() {
+  local mars_root="${MARS_CONTAINER_ROOT:-/opt/mars}"
+  if [[ -x "$mars_root/mars" ]]; then
+    echo "$mars_root/mars"
+    return 0
+  fi
+  echo "$mars_root/run.sh"
+}
+
 # getAnsibleField <key>
 getAnsibleField() {
   key="$1"

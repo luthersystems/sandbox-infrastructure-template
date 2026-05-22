@@ -16,4 +16,4 @@ trap 'cleanupCloudEnv' EXIT
 # Hand off to the real Mars runner.
 # exec replaces this process, so the trap won't fire — the Mars container
 # handles its own cleanup on exit (same as prior behavior).
-exec /opt/mars/run.sh "$@"
+exec "$(resolveMarsBinary)" "$@"
