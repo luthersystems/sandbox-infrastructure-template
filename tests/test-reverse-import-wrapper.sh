@@ -80,6 +80,8 @@ run_wrapper() {
   (
     export MARS_PROJECT_ROOT="$PROJECT"
     export REVERSE_IMPORT_BIN="$FAKE_BIN"
+    export REVERSE_IMPORT_PROJECT_ID="project-123"
+    export REVERSE_IMPORT_SESSION_ID="sess_v2_abc123"
     bash "$ROOT/reverse-import.sh"
   )
 }
@@ -103,6 +105,12 @@ fi
 
 if ! grep -q -- "--request $PROJECT/reverse-import/request.json --out-dir $PROJECT/outputs/reverse-import" "$BIN_LOG"; then
   echo "expected request and stable output paths in binary args; got:" >&2
+  cat "$BIN_LOG" >&2
+  exit 1
+fi
+
+if ! grep -q -- "--import-project-id project-123 --import-session-id sess_v2_abc123" "$BIN_LOG"; then
+  echo "expected import provenance in binary args; got:" >&2
   cat "$BIN_LOG" >&2
   exit 1
 fi

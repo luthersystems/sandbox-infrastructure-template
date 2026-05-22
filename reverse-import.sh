@@ -35,10 +35,19 @@ trap 'cleanupCloudEnv' EXIT
 echo "reverse_import_request=$REVERSE_IMPORT_REQUEST"
 echo "reverse_import_out_dir=$REVERSE_IMPORT_OUT_DIR"
 
-set +e
-"$REVERSE_IMPORT_BIN" \
-  --request "$REVERSE_IMPORT_REQUEST" \
+reverse_import_args=(
+  --request "$REVERSE_IMPORT_REQUEST"
   --out-dir "$REVERSE_IMPORT_OUT_DIR"
+)
+if [[ -n "${REVERSE_IMPORT_PROJECT_ID:-}" ]]; then
+  reverse_import_args+=(--import-project-id "$REVERSE_IMPORT_PROJECT_ID")
+fi
+if [[ -n "${REVERSE_IMPORT_SESSION_ID:-}" ]]; then
+  reverse_import_args+=(--import-session-id "$REVERSE_IMPORT_SESSION_ID")
+fi
+
+set +e
+"$REVERSE_IMPORT_BIN" "${reverse_import_args[@]}"
 status=$?
 set -e
 
