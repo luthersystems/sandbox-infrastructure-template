@@ -45,19 +45,36 @@ tfInit() {
 }
 
 tfPlan() {
-  # Bump parallelism above terraform's default of 10 to speed up state
-  # refresh on customer stacks with many resources. AWS Describe* APIs
-  # tolerate 20 concurrent requests comfortably; reads are not throttle-
-  # sensitive the way writes are. Override via TF_PARALLELISM if needed.
-  $MARS ${tf_workspace} plan -parallelism="${TF_PARALLELISM:-20}"
+  # Bump terraform's default plan parallelism (10) → 20 to halve the AWS
+  # Describe* refresh funnel on customer stacks with 30-50 resources.
+  # Override via TF_PARALLELISM if needed.
+  #
+  # IMPORTANT: must thread the flag through TF_CLI_ARGS_plan rather than
+  # passing `-parallelism=…` directly to $MARS. The $MARS wrapper parses
+  # unrecognized flags itself and errors with "unknown flag -p" before
+  # the call ever reaches the terraform binary inside the container.
+  # TF_CLI_ARGS_plan is read directly by terraform and prepended to its
+  # actual command line, so the parallelism flag lands where it belongs.
+  local parallelism="${TF_PARALLELISM:-20}"
+  local args="-parallelism=${parallelism}"
+  if [[ -n "${TF_CLI_ARGS_plan:-}" ]]; then
+    args="${TF_CLI_ARGS_plan} ${args}"
+  fi
+  TF_CLI_ARGS_plan="${args}" $MARS ${tf_workspace} plan
 }
 
 tfApply() {
   # Apply hits write APIs which are more rate-limit sensitive than the
   # plan-time Describe* calls, so we keep apply at terraform's default
   # parallelism unless explicitly overridden via TF_APPLY_PARALLELISM.
+  # Same wrapper-flag-parsing gotcha as tfPlan: thread through
+  # TF_CLI_ARGS_apply rather than the direct CLI.
   if [[ -n "${TF_APPLY_PARALLELISM:-}" ]]; then
-    $MARS ${tf_workspace} apply -parallelism="${TF_APPLY_PARALLELISM}" --approve
+    local args="-parallelism=${TF_APPLY_PARALLELISM}"
+    if [[ -n "${TF_CLI_ARGS_apply:-}" ]]; then
+      args="${TF_CLI_ARGS_apply} ${args}"
+    fi
+    TF_CLI_ARGS_apply="${args}" $MARS ${tf_workspace} apply --approve
   else
     $MARS ${tf_workspace} apply --approve
   fi

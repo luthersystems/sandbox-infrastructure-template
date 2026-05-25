@@ -20,9 +20,14 @@ MOCK_MARS="$WORKDIR/mock-mars.sh"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Create a mock MARS that logs all invocations (log path baked in at creation)
+# Also log TF_CLI_ARGS_plan / TF_CLI_ARGS_apply env vars on a second line so
+# tests can assert that flags routed through env (instead of direct CLI args
+# that the real $MARS wrapper would reject as unknown) were actually set.
 cat > "$MOCK_MARS" <<EOF
 #!/usr/bin/env bash
 echo "\$*" >> "$MOCK_LOG"
+echo "TF_CLI_ARGS_plan=\${TF_CLI_ARGS_plan:-}" >> "$MOCK_LOG.env"
+echo "TF_CLI_ARGS_apply=\${TF_CLI_ARGS_apply:-}" >> "$MOCK_LOG.env"
 EOF
 chmod +x "$MOCK_MARS"
 
@@ -38,6 +43,7 @@ run_tf_func() {
   local func="$1"
   local mock="${2:-$MOCK_MARS}"
   : > "$MOCK_LOG"
+  : > "$MOCK_LOG.env"
   (
     cd "$STAGE_DIR"
     # Source utils.sh with workspace arg (positional $1 = "default")
@@ -122,12 +128,25 @@ else
     fail "tfPlan: expected 1 MARS call, got $call_count"
   fi
 
-  # tfPlan defaults to -parallelism=20 (override via TF_PARALLELISM).
-  expected_plan="default plan -parallelism=${TF_PARALLELISM:-20}"
-  if [[ "$first_call" == "$expected_plan" ]]; then
-    pass "tfPlan: call is '$expected_plan'"
+  # tfPlan threads `-parallelism=…` through TF_CLI_ARGS_plan (NOT as a
+  # direct CLI arg) because the real $MARS wrapper would reject `-p…`
+  # as an unknown flag — the mock in this test logs args but doesn't
+  # parse, which masked the issue originally. So the MARS call should
+  # be the bare `default plan`.
+  if [[ "$first_call" == "default plan" ]]; then
+    pass "tfPlan: call is 'default plan' (parallelism routed via TF_CLI_ARGS_plan)"
   else
-    fail "tfPlan: expected '$expected_plan', got: $first_call"
+    fail "tfPlan: expected 'default plan', got: $first_call"
+  fi
+
+  # Assert TF_CLI_ARGS_plan was set on the env passed to the mock. Without
+  # this assertion the test would happily pass even if the env-routing
+  # regressed back to a no-op (or back to the direct CLI form).
+  expected_env="TF_CLI_ARGS_plan=-parallelism=${TF_PARALLELISM:-20}"
+  if grep -q "^${expected_env}$" "$MOCK_LOG.env"; then
+    pass "tfPlan: TF_CLI_ARGS_plan='${expected_env#*=}' propagated to MARS env"
+  else
+    fail "tfPlan: expected env '$expected_env', got:"$'\n'"$(cat "$MOCK_LOG.env")"
   fi
 fi
 
