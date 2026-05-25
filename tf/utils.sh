@@ -45,11 +45,22 @@ tfInit() {
 }
 
 tfPlan() {
-  $MARS ${tf_workspace} plan
+  # Bump parallelism above terraform's default of 10 to speed up state
+  # refresh on customer stacks with many resources. AWS Describe* APIs
+  # tolerate 20 concurrent requests comfortably; reads are not throttle-
+  # sensitive the way writes are. Override via TF_PARALLELISM if needed.
+  $MARS ${tf_workspace} plan -parallelism="${TF_PARALLELISM:-20}"
 }
 
 tfApply() {
-  $MARS ${tf_workspace} apply --approve
+  # Apply hits write APIs which are more rate-limit sensitive than the
+  # plan-time Describe* calls, so we keep apply at terraform's default
+  # parallelism unless explicitly overridden via TF_APPLY_PARALLELISM.
+  if [[ -n "${TF_APPLY_PARALLELISM:-}" ]]; then
+    $MARS ${tf_workspace} apply -parallelism="${TF_APPLY_PARALLELISM}" --approve
+  else
+    $MARS ${tf_workspace} apply --approve
+  fi
 }
 
 tfDestroy() {

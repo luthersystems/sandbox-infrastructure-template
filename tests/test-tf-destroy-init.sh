@@ -122,10 +122,12 @@ else
     fail "tfPlan: expected 1 MARS call, got $call_count"
   fi
 
-  if [[ "$first_call" == "default plan" ]]; then
-    pass "tfPlan: call is 'default plan'"
+  # tfPlan defaults to -parallelism=20 (override via TF_PARALLELISM).
+  expected_plan="default plan -parallelism=${TF_PARALLELISM:-20}"
+  if [[ "$first_call" == "$expected_plan" ]]; then
+    pass "tfPlan: call is '$expected_plan'"
   else
-    fail "tfPlan: expected 'default plan', got: $first_call"
+    fail "tfPlan: expected '$expected_plan', got: $first_call"
   fi
 fi
 
