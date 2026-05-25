@@ -9,6 +9,14 @@
 #
 # Outputs:
 #   outputs/tfplan-<stage>.json  Per-stage plan JSON (produced by plan.sh)
+#   outputs/tfplan.json          Canonical "full plan" alias for Argo / Oracle /
+#                                reliable consumers that expect a single
+#                                tfplan.json artifact (see issue #127). Sourced
+#                                from the import-bearing stage when present
+#                                (custom-stack-provision) so the post-import
+#                                tag-only classifier in reliable has the
+#                                resource_changes array it needs; otherwise
+#                                the last successful stage wins.
 #   outputs/plan-summary.json    Aggregated change counts across all stages
 #
 # Exit codes:
@@ -28,6 +36,15 @@ logPresetsVersion
 STAGES="${PLAN_STAGES:-cloud-provision custom-stack-provision}"
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 mkdir -p "$OUTPUTS_DIR"
+
+# Clear stale plan artifacts from any prior run. Argo gives each workflow an
+# ephemeral marsproject so this is a no-op there, but local-dev re-runs (and
+# any reaped/retried Argo path that reuses the dir) would otherwise let a
+# previous-run tfplan-<stage>.json or tfplan.json survive a failed stage and
+# get picked up as the canonical alias below — feeding stale data to
+# reliable's tag-only classifier. Per-stage plan.sh invocations write their
+# own per-stage file and aren't affected.
+rm -f "$OUTPUTS_DIR"/tfplan-*.json "$OUTPUTS_DIR/tfplan.json"
 
 had_error=false
 had_changes=false
@@ -175,6 +192,33 @@ summary="$(
 echo "$summary" > "$OUTPUTS_DIR/plan-summary.json"
 echo "Plan summary written to $OUTPUTS_DIR/plan-summary.json"
 echo "$summary" | jq '.'
+
+# Write canonical outputs/tfplan.json alias for consumers that expect a
+# single full-plan artifact (Argo `tf-plan-all` artifact spec, Oracle
+# GetJobPlan → reliable's fetchOraclePlanJSON / post-import tag-only
+# classifier). See issue #127.
+#
+# Preference order:
+#   1. custom-stack-provision  (the stage that carries imports, so its
+#      resource_changes array is what the tag-only classifier reads)
+#   2. last successful stage in $STAGES with a per-stage plan JSON on disk
+canonical_src=""
+if [[ -f "$OUTPUTS_DIR/tfplan-custom-stack-provision.json" ]]; then
+  canonical_src="$OUTPUTS_DIR/tfplan-custom-stack-provision.json"
+else
+  for stage in $STAGES; do
+    if [[ -f "$OUTPUTS_DIR/tfplan-${stage}.json" ]]; then
+      canonical_src="$OUTPUTS_DIR/tfplan-${stage}.json"
+    fi
+  done
+fi
+
+if [[ -n "$canonical_src" ]]; then
+  cp "$canonical_src" "$OUTPUTS_DIR/tfplan.json"
+  echo "Canonical tfplan.json written from $canonical_src"
+else
+  echo "WARNING: no per-stage tfplan-*.json produced; skipping outputs/tfplan.json"
+fi
 
 # Exit codes
 if [[ "$had_error" == "true" ]]; then
