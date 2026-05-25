@@ -37,6 +37,15 @@ STAGES="${PLAN_STAGES:-cloud-provision custom-stack-provision}"
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
 mkdir -p "$OUTPUTS_DIR"
 
+# Clear stale plan artifacts from any prior run. Argo gives each workflow an
+# ephemeral marsproject so this is a no-op there, but local-dev re-runs (and
+# any reaped/retried Argo path that reuses the dir) would otherwise let a
+# previous-run tfplan-<stage>.json or tfplan.json survive a failed stage and
+# get picked up as the canonical alias below — feeding stale data to
+# reliable's tag-only classifier. Per-stage plan.sh invocations write their
+# own per-stage file and aren't affected.
+rm -f "$OUTPUTS_DIR"/tfplan-*.json "$OUTPUTS_DIR/tfplan.json"
+
 had_error=false
 had_changes=false
 
