@@ -220,6 +220,34 @@ else
   echo "WARNING: no per-stage tfplan-*.json produced; skipping outputs/tfplan.json"
 fi
 
+# Strip provider binaries before Argo tars /marsproject for its output
+# artifact. Each `terraform init --reconfigure` symlinks /opt/tf-plugin-cache
+# providers into the local .terraform/providers/ via mars's filesystem_mirror
+# (luthersystems/mars#168) — but when the baked provider version drifts ahead
+# of the mars cache, init falls back to direct registry download which COPIES
+# the binary into .terraform/providers/. Either way these are re-creatable
+# from the mars filesystem_mirror on the next pod's init, so they don't need
+# to round-trip through the workflow's S3 artifact (~750 MiB of provider
+# binary per stage per pod, observed at ~45s/upload on 2026-05-25 against
+# sess_v2_CnqUJ6NRJnLC).
+#
+# .terraform/modules/ is intentionally KEPT — those are git clones of
+# luthersystems/tf-modules that the next pod would otherwise re-clone (no
+# filesystem mirror equivalent for module sources).
+#
+# .terraform/{providers,plugins}-lock.json and the lockfile (.terraform.lock.hcl)
+# are also kept — they pin the resolved versions and are required for
+# `init --reconfigure` to find the right mirror entries.
+echo "=== Stripping .terraform/providers/ before exit (re-created from filesystem_mirror on next init) ==="
+for stage in $STAGES; do
+  providers_dir="$MARS_PROJECT_ROOT/tf/${stage}/.terraform/providers"
+  if [[ -d "$providers_dir" ]]; then
+    size_before=$(du -sh "$providers_dir" 2>/dev/null | awk '{print $1}')
+    rm -rf "$providers_dir"
+    echo "  stripped tf/${stage}/.terraform/providers/ (${size_before:-?} before)"
+  fi
+done
+
 # Exit codes
 if [[ "$had_error" == "true" ]]; then
   exit 1
