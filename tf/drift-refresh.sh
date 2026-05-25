@@ -44,6 +44,11 @@ terraform plan -refresh-only -out=refresh.tfplan -input=false
 mkdir -p "$MARS_PROJECT_ROOT/outputs"
 terraform show -json refresh.tfplan > "$MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json"
 echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json"
+# Also write the canonical outputs/tfplan.json alias for consumers that
+# key on the unsuffixed name (Argo artifact spec, Oracle GetJobPlan,
+# reliable's fetchOraclePlanJSON). See issue #127.
+cp "$MARS_PROJECT_ROOT/outputs/tfplan-${lifecycle}.json" "$MARS_PROJECT_ROOT/outputs/tfplan.json"
+echo "Canonical tfplan.json written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
 
 # Standalone drift alarm: --strict bypasses the plan-actionability gate in
 # drift-check.sh, since -refresh-only plans by definition have no actionable

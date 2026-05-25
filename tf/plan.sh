@@ -20,4 +20,11 @@ if [[ -n "$planfile" ]]; then
   local_ws="${workspace}"
   terraform show -json "$planfile" > "$MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
   echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
+  # Also write the canonical outputs/tfplan.json alias so single-stage
+  # Argo runs / consumers that key on the unsuffixed name pick this up
+  # (Argo `tf-plan-all` artifact spec, Oracle GetJobPlan, reliable's
+  # fetchOraclePlanJSON). See issue #127. plan-all.sh overwrites this
+  # alias to point at the import-bearing stage in multi-stage runs.
+  cp "$MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json" "$MARS_PROJECT_ROOT/outputs/tfplan.json"
+  echo "Canonical tfplan.json written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
 fi
