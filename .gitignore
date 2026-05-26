@@ -7,3 +7,13 @@ tf/auto-vars/skip_remote_state.auto.tfvars.json
 # Generated at deploy time by _selectCloudFiles() from .tf.tmpl templates
 tf/*/providers-*.tf
 tf/*/*-resources.tf
+
+# Terraform's tooling cache. Regenerable on next `terraform init` from
+# mars's filesystem_mirror. Without this rule the ~750 MiB AWS provider
+# binary that reverse-import populates under
+# outputs/reverse-import/{,genconfig/}.terraform/providers/ rides every
+# Oracle archive commit and accumulates ~168 MiB / commit in
+# .git/objects forever. See sandbox-infrastructure-template#136 (which
+# strips the worktree before targz) and ui-core#382 (the .git history
+# bloat follow-up).
+.terraform/
