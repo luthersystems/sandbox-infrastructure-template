@@ -129,11 +129,31 @@ elif [[ "\$1" == "apply" ]]; then
   if [[ -n "\$stage" && -f "\$apply_fail_file" ]]; then
     exit 1
   fi
+elif [[ "\$1" == "state" && "\$2" == "list" ]]; then
+  # plan-all.sh runs \`terraform state list\` (via the mars wrapper) to
+  # detect new projects vs. existing ones (commit 711f4b6 — data sources
+  # contaminate prior_state for brand-new projects, so state list is the
+  # reliable signal). The mock honors a \`<stage>.has-state\` sentinel:
+  # absent → no managed resources → auto-apply fires (Test 7); present
+  # → emit a resource address → auto-apply skipped (Test 8).
+  stage=""
+  for s in cloud-provision custom-stack-provision stage-a stage-b failing-stage; do
+    if echo "\$cwd/" | grep -q "/\$s/"; then
+      stage="\$s"
+      break
+    fi
+  done
+  if [[ -n "\$stage" && -f "$STAGE_PLANS_DIR/\${stage}.has-state" ]]; then
+    echo "aws_s3_bucket.state"
+  fi
 fi
 OUTER
 chmod +x "$MOCK_BIN/terraform"
 
-# Mock MARS
+# Mock MARS — only used by the outer plan-all.sh shell (the per-stage plan.sh
+# subshells reset MARS to the project's run-with-creds.sh wrapper via utils.sh).
+# Auto-apply state-list detection runs through utils.sh too, so it lands on the
+# mock terraform's `state list` handler above, not here.
 cat > "$MOCK_MARS" <<OUTER
 #!/usr/bin/env bash
 echo "mars \$*" >> "$CMD_LOG"
@@ -233,10 +253,14 @@ output="$(run_plan_all 2>&1)"
 exit_code=$?
 set -e
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "changes: exit code 2"
+# plan-all.sh exits 0 even when changes are present — Argo Workflows treats
+# any non-zero exit as a container failure, so the historical "exit 2 means
+# changes" convention was removed in #67. has_changes lives in
+# plan-summary.json instead.
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "changes: exit code 0 (changes signaled via plan-summary.json, not exit code — #67)"
 else
-  fail "changes: expected exit 2, got $exit_code. Output: $output"
+  fail "changes: expected exit 0, got $exit_code. Output: $output"
 fi
 
 if jq -e '.has_changes == true' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
@@ -289,10 +313,21 @@ else
   fail "changes: tfplan-custom-stack-provision.json not created"
 fi
 
-if [[ ! -f "$PROJECT/outputs/tfplan.json" ]]; then
-  pass "changes: tfplan.json NOT created (correct)"
+# Canonical outputs/tfplan.json IS expected — #127 / commit 4a66538 made
+# plan-all.sh always emit it so Argo's `tf-plan-all` artifact spec and
+# Oracle GetJobPlan have a single full-plan artifact to serve. Preference
+# is custom-stack-provision (the import-bearing stage); here that stage
+# carries the changes so its plan JSON should be the canonical source.
+if [[ -f "$PROJECT/outputs/tfplan.json" ]]; then
+  pass "changes: canonical tfplan.json written (#127)"
 else
-  fail "changes: tfplan.json should not exist"
+  fail "changes: canonical tfplan.json should be written (#127)"
+fi
+
+if jq -e '.resource_changes | length == 4' "$PROJECT/outputs/tfplan.json" >/dev/null 2>&1; then
+  pass "changes: canonical tfplan.json sourced from custom-stack-provision (has 4 resource_changes)"
+else
+  fail "changes: canonical tfplan.json should be the custom-stack-provision plan (4 resource_changes), got $(jq '.resource_changes | length' "$PROJECT/outputs/tfplan.json")"
 fi
 
 # ============================================================
@@ -325,10 +360,10 @@ output="$(run_plan_all 2>&1)"
 exit_code=$?
 set -e
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "both-changes: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "both-changes: exit code 0 (changes signaled via plan-summary.json — #67)"
 else
-  fail "both-changes: expected exit 2, got $exit_code. Output: $output"
+  fail "both-changes: expected exit 0, got $exit_code. Output: $output"
 fi
 
 # Totals should be sums across BOTH stages, not just the last stage
@@ -468,10 +503,10 @@ output="$(run_plan_all 2>&1)"
 exit_code=$?
 set -e
 
-if [[ "$exit_code" -eq 2 ]]; then
-  pass "destroy: exit code 2"
+if [[ "$exit_code" -eq 0 ]]; then
+  pass "destroy: exit code 0 (changes signaled via plan-summary.json — #67)"
 else
-  fail "destroy: expected exit 2, got $exit_code. Output: $output"
+  fail "destroy: expected exit 0, got $exit_code. Output: $output"
 fi
 
 if jq -e '.total.destroy == 1' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
@@ -533,7 +568,12 @@ fi
 echo ""
 echo "Test 8: Existing project — auto-apply NOT triggered..."
 
-# cloud-provision plan with prior_state containing resources (existing project)
+# cloud-provision plan with prior_state containing resources (existing project).
+# Detection now uses `terraform state list` (commit 711f4b6 — data sources show
+# up in prior_state for brand-new projects, so the JSON-parsing approach
+# misfired). The mock MARS honors a `<stage>.has-state` sentinel to emit a
+# managed-resource address from `state list`, telling plan-all.sh "this stage
+# has prior state, skip the auto-apply."
 cat > "$STAGE_PLANS_DIR/cloud-provision.json" <<'EOF'
 {
   "resource_changes": [],
@@ -549,6 +589,7 @@ cat > "$STAGE_PLANS_DIR/cloud-provision.json" <<'EOF'
 }
 EOF
 echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+touch "$STAGE_PLANS_DIR/cloud-provision.has-state"
 
 set +e
 : > "$CMD_LOG"
@@ -562,11 +603,17 @@ else
   pass "existing-project: auto-apply not triggered"
 fi
 
-if grep -q "apply" "$CMD_LOG"; then
+# Auto-apply runs `terraform apply --approve` via run-with-creds.sh, so we
+# anchor on that exact prefix rather than a bare "apply" substring (which
+# also matches "stage cloud-provision applied successfully" log lines that
+# get echoed if we ever decide to capture them).
+if grep -qE '^terraform apply( |$)' "$CMD_LOG"; then
   fail "existing-project: terraform apply should NOT have been called. Log: $(cat "$CMD_LOG")"
 else
   pass "existing-project: no terraform apply called"
 fi
+
+rm -f "$STAGE_PLANS_DIR/cloud-provision.has-state"
 
 # ============================================================
 # Test 9: New project — apply failure is handled gracefully
