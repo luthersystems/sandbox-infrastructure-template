@@ -693,6 +693,104 @@ else
   fail "import-only: totals incorrect. Got: $(jq -c '.total' "$PROJECT/outputs/plan-summary.json")"
 fi
 
+# ============================================================
+# Test 12: Strip removes ALL .terraform/providers/ trees, not just per-stage.
+# Covers issue #134 — reverse-import leaves provider caches under
+# outputs/reverse-import/{,genconfig/}.terraform/providers/ that the
+# original per-stage strip missed.
+# ============================================================
+echo ""
+echo "Test 12: Recursive strip of .terraform/providers/..."
+
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+
+# Seed provider caches at every depth the real archive can hit:
+#   - per-stage (already covered by #133)
+#   - outputs/reverse-import/.terraform/providers/
+#   - outputs/reverse-import/genconfig/.terraform/providers/
+provider_seed_paths=(
+  "tf/cloud-provision/.terraform/providers/registry.terraform.io/hashicorp/aws/6.46.0/linux_amd64"
+  "tf/custom-stack-provision/.terraform/providers/registry.terraform.io/hashicorp/aws/6.46.0/linux_amd64"
+  "outputs/reverse-import/.terraform/providers/registry.terraform.io/hashicorp/aws/6.46.0/linux_amd64"
+  "outputs/reverse-import/genconfig/.terraform/providers/registry.terraform.io/hashicorp/aws/6.46.0/linux_amd64"
+)
+for p in "${provider_seed_paths[@]}"; do
+  mkdir -p "$PROJECT/$p"
+  : > "$PROJECT/$p/terraform-provider-aws_v6.46.0_x5"
+done
+
+# Also seed sibling .terraform/{modules,plugins} content that must SURVIVE the
+# strip — the strip is intentionally narrow (providers only) so that modules
+# (git clones) and locks are preserved across pods.
+mkdir -p "$PROJECT/tf/cloud-provision/.terraform/modules"
+: > "$PROJECT/tf/cloud-provision/.terraform/modules/modules.json"
+: > "$PROJECT/tf/cloud-provision/.terraform.lock.hcl"
+
+set +e
+output="$(run_plan_all 2>&1)"
+exit_code=$?
+set -e
+
+# Per-stage provider dirs gone
+if [[ ! -d "$PROJECT/tf/cloud-provision/.terraform/providers" ]]; then
+  pass "strip-all: tf/cloud-provision/.terraform/providers removed"
+else
+  fail "strip-all: tf/cloud-provision/.terraform/providers should be removed"
+fi
+
+if [[ ! -d "$PROJECT/tf/custom-stack-provision/.terraform/providers" ]]; then
+  pass "strip-all: tf/custom-stack-provision/.terraform/providers removed"
+else
+  fail "strip-all: tf/custom-stack-provision/.terraform/providers should be removed"
+fi
+
+# Reverse-import provider dirs gone (the #134 fix)
+if [[ ! -d "$PROJECT/outputs/reverse-import/.terraform/providers" ]]; then
+  pass "strip-all: outputs/reverse-import/.terraform/providers removed (#134)"
+else
+  fail "strip-all: outputs/reverse-import/.terraform/providers should be removed (#134)"
+fi
+
+if [[ ! -d "$PROJECT/outputs/reverse-import/genconfig/.terraform/providers" ]]; then
+  pass "strip-all: outputs/reverse-import/genconfig/.terraform/providers removed (#134)"
+else
+  fail "strip-all: outputs/reverse-import/genconfig/.terraform/providers should be removed (#134)"
+fi
+
+# Siblings preserved
+if [[ -f "$PROJECT/tf/cloud-provision/.terraform/modules/modules.json" ]]; then
+  pass "strip-all: .terraform/modules/ preserved"
+else
+  fail "strip-all: .terraform/modules/ should be preserved"
+fi
+
+if [[ -f "$PROJECT/tf/cloud-provision/.terraform.lock.hcl" ]]; then
+  pass "strip-all: .terraform.lock.hcl preserved"
+else
+  fail "strip-all: .terraform.lock.hcl should be preserved"
+fi
+
+# Strip header is emitted (catches accidental removal of the block)
+if echo "$output" | grep -q "Stripping ALL .terraform/providers/"; then
+  pass "strip-all: header logged"
+else
+  fail "strip-all: header not logged. Output: $output"
+fi
+
+# Idempotent — a second invocation must not error even though the dirs
+# are already gone (mirrors a retried Argo step on the same marsproject).
+set +e
+output2="$(run_plan_all 2>&1)"
+exit_code2=$?
+set -e
+
+if [[ "$exit_code2" -eq 0 ]]; then
+  pass "strip-all: idempotent re-run exits 0"
+else
+  fail "strip-all: idempotent re-run expected exit 0, got $exit_code2. Output: $output2"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
