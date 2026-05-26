@@ -231,6 +231,12 @@ fi
 # binary per stage per pod, observed at ~45s/upload on 2026-05-25 against
 # sess_v2_CnqUJ6NRJnLC).
 #
+# We strip RECURSIVELY across the whole project root rather than just per-stage
+# tf/<stage>/.terraform/providers — reverse-import also leaves provider caches
+# under outputs/reverse-import/.terraform/providers/ and
+# outputs/reverse-import/genconfig/.terraform/providers/ (issue #134, another
+# ~1.5 GiB on top of the per-stage cost).
+#
 # .terraform/modules/ is intentionally KEPT — those are git clones of
 # luthersystems/tf-modules that the next pod would otherwise re-clone (no
 # filesystem mirror equivalent for module sources).
@@ -238,15 +244,15 @@ fi
 # .terraform/{providers,plugins}-lock.json and the lockfile (.terraform.lock.hcl)
 # are also kept — they pin the resolved versions and are required for
 # `init --reconfigure` to find the right mirror entries.
-echo "=== Stripping .terraform/providers/ before exit (re-created from filesystem_mirror on next init) ==="
-for stage in $STAGES; do
-  providers_dir="$MARS_PROJECT_ROOT/tf/${stage}/.terraform/providers"
-  if [[ -d "$providers_dir" ]]; then
-    size_before=$(du -sh "$providers_dir" 2>/dev/null | awk '{print $1}')
-    rm -rf "$providers_dir"
-    echo "  stripped tf/${stage}/.terraform/providers/ (${size_before:-?} before)"
-  fi
-done
+echo "=== Stripping ALL .terraform/providers/ before exit (re-created from filesystem_mirror on next init) ==="
+while IFS= read -r providers_dir; do
+  [[ -z "$providers_dir" ]] && continue
+  rel="${providers_dir#"$MARS_PROJECT_ROOT"/}"
+  size_before=$(du -sh "$providers_dir" 2>/dev/null | awk '{print $1}')
+  find "$providers_dir" -mindepth 1 -delete 2>/dev/null || true
+  rmdir "$providers_dir" 2>/dev/null || true
+  echo "  stripped $rel (${size_before:-?} before)"
+done < <(find "$MARS_PROJECT_ROOT" -type d -name providers -path '*/.terraform/providers' 2>/dev/null)
 
 # Exit codes
 if [[ "$had_error" == "true" ]]; then
