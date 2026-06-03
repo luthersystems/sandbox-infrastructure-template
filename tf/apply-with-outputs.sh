@@ -85,6 +85,13 @@ if [[ "$check_drift" == "true" ]]; then
 
   terraform apply -input=false apply.tfplan
   captureOutputs
+
+  # Persist the applied stack back to the <project>-infra repo. Oracle/ui-core
+  # drives deploys through this drift-check path (NOT tf/apply.sh), so this is
+  # the only place the commit/push actually runs in production. Without it the
+  # infra repo is created but never populated (issue #143). persistInfra is
+  # loud-on-failure: a missing remote/.git fails rather than silently no-ops.
+  persistInfra
 else
   # Simple mode: delegate to apply.sh (includes git merge/commit/push)
   bash "$SCRIPT_DIR/apply.sh" "$lifecycle"

@@ -141,3 +141,5 @@ jobs:
           bash tests/test-external-id.sh
           bash tests/test-state-backend-output-parity.sh
           bash tests/test-plan-all.sh
+          bash tests/test-apply-scripts.sh
+          bash tests/test-infra-push.sh

@@ -9,8 +9,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 logTemplateVersion
 logPresetsVersion
 
-gitMergeInfraMain
 tfInit
 tfApply
-gitCommit
-gitPushInfra
+# persistInfra = gitMergeInfraMain + gitCommit + (required) gitPushInfra.
+# Hardened over a bare gitCommit/gitPushInfra so a missing infra remote is a
+# LOUD failure instead of a silent no-op that leaves <project>-infra empty
+# (issue #143).
+persistInfra

@@ -113,6 +113,7 @@ configure_deploy_ssh() {
 
 ensure_infra_remote() {
   # repo_clone_ssh_url should be set via terraform auto-vars
+  # (written by tf/cloud-provision/repo.tf → tf/auto-vars/git_repo.auto.tfvars.json).
   url=$(getTfVar "repo_clone_ssh_url")
   if [ -n "$url" ]; then
     if git remote get-url infra >/dev/null 2>&1; then
@@ -121,12 +122,22 @@ ensure_infra_remote() {
       git remote add infra "$url"
     fi
     echo "🔧 infra remote configured → $url"
+  else
+    # Loud (not silent): a populated repo_clone_ssh_url is the contract that
+    # lets us push the applied stack back to <project>-infra. If it is missing
+    # the push will be skipped and the repo stays empty — make that visible so
+    # it cannot regress unnoticed (issue #143).
+    echo_error "WARNING: repo_clone_ssh_url is empty in $AUTO_VARS_DIR; infra remote NOT configured (gitPushInfra will skip)"
   fi
 }
 
 configure_git() {
   if ! has_git_repo; then
-    echo "⚠️  configure_git: no .git at $MARS_PROJECT_ROOT"
+    # Loud (not silent): without a .git the commit/push helpers below no-op and
+    # the infra repo stays empty. On a normal deploy prepare-custom-stack.sh's
+    # ensure_git_from_infra (or the cloned working tree) should have provided
+    # one — surface its absence rather than failing quietly (issue #143).
+    echo_error "WARNING: configure_git: no .git at $MARS_PROJECT_ROOT (git commit/push to infra will be skipped)"
     return 1
   fi
   pushd "$MARS_PROJECT_ROOT" >/dev/null
@@ -184,14 +195,59 @@ gitMergeOriginMain() {
 }
 
 gitPushInfra() {
+  # When INFRA_PUSH_REQUIRED=1 (set by the deploy persist path, persistInfra),
+  # a missing infra remote is treated as a hard failure instead of a silent
+  # no-op so an empty <project>-infra repo can never slip through a "successful"
+  # apply unnoticed (issue #143). Standalone callers (push.sh) keep the lenient
+  # default.
   pushd "$MARS_PROJECT_ROOT" >/dev/null
   if git remote get-url infra >/dev/null 2>&1; then
     echo "🚀 Pushing to infra…"
     git push infra HEAD
+  elif [ "${INFRA_PUSH_REQUIRED:-0}" = "1" ]; then
+    echo_error "ERROR: gitPushInfra: no infra remote configured but INFRA_PUSH_REQUIRED=1 — refusing to leave infra repo empty (issue #143)"
+    popd >/dev/null
+    return 1
   else
     echo "Skipping gitPushInfra: no infra remote configured"
   fi
   popd >/dev/null
+}
+
+# persistInfra commits the applied stack and pushes it to the <project>-infra
+# repo. This is the production deploy hook: Oracle/ui-core runs each stage via
+# apply-with-outputs.sh (not tf/apply.sh), so without an explicit call here the
+# commit/push that tf/apply.sh wires would never run and the infra repo would
+# stay empty even on a SUCCESSFUL apply (issue #143).
+#
+# Stages differ in whether they own a working-tree clone of the infra repo:
+#   - custom-stack-provision: prepare-custom-stack.sh's ensure_git_from_infra
+#     establishes .git (clones <project>-infra). This is where the customer's
+#     real Terraform lands and where the push must happen.
+#   - cloud-provision / bootstrap stages: no .git in the working tree — they
+#     provision the repo but have nothing of their own to push. Skipping is
+#     expected, not an error.
+#
+# So persistInfra keys off .git presence:
+#   - No .git  → warn and return 0 (nothing to persist from this stage).
+#   - Has .git → merge infra/main (no-op on a brand-new repo), commit, then push
+#     with INFRA_PUSH_REQUIRED=1 so a remote that can't be configured is a LOUD,
+#     non-zero failure instead of a silent no-op (the issue #143 failure mode).
+#
+# Args: $1 (optional) commit message.
+persistInfra() {
+  if ! has_git_repo; then
+    echo_error "WARNING: persistInfra: no .git at $MARS_PROJECT_ROOT; nothing to persist to infra repo from this stage"
+    return 0
+  fi
+
+  # Pull in any infra/main changes (no-op on a brand-new repo). Non-fatal: a
+  # merge conflict here should not block surfacing the apply, but is loud.
+  gitMergeInfraMain || echo_error "WARNING: persistInfra: gitMergeInfraMain reported a problem; continuing to commit/push"
+
+  gitCommit "${1:-auto-commit: infrastructure changes [ci skip]}"
+
+  INFRA_PUSH_REQUIRED=1 gitPushInfra
 }
 
 gitMergeInfraMain() {
