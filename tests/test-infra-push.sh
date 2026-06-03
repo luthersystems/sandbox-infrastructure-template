@@ -125,7 +125,7 @@ out1="$(
   cd "$P1"
   export MARS_PROJECT_ROOT="$P1"
   . "$P1/shell_utils.sh"
-  persistInfra "test: apply" 2>&1
+  persistInfra custom-stack-provision "test: apply" 2>&1
 )"
 rc1=$?
 set -e
@@ -268,7 +268,7 @@ fi
 
 # ===========================================================================
 echo ""
-echo "Test 5: persistInfra is a benign no-op for a stage with no .git..."
+echo "Test 5: persistInfra is a benign no-op for a BOOTSTRAP stage with no .git..."
 
 P5="$WORKDIR/p5"   # no .git at all
 mkdir -p "$P5/tf/auto-vars" "$P5/ansible/inventories/default/group_vars/all"
@@ -281,15 +281,45 @@ out5="$(
   cd "$P5"
   export MARS_PROJECT_ROOT="$P5"
   . "$P5/shell_utils.sh"
-  persistInfra 2>&1
+  persistInfra cloud-provision 2>&1
 )"
 rc5=$?
 set -e
 
 if [[ $rc5 -eq 0 ]] && echo "$out5" | grep -q "WARNING: persistInfra: no .git"; then
-  pass "persistInfra: no-.git stage warns and exits 0 (doesn't break bootstrap stages)"
+  pass "persistInfra: no-.git bootstrap stage warns and exits 0 (doesn't break cloud-provision)"
 else
-  fail "persistInfra: expected warn + exit 0 for no-.git stage. rc=$rc5 output=$out5"
+  fail "persistInfra: expected warn + exit 0 for no-.git bootstrap stage. rc=$rc5 output=$out5"
+fi
+
+# ===========================================================================
+echo ""
+echo "Test 6: persistInfra HARD-FAILS when the customer stage has no .git..."
+# Codex P1: if prepare-custom-stack.sh's infra clone failed (or repo_clone_ssh_url
+# was empty), custom-stack-provision could apply terraform, warn, exit success,
+# and leave <project>-infra empty — the original issue #143 bug class. The
+# required stage must fail the deploy instead of silently skipping.
+
+set +e
+out6="$(
+  cd "$P5"
+  export MARS_PROJECT_ROOT="$P5"
+  . "$P5/shell_utils.sh"
+  persistInfra custom-stack-provision 2>&1
+)"
+rc6=$?
+set -e
+
+if [[ $rc6 -ne 0 ]]; then
+  pass "persistInfra: required stage with no .git returns non-zero (fails the deploy, not silent)"
+else
+  fail "persistInfra: required stage with no .git SILENTLY succeeded (rc=0) — issue #143 bug class. Output: $out6"
+fi
+
+if echo "$out6" | grep -q "ERROR: persistInfra: no .git"; then
+  pass "persistInfra: required stage with no .git emits a loud ERROR"
+else
+  fail "persistInfra: required stage missing loud ERROR. Output: $out6"
 fi
 
 # --- Summary ---------------------------------------------------------------

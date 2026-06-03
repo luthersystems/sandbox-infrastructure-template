@@ -14,5 +14,7 @@ tfApply
 # persistInfra = gitMergeInfraMain + gitCommit + (required) gitPushInfra.
 # Hardened over a bare gitCommit/gitPushInfra so a missing infra remote is a
 # LOUD failure instead of a silent no-op that leaves <project>-infra empty
-# (issue #143).
-persistInfra
+# (issue #143). $workspace (= the lifecycle/stage) is set by the sourced
+# utils.sh; pass it so persistInfra hard-fails when the customer stage can't
+# persist rather than silently skipping.
+persistInfra "${workspace:-}"
