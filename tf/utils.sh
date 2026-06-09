@@ -143,8 +143,14 @@ tfDestroy() {
       echo "tfDestroy: --ignore-drift — skipping pre-destroy convergence gate [#2048]"
     fi
   else
+    # Capture help output first, then grep the captured string: a direct
+    # `$MARS ... --help | grep -q` pipeline under pipefail can false-negative
+    # when grep -q exits early and the producer dies on SIGPIPE. `|| true`
+    # guards set -e if an old wrapper errors on --help.
     local guard_supported=false
-    if $MARS ${tf_workspace} apply --help 2>&1 | grep -q -- '--forbid-resource-changes'; then
+    local mars_apply_help
+    mars_apply_help=$($MARS ${tf_workspace} apply --help 2>&1 || true)
+    if grep -q -- '--forbid-resource-changes' <<<"$mars_apply_help"; then
       guard_supported=true
     fi
     if [[ "$guard_supported" == true ]]; then
