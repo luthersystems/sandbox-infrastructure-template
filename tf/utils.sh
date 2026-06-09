@@ -82,5 +82,35 @@ tfApply() {
 
 tfDestroy() {
   tfInit
+  # #2048: a stack that adopted reverse-Terraform-imported (customer-owned)
+  # resources carries `removed { ... lifecycle { destroy = false } }` blocks in
+  # its composed archive. `terraform destroy` destroys everything in state, so
+  # running it directly would DELETE those pre-existing resources. When such
+  # blocks are present, FIRST apply them so terraform forgets the adopted
+  # addresses from state without deleting them, THEN destroy — which now only
+  # tears down resources this stack actually manages.
+  #
+  # The pre-destroy apply runs through mars' `--forbid-resource-changes` guard:
+  # it refuses (and aborts the destroy) if that apply would create/update/delete
+  # any real resource, so the forget-step can never silently mutate
+  # infrastructure. cwd here is the stage dir holding the composed *.tf files.
+  # Gated on a removed{} block actually being present, so non-import stacks keep
+  # the plain init -> destroy path unchanged.
+  local removed_present=false
+  shopt -s nullglob
+  local f
+  for f in *.tf; do
+    if grep -Eqs '^[[:space:]]*removed[[:space:]]*\{' "$f"; then
+      removed_present=true
+      break
+    fi
+  done
+  shopt -u nullglob
+  if [[ "$removed_present" == true ]]; then
+    echo "tfDestroy: removed{} block(s) present — forgetting adopted imports before destroy (apply --forbid-resource-changes) [#2048]"
+    # Strip any plan-only CLI args Oracle may have set in the job env (invalid
+    # for a plain apply); mirrors plan-all.sh. Subshell keeps the unset local.
+    ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS ${tf_workspace} apply --forbid-resource-changes )
+  fi
   $MARS ${tf_workspace} destroy --approve
 }

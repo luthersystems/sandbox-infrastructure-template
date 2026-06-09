@@ -205,6 +205,68 @@ else
   pass "destroy was NOT called after init failure"
 fi
 
+# --- Test 6: tfDestroy two-step when a removed{} block is present (#2048) ---
+echo ""
+echo "Testing tfDestroy forgets adopted imports before destroy when removed{} present..."
+cat > "$STAGE_DIR/default/imported.tf" <<'TF'
+removed {
+  from = aws_s3_bucket.adopted
+  lifecycle {
+    destroy = false
+  }
+}
+TF
+run_tf_func tfDestroy
+removed_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+c1="$(sed -n '1p' "$MOCK_LOG")"
+c2="$(sed -n '2p' "$MOCK_LOG")"
+c3="$(sed -n '3p' "$MOCK_LOG")"
+if [[ "$removed_calls" -eq 3 ]]; then
+  pass "tfDestroy(removed{}): exactly 3 MARS calls"
+else
+  fail "tfDestroy(removed{}): expected 3 MARS calls, got $removed_calls"$'\n'"$(cat "$MOCK_LOG")"
+fi
+if [[ "$c1" == "default init --reconfigure" ]]; then
+  pass "tfDestroy(removed{}): first call is init"
+else
+  fail "tfDestroy(removed{}): first call expected init, got: $c1"
+fi
+if [[ "$c2" == "default apply --forbid-resource-changes" ]]; then
+  pass "tfDestroy(removed{}): second call is guarded apply (forget)"
+else
+  fail "tfDestroy(removed{}): second call expected 'default apply --forbid-resource-changes', got: $c2"
+fi
+if [[ "$c3" == "default destroy --approve" ]]; then
+  pass "tfDestroy(removed{}): third call is destroy"
+else
+  fail "tfDestroy(removed{}): third call expected destroy, got: $c3"
+fi
+rm -f "$STAGE_DIR/default/imported.tf"
+
+# --- Test 7: tfDestroy stays single-step for a non-import stack (.tf without removed{}) ---
+echo ""
+echo "Testing tfDestroy stays single-step when no removed{} block present..."
+cat > "$STAGE_DIR/default/main.tf" <<'TF'
+resource "aws_s3_bucket" "managed" {
+  bucket = "example"
+}
+TF
+run_tf_func tfDestroy
+noremoved_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+n1="$(sed -n '1p' "$MOCK_LOG")"
+n2="$(sed -n '2p' "$MOCK_LOG")"
+if [[ "$noremoved_calls" -eq 2 ]]; then
+  pass "tfDestroy(no removed{}): exactly 2 MARS calls (no extra apply)"
+else
+  fail "tfDestroy(no removed{}): expected 2 MARS calls, got $noremoved_calls"$'\n'"$(cat "$MOCK_LOG")"
+fi
+if [[ "$n1" == "default init --reconfigure" && "$n2" == "default destroy --approve" ]]; then
+  pass "tfDestroy(no removed{}): init then destroy, no apply"
+else
+  fail "tfDestroy(no removed{}): expected init then destroy, got: $n1 / $n2"
+fi
+rm -f "$STAGE_DIR/default/main.tf"
+
 # --- Summary ---
 echo ""
 echo "================================"
