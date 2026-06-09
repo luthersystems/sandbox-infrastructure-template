@@ -80,22 +80,45 @@ tfApply() {
   fi
 }
 
+# tfDestroy [--ignore-drift] — pre-destroy convergence gate + adopted-import
+# protection (#2048).
+#
+# A stack that adopted reverse-Terraform-imported (customer-owned) resources
+# carries `removed { ... lifecycle { destroy = false } }` blocks in its
+# composed archive. `terraform destroy` destroys everything in state, so
+# running it directly would DELETE those pre-existing resources; `removed{}`
+# is an APPLY-time construct that destroy ignores. The pre-destroy apply
+# executes those forgets (releasing the adopted addresses from state without
+# deleting them) AND — via mars' `--forbid-resource-changes` guard — fails if
+# the archive would create/update/delete any real resource. An apply that is
+# not a state-only no-op at destroy time means drift or a half-applied stack;
+# destroying on top of that deserves a human decision (--ignore-drift), not
+# an automatic teardown.
+#
+# Semantics matrix (guard = mars supports `apply --forbid-resource-changes`,
+# probed via `apply --help` so an older pinned mars degrades gracefully
+# instead of erroring on an unknown flag):
+#
+#   guard  | removed{} | --ignore-drift | behavior
+#   -------+-----------+----------------+------------------------------------
+#   yes    | any       | no             | guarded apply (gate + forgets) -> destroy
+#   yes/no | yes       | yes            | UNguarded apply (forgets; drift accepted) -> destroy
+#   yes/no | no        | yes            | plain destroy (gate skipped)
+#   no     | no        | no             | WARN + plain destroy (legacy behavior)
+#   no     | yes       | no             | FAIL — adopted imports cannot be
+#                                         destroyed safely without the guard;
+#                                         bump the mars image or pass
+#                                         --ignore-drift (human accepts the
+#                                         unguarded forget-apply).
+#
+# cwd here is the stage dir holding the composed *.tf files.
 tfDestroy() {
+  local ignore_drift=false
+  if [[ "${1:-}" == "--ignore-drift" ]]; then
+    ignore_drift=true
+  fi
   tfInit
-  # #2048: a stack that adopted reverse-Terraform-imported (customer-owned)
-  # resources carries `removed { ... lifecycle { destroy = false } }` blocks in
-  # its composed archive. `terraform destroy` destroys everything in state, so
-  # running it directly would DELETE those pre-existing resources. When such
-  # blocks are present, FIRST apply them so terraform forgets the adopted
-  # addresses from state without deleting them, THEN destroy — which now only
-  # tears down resources this stack actually manages.
-  #
-  # The pre-destroy apply runs through mars' `--forbid-resource-changes` guard:
-  # it refuses (and aborts the destroy) if that apply would create/update/delete
-  # any real resource, so the forget-step can never silently mutate
-  # infrastructure. cwd here is the stage dir holding the composed *.tf files.
-  # Gated on a removed{} block actually being present, so non-import stacks keep
-  # the plain init -> destroy path unchanged.
+
   local removed_present=false
   shopt -s nullglob
   local f
@@ -106,11 +129,34 @@ tfDestroy() {
     fi
   done
   shopt -u nullglob
-  if [[ "$removed_present" == true ]]; then
-    echo "tfDestroy: removed{} block(s) present — forgetting adopted imports before destroy (apply --forbid-resource-changes) [#2048]"
-    # Strip any plan-only CLI args Oracle may have set in the job env (invalid
-    # for a plain apply); mirrors plan-all.sh. Subshell keeps the unset local.
-    ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS ${tf_workspace} apply --forbid-resource-changes )
+
+  if [[ "$ignore_drift" == true ]]; then
+    if [[ "$removed_present" == true ]]; then
+      # Forgets are NEVER skippable (data-loss invariant); the override only
+      # downgrades the guard: the operator accepted whatever drift the apply
+      # carries alongside the forgets. Strip plan-only CLI args Oracle may
+      # have set (invalid for a plain apply); mirrors plan-all.sh. Subshell
+      # keeps the unset local.
+      echo "tfDestroy: --ignore-drift — applying forgets UNGUARDED before destroy (drift accepted by operator) [#2048]"
+      ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; tfApply )
+    else
+      echo "tfDestroy: --ignore-drift — skipping pre-destroy convergence gate [#2048]"
+    fi
+  else
+    local guard_supported=false
+    if $MARS ${tf_workspace} apply --help 2>&1 | grep -q -- '--forbid-resource-changes'; then
+      guard_supported=true
+    fi
+    if [[ "$guard_supported" == true ]]; then
+      echo "tfDestroy: pre-destroy convergence gate (apply --forbid-resource-changes) [#2048]"
+      ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS ${tf_workspace} apply --forbid-resource-changes )
+    elif [[ "$removed_present" == true ]]; then
+      echo "ERROR: tfDestroy: archive carries removed{} blocks (adopted imports) but this mars image lacks 'apply --forbid-resource-changes'." >&2
+      echo "ERROR: destroying now would DELETE the adopted resources. Bump the mars image, or re-run with --ignore-drift to apply the forgets unguarded. [#2048]" >&2
+      return 1
+    else
+      echo "WARNING: tfDestroy: mars image lacks 'apply --forbid-resource-changes'; skipping pre-destroy convergence gate (legacy destroy) [#2048]"
+    fi
   fi
   $MARS ${tf_workspace} destroy --approve
 }
