@@ -23,13 +23,38 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Also log TF_CLI_ARGS_plan / TF_CLI_ARGS_apply env vars on a second line so
 # tests can assert that flags routed through env (instead of direct CLI args
 # that the real $MARS wrapper would reject as unknown) were actually set.
+#
+# Capability probes (--help) are answered but NOT logged — tfDestroy probes
+# `apply --help` for --forbid-resource-changes support (#2048), and the probe
+# is not an action. This default mock emulates an OLD mars image: its help
+# output does NOT mention the flag.
 cat > "$MOCK_MARS" <<EOF
 #!/usr/bin/env bash
+if [[ "\$*" == *"--help"* ]]; then
+  echo "Usage: mars <env> apply [flags]"
+  exit 0
+fi
 echo "\$*" >> "$MOCK_LOG"
 echo "TF_CLI_ARGS_plan=\${TF_CLI_ARGS_plan:-}" >> "$MOCK_LOG.env"
 echo "TF_CLI_ARGS_apply=\${TF_CLI_ARGS_apply:-}" >> "$MOCK_LOG.env"
 EOF
 chmod +x "$MOCK_MARS"
+
+# A NEW-mars mock: identical, but its `--help` advertises
+# --forbid-resource-changes so tfDestroy's capability probe succeeds (#2048).
+NEW_MARS="$WORKDIR/new-mars.sh"
+cat > "$NEW_MARS" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"--help"* ]]; then
+  echo "Flags:"
+  echo "      --forbid-resource-changes    Fail if the plan would create, update, or delete any resource."
+  exit 0
+fi
+echo "\$*" >> "$MOCK_LOG"
+echo "TF_CLI_ARGS_plan=\${TF_CLI_ARGS_plan:-}" >> "$MOCK_LOG.env"
+echo "TF_CLI_ARGS_apply=\${TF_CLI_ARGS_apply:-}" >> "$MOCK_LOG.env"
+EOF
+chmod +x "$NEW_MARS"
 
 # Create a minimal workspace directory that tfSetup expects
 STAGE_DIR="$WORKDIR/stage"
@@ -42,6 +67,7 @@ mkdir -p "$STAGE_DIR/default"
 run_tf_func() {
   local func="$1"
   local mock="${2:-$MOCK_MARS}"
+  local funcarg="${3:-}"
   : > "$MOCK_LOG"
   : > "$MOCK_LOG.env"
   (
@@ -52,7 +78,11 @@ run_tf_func() {
     source "$REPO_ROOT/tf/utils.sh"
     # Override MARS after sourcing (utils.sh sets MARS to run-with-creds.sh)
     export MARS="$mock"
-    "$func"
+    if [[ -n "$funcarg" ]]; then
+      "$func" "$funcarg"
+    else
+      "$func"
+    fi
   )
 }
 
@@ -203,6 +233,141 @@ if grep -q "destroy" "$MOCK_LOG"; then
   fail "destroy was called despite init failure"
 else
   pass "destroy was NOT called after init failure"
+fi
+
+# --- Test 6: tfDestroy gate executes forgets when removed{} present (new mars, #2048) ---
+echo ""
+echo "Testing tfDestroy(new mars) forgets adopted imports via guarded apply before destroy..."
+cat > "$STAGE_DIR/default/imported.tf" <<'TF'
+removed {
+  from = aws_s3_bucket.adopted
+  lifecycle {
+    destroy = false
+  }
+}
+TF
+run_tf_func tfDestroy "$NEW_MARS"
+removed_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+c1="$(sed -n '1p' "$MOCK_LOG")"
+c2="$(sed -n '2p' "$MOCK_LOG")"
+c3="$(sed -n '3p' "$MOCK_LOG")"
+if [[ "$removed_calls" -eq 3 ]]; then
+  pass "tfDestroy(new mars, removed{}): exactly 3 MARS calls"
+else
+  fail "tfDestroy(new mars, removed{}): expected 3 MARS calls, got $removed_calls"$'\n'"$(cat "$MOCK_LOG")"
+fi
+if [[ "$c1" == "default init --reconfigure" ]]; then
+  pass "tfDestroy(new mars, removed{}): first call is init"
+else
+  fail "tfDestroy(new mars, removed{}): first call expected init, got: $c1"
+fi
+if [[ "$c2" == "default apply --forbid-resource-changes" ]]; then
+  pass "tfDestroy(new mars, removed{}): second call is guarded apply (forget)"
+else
+  fail "tfDestroy(new mars, removed{}): second call expected 'default apply --forbid-resource-changes', got: $c2"
+fi
+if [[ "$c3" == "default destroy --approve" ]]; then
+  pass "tfDestroy(new mars, removed{}): third call is destroy"
+else
+  fail "tfDestroy(new mars, removed{}): third call expected destroy, got: $c3"
+fi
+rm -f "$STAGE_DIR/default/imported.tf"
+
+# --- Test 7: always-on convergence gate for a non-import stack (new mars, #2048) ---
+echo ""
+echo "Testing tfDestroy(new mars) runs the convergence gate even without removed{}..."
+cat > "$STAGE_DIR/default/main.tf" <<'TF'
+resource "aws_s3_bucket" "managed" {
+  bucket = "example"
+}
+TF
+run_tf_func tfDestroy "$NEW_MARS"
+gate_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+g1="$(sed -n '1p' "$MOCK_LOG")"
+g2="$(sed -n '2p' "$MOCK_LOG")"
+g3="$(sed -n '3p' "$MOCK_LOG")"
+if [[ "$gate_calls" -eq 3 ]]; then
+  pass "tfDestroy(new mars, no removed{}): exactly 3 MARS calls (always-on gate)"
+else
+  fail "tfDestroy(new mars, no removed{}): expected 3 MARS calls, got $gate_calls"$'\n'"$(cat "$MOCK_LOG")"
+fi
+if [[ "$g1" == "default init --reconfigure" && "$g2" == "default apply --forbid-resource-changes" && "$g3" == "default destroy --approve" ]]; then
+  pass "tfDestroy(new mars, no removed{}): init -> guarded apply -> destroy"
+else
+  fail "tfDestroy(new mars, no removed{}): expected init/guarded-apply/destroy, got: $g1 / $g2 / $g3"
+fi
+
+# --- Test 8: --ignore-drift skips the gate for a non-import stack (#2048) ---
+echo ""
+echo "Testing tfDestroy --ignore-drift skips the gate when no removed{}..."
+run_tf_func tfDestroy "$NEW_MARS" --ignore-drift
+skip_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+s1="$(sed -n '1p' "$MOCK_LOG")"
+s2="$(sed -n '2p' "$MOCK_LOG")"
+if [[ "$skip_calls" -eq 2 && "$s1" == "default init --reconfigure" && "$s2" == "default destroy --approve" ]]; then
+  pass "tfDestroy(--ignore-drift, no removed{}): plain init -> destroy (gate skipped)"
+else
+  fail "tfDestroy(--ignore-drift, no removed{}): expected init -> destroy, got ($skip_calls):"$'\n'"$(cat "$MOCK_LOG")"
+fi
+rm -f "$STAGE_DIR/default/main.tf"
+
+# --- Test 9: --ignore-drift still executes forgets (unguarded) when removed{} present (#2048) ---
+echo ""
+echo "Testing tfDestroy --ignore-drift still applies forgets (unguarded) when removed{} present..."
+cat > "$STAGE_DIR/default/imported.tf" <<'TF'
+removed {
+  from = aws_s3_bucket.adopted
+  lifecycle {
+    destroy = false
+  }
+}
+TF
+run_tf_func tfDestroy "$NEW_MARS" --ignore-drift
+ov_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+o1="$(sed -n '1p' "$MOCK_LOG")"
+o2="$(sed -n '2p' "$MOCK_LOG")"
+o3="$(sed -n '3p' "$MOCK_LOG")"
+if [[ "$ov_calls" -eq 3 && "$o2" == "default apply --approve" ]]; then
+  pass "tfDestroy(--ignore-drift, removed{}): forgets applied UNGUARDED (apply --approve), never skipped"
+else
+  fail "tfDestroy(--ignore-drift, removed{}): expected init -> 'default apply --approve' -> destroy, got ($ov_calls): $o1 / $o2 / $o3"
+fi
+if [[ "$o3" == "default destroy --approve" ]]; then
+  pass "tfDestroy(--ignore-drift, removed{}): destroy still runs after forget-apply"
+else
+  fail "tfDestroy(--ignore-drift, removed{}): third call expected destroy, got: $o3"
+fi
+
+# --- Test 10: old mars + removed{} fails closed (no destroy) (#2048) ---
+echo ""
+echo "Testing tfDestroy fails closed on old mars when removed{} present..."
+set +e
+run_tf_func tfDestroy "$MOCK_MARS" 2>/dev/null
+old_mars_exit=$?
+set -e
+if [[ "$old_mars_exit" -ne 0 ]]; then
+  pass "tfDestroy(old mars, removed{}): exits non-zero (fail closed)"
+else
+  fail "tfDestroy(old mars, removed{}): should fail when guard unsupported and removed{} present"
+fi
+if grep -q "destroy" "$MOCK_LOG"; then
+  fail "tfDestroy(old mars, removed{}): destroy must NOT run without the guard"
+else
+  pass "tfDestroy(old mars, removed{}): destroy was NOT called"
+fi
+rm -f "$STAGE_DIR/default/imported.tf"
+
+# --- Test 11: old mars + no removed{} keeps legacy destroy (warn, no gate) (#2048) ---
+echo ""
+echo "Testing tfDestroy keeps legacy behavior on old mars without removed{}..."
+run_tf_func tfDestroy
+legacy_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+l1="$(sed -n '1p' "$MOCK_LOG")"
+l2="$(sed -n '2p' "$MOCK_LOG")"
+if [[ "$legacy_calls" -eq 2 && "$l1" == "default init --reconfigure" && "$l2" == "default destroy --approve" ]]; then
+  pass "tfDestroy(old mars, no removed{}): legacy init -> destroy (graceful degradation)"
+else
+  fail "tfDestroy(old mars, no removed{}): expected init -> destroy, got ($legacy_calls):"$'\n'"$(cat "$MOCK_LOG")"
 fi
 
 # --- Summary ---
