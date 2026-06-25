@@ -29,7 +29,7 @@ provider "registry.terraform.io/hashicorp/aws" {
 
 provider "registry.terraform.io/hashicorp/google" {
   version     = "7.16.0"
-  constraints = ">= 5.0.0"
+  constraints = "~> 7.0"
   hashes = [
     "h1:/DfuxNMgKt8V5lKwJOaw2wWJaTaI8Qa/VmqKcb6igNc=",
     "h1:1iWP4kLOCstQqajKpciPMlPC6pnJpMwe7hU6rsHfN14=",
