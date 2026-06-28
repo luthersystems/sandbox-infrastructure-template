@@ -128,3 +128,15 @@ variable "gcp_impersonate_service_account" {
   type        = string
   default     = ""
 }
+
+variable "platform_aws_account_id" {
+  description = "InsideOut platform AWS account ID. When set together with platform_eks_role_name, cloud-provision creates a per-project Workload Identity Pool + AWS provider so the Oracle pod's EKS IRSA role can impersonate insideout-mgmt / insideout-inspector without a long-lived customer SA key."
+  type        = string
+  default     = ""
+}
+
+variable "platform_eks_role_name" {
+  description = "IAM role name (no ARN, no path) of the Oracle pod's IRSA role. Federated principal is principalSet://...attribute.aws_role/<this>. Required together with platform_aws_account_id to enable WIF."
+  type        = string
+  default     = ""
+}
