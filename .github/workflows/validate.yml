@@ -142,3 +142,4 @@ jobs:
           bash tests/test-state-backend-output-parity.sh
           bash tests/test-plan-all.sh
           bash tests/test-gcp-preflight.sh
+          bash tests/test-aws-preflight.sh
