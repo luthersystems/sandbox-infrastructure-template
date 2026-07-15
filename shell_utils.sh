@@ -405,6 +405,24 @@ setupCloudEnv() {
       echo "  GOOGLE_PROJECT=$GOOGLE_PROJECT"
       echo "  GOOGLE_REGION=$GOOGLE_REGION"
       echo "  GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+
+      # Fail-fast GCP bootstrap-permission preflight (luthersystems/reliable#2243).
+      # Only the cloud-provision stage creates the GCS tfstate bucket + the two
+      # service accounts + the Owner grant, so scope the check to that stage
+      # dir — every other stage is left untouched. CWD is the stage dir here
+      # (setupCloudEnv already assumes this via _selectCloudFiles), so gate on
+      # its basename. The preflight runs BEFORE any terraform init/plan/apply
+      # (this is the earliest hook where GOOGLE_APPLICATION_CREDENTIALS is set),
+      # so a missing-permission failure aborts before repo.tf's GitHub side
+      # creates the orphaned partial state #2243 was about. gcp-preflight.sh
+      # fails OPEN on its own infra/transport errors and only fails CLOSED
+      # (exit 1) on a definitive verdict.
+      if [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
+        if ! bash "$MARS_PROJECT_ROOT/tf/gcp-preflight.sh" "$GOOGLE_PROJECT"; then
+          echo_error "ERROR: GCP bootstrap permission preflight failed — aborting before terraform runs. [reliable#2243]"
+          return 1
+        fi
+      fi
       ;;
 
     aws)
