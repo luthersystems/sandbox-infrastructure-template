@@ -85,6 +85,28 @@
 # into locals and passed into the simulate call's OWN environment only, never
 # logged.
 #
+# Implementation — THREE-TIER DISPATCH (mars#215 Go swap, released mars v0.130.0,
+# ui-core#452 bumped marsVersion so the binary ships in every current deploy job
+# at /usr/local/bin/insideout-preflight). Twin of the block in gcp-preflight.sh:
+#   1. SKIP_AWS_BOOTSTRAP_PREFLIGHT=1  → skip (operator override; handled below).
+#   2. insideout-preflight on PATH     → DELEGATE to that Go binary. It reproduces
+#      this script's semantics + log markers byte-for-byte; the REQUIRED_ACTIONS
+#      list stays declared HERE (source of truth — it changes atomically with
+#      tf/cloud-provision/aws-resources.tf.tmpl) and is passed in as --actions.
+#      role/external-id/region are the same inputs the inline path resolves; an
+#      empty BOOTSTRAP_ROLE ⇒ omit --role-arn ⇒ the binary's ambient-caller mode.
+#   3. binary ABSENT (older pinned mars image) → fall through to the legacy inline
+#      aws-cli implementation below, UNCHANGED. Kept for one epoch; deleting it is
+#      a #2243 follow-up once no pinned mars < v0.130.0 remains anywhere.
+# This wrapper's external interface is preserved exactly across all three tiers.
+#
+# Test-seam carve-out: whenever TEST_MODE=1 (AWS_PREFLIGHT_TEST_SIMULATE_FILE /
+# AWS_PREFLIGHT_TEST_ASSUME_* set) we ALWAYS take the legacy inline path, never
+# the binary. Those seams inject canned simulate/assume-role outputs that only
+# the inline classifier can consume — the binary makes its own real SDK calls. So
+# the unit seams keep exercising the shell classifier; the binary delegation is
+# covered by the binary's own Go tests + tests/test-preflight-binary-swap.sh.
+#
 # Usage: bash aws-preflight.sh [<bootstrap_role_arn>]
 #   bootstrap role arn resolves from: $1 -> $AWS_BOOTSTRAP_ROLE (empty ⇒
 #     ambient-caller mode)
@@ -199,6 +221,42 @@ classify_assume_failure() {
   fi
   fail_open "could not assume bootstrap role ${BOOTSTRAP_ROLE} (transient — throttling/5xx/network/expired creds): ${errtext:-<no detail>}"
 }
+
+# ----------------------------------------------------------------------------
+# Tier 2 — delegate to the insideout-preflight Go binary when it is on PATH and
+# no test seam is active (see the THREE-TIER DISPATCH note in the header). The
+# binary owns the "checking…"/OK/fail-closed markers from here on. REQUIRED_ACTIONS
+# is the source of truth and is passed straight through as --actions; the role /
+# external-id / region are the same inputs the inline path resolves. An empty
+# BOOTSTRAP_ROLE omits --role-arn, selecting the binary's ambient-caller mode.
+# ----------------------------------------------------------------------------
+if [[ "$TEST_MODE" -eq 0 ]] && command -v insideout-preflight >/dev/null 2>&1; then
+  log "delegating to insideout-preflight (mars#215) — Go bootstrap-permission preflight"
+  actions_csv="$(IFS=','; echo "${REQUIRED_ACTIONS[*]}")"
+  bin_args=(aws --actions "$actions_csv" --region "$PREFLIGHT_REGION")
+  if [[ -n "$BOOTSTRAP_ROLE" ]]; then
+    bin_args+=(--role-arn "$BOOTSTRAP_ROLE")
+    if [[ -n "$EXTERNAL_ID" ]]; then
+      bin_args+=(--external-id "$EXTERNAL_ID")
+    fi
+  fi
+  insideout-preflight "${bin_args[@]}"
+  rc=$?
+  case "$rc" in
+    0) exit 0 ;; # pass, or the binary's own fail-open — non-fatal
+    1) exit 1 ;; # definitive fail-closed — the only blocking verdict
+    *)
+      # exit 2 (usage error) or any unexpected code is OUR bug (a bad arg/flag we
+      # passed), not a permission verdict. Only a definitive verdict may block a
+      # deploy, so fail OPEN loudly rather than abort the deploy on a wrapper bug.
+      fail_open "insideout-preflight exited ${rc} (usage/unexpected — a wrapper-argument bug, not a permission verdict)."
+      ;;
+  esac
+fi
+
+# --- Tier 3 (fallthrough): legacy inline aws-cli implementation ---
+# Reached only when the binary is absent OR an AWS_PREFLIGHT_TEST_* seam set
+# TEST_MODE=1. Unchanged from the pre-swap script.
 
 # ----------------------------------------------------------------------------
 # Phase 1 — resolve the policy-source ARN to simulate, assuming the bootstrap

@@ -48,6 +48,28 @@
 # inline, and an unexpected `set -e` abort would surface as a non-zero exit —
 # which setupCloudEnv treats as fatal — i.e. the exact opposite of fail-open.
 #
+# Implementation — THREE-TIER DISPATCH (mars#215 Go swap, released mars v0.130.0,
+# ui-core#452 bumped marsVersion so the binary ships in every current deploy
+# job at /usr/local/bin/insideout-preflight):
+#   1. SKIP_GCP_BOOTSTRAP_PREFLIGHT=1  → skip (operator override; handled below).
+#   2. insideout-preflight on PATH     → DELEGATE to that Go binary. It reproduces
+#      this script's semantics + log markers byte-for-byte; the REQUIRED_PERMISSIONS
+#      list stays declared HERE (source of truth — it changes atomically with
+#      tf/cloud-provision/gcp-resources.tf.tmpl) and is passed in as --permissions.
+#   3. binary ABSENT (older pinned mars image) → fall through to the legacy inline
+#      gcloud+curl implementation below, UNCHANGED. Kept for one epoch; deleting it
+#      is a #2243 follow-up once no pinned mars < v0.130.0 remains anywhere.
+# This wrapper's external interface is preserved exactly across all three tiers:
+# invoked path, args/env consumed, SKIP var, exit semantics, greppable markers.
+#
+# Test-seam carve-out: whenever a GCP_PREFLIGHT_TEST_* seam is set we ALWAYS take
+# the legacy inline path, never the binary. The seams inject a canned raw
+# testIamPermissions HTTP body (GCP_PREFLIGHT_TEST_RESPONSE_FILE +
+# GCP_PREFLIGHT_TEST_HTTP_CODE) that only the inline comparison logic can consume
+# — the binary makes its own real API call and cannot ingest a fake body. So the
+# unit seams keep exercising the shell classifier; the binary delegation is
+# covered by the binary's own Go tests + tests/test-preflight-binary-swap.sh.
+#
 # Usage: bash gcp-preflight.sh [<gcp_project_id>]
 #   project id resolves from: $1 -> $GOOGLE_PROJECT -> $GCP_PROJECT_ID
 #   service-account key path: $GOOGLE_APPLICATION_CREDENTIALS
@@ -100,6 +122,38 @@ CREDS_FILE="${GOOGLE_APPLICATION_CREDENTIALS:-}"
 if [[ -z "$PROJECT_ID" ]]; then
   fail_open "no GCP project id (arg / GOOGLE_PROJECT / GCP_PROJECT_ID all empty)."
 fi
+
+# ----------------------------------------------------------------------------
+# Tier 2 — delegate to the insideout-preflight Go binary when it is on PATH and
+# no test seam is active (see the THREE-TIER DISPATCH note in the header). The
+# binary owns the "checking…"/OK/fail-closed markers from here on, so we do NOT
+# print the shell's own sa_email/"checking…" lines on this path (that would
+# duplicate the binary's byte-identical output). REQUIRED_PERMISSIONS is the
+# source of truth and is passed straight through as --permissions.
+# ----------------------------------------------------------------------------
+if [[ -z "${GCP_PREFLIGHT_TEST_RESPONSE_FILE:-}" ]] && command -v insideout-preflight >/dev/null 2>&1; then
+  log "delegating to insideout-preflight (mars#215) — Go bootstrap-permission preflight"
+  perms_csv="$(IFS=','; echo "${REQUIRED_PERMISSIONS[*]}")"
+  insideout-preflight gcp \
+    --project-id "$PROJECT_ID" \
+    --credentials-file "$CREDS_FILE" \
+    --permissions "$perms_csv"
+  rc=$?
+  case "$rc" in
+    0) exit 0 ;; # pass, or the binary's own fail-open — non-fatal
+    1) exit 1 ;; # definitive fail-closed — the only blocking verdict
+    *)
+      # exit 2 (usage error) or any unexpected code is OUR bug (a bad arg/flag we
+      # passed), not a permission verdict. Only a definitive verdict may block a
+      # deploy, so fail OPEN loudly rather than abort the deploy on a wrapper bug.
+      fail_open "insideout-preflight exited ${rc} (usage/unexpected — a wrapper-argument bug, not a permission verdict)."
+      ;;
+  esac
+fi
+
+# --- Tier 3 (fallthrough): legacy inline gcloud+curl implementation ---
+# Reached only when the binary is absent OR a GCP_PREFLIGHT_TEST_* seam forced
+# the legacy path. Unchanged from the pre-swap script.
 
 # Service-account email — best-effort, only used to make the message actionable.
 sa_email="unknown"
