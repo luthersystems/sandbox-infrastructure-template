@@ -405,6 +405,24 @@ setupCloudEnv() {
       echo "  GOOGLE_PROJECT=$GOOGLE_PROJECT"
       echo "  GOOGLE_REGION=$GOOGLE_REGION"
       echo "  GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+
+      # Fail-fast GCP bootstrap-permission preflight (luthersystems/reliable#2243).
+      # Only the cloud-provision stage creates the GCS tfstate bucket + the two
+      # service accounts + the Owner grant, so scope the check to that stage
+      # dir — every other stage is left untouched. CWD is the stage dir here
+      # (setupCloudEnv already assumes this via _selectCloudFiles), so gate on
+      # its basename. The preflight runs BEFORE any terraform init/plan/apply
+      # (this is the earliest hook where GOOGLE_APPLICATION_CREDENTIALS is set),
+      # so a missing-permission failure aborts before repo.tf's GitHub side
+      # creates the orphaned partial state #2243 was about. gcp-preflight.sh
+      # fails OPEN on its own infra/transport errors and only fails CLOSED
+      # (exit 1) on a definitive verdict.
+      if [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
+        if ! bash "$MARS_PROJECT_ROOT/tf/gcp-preflight.sh" "$GOOGLE_PROJECT"; then
+          echo_error "ERROR: GCP bootstrap permission preflight failed — aborting before terraform runs. [reliable#2243]"
+          return 1
+        fi
+      fi
       ;;
 
     aws)
@@ -412,6 +430,36 @@ setupCloudEnv() {
       # No GCP provider or credentials needed — all cloud-specific resources
       # and providers are isolated in .tf.tmpl template files.
       echo "AWS environment: using IRSA"
+
+      # Fail-fast AWS bootstrap-permission preflight (luthersystems/reliable#2243).
+      # Twin of the GCP preflight above. Only the cloud-provision stage creates
+      # the S3 tfstate bucket + KMS key + the admin/inspector IAM roles, so scope
+      # the check to that stage dir — every other stage is left untouched. CWD is
+      # the stage dir here. The preflight runs BEFORE any terraform init/plan/apply
+      # so a denied-action failure aborts before repo.tf's GitHub side creates the
+      # orphaned partial state #2243 was about. providers-aws.tf.tmpl has the aws
+      # provider assume the customer bootstrap_role (with aws_external_id), so pass
+      # those from tfvars — the preflight assumes that role and simulates against
+      # it (empty bootstrap_role ⇒ it simulates the ambient caller identity).
+      # aws-preflight.sh fails OPEN on its own infra/transport errors (incl. an
+      # inability to run the simulation) and only fails CLOSED on a definitive
+      # denied-action verdict or an explicit AccessDenied on the assume-role.
+      # NOTE: assumeJumpRole runs after this case; in the mars/Argo deploy path
+      # JUMP_ROLE_ARN is unset, so the ambient (IRSA) creds the preflight uses to
+      # assume bootstrap_role match those terraform will use.
+      if [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
+        local aws_bootstrap_role aws_external_id aws_region_v
+        aws_bootstrap_role=$(getTfVar "bootstrap_role")
+        aws_external_id=$(getTfVar "aws_external_id")
+        aws_region_v=$(getTfVar "aws_region")
+        if ! AWS_BOOTSTRAP_ROLE="$aws_bootstrap_role" \
+             AWS_EXTERNAL_ID="$aws_external_id" \
+             AWS_PREFLIGHT_REGION="${aws_region_v:-us-east-1}" \
+             bash "$MARS_PROJECT_ROOT/tf/aws-preflight.sh" "$aws_bootstrap_role"; then
+          echo_error "ERROR: AWS bootstrap permission preflight failed — aborting before terraform runs. [reliable#2243]"
+          return 1
+        fi
+      fi
       ;;
 
     *)

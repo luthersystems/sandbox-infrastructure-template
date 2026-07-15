@@ -47,6 +47,24 @@ set -- "$lifecycle"
 logTemplateVersion
 logPresetsVersion
 
+# Suppress the cloud-provision bootstrap-permission preflight on the destroy
+# path (luthersystems/reliable#2243). The preflight (setupCloudEnv →
+# {aws,gcp}-preflight.sh) fires on EVERY mars invocation via run-with-creds.sh
+# ($MARS) whenever the stage dir basename is "cloud-provision" — and tfDestroy
+# runs `mars init` (and the convergence-gate `mars apply --help` / `mars apply
+# --forbid-resource-changes`) before `mars destroy`. It checks the CREATE
+# permissions the bootstrap APPLY needs (s3:CreateBucket, iam:CreateRole, …),
+# which a teardown does NOT need. Left unsuppressed, a stack whose connecting
+# credential was later locked down (or was under-privileged and left orphaned
+# partial state — the very #2243 scenario) could no longer be destroyed: the
+# preflight would fail closed and abort the teardown, blocking cleanup. The
+# hook can't cheaply tell a destroy's `init` from an apply's `init` (they are
+# identical mars calls), so we scope the skip here at the destroy entry point.
+# These exports live only in this process and its mars children — apply.sh /
+# plan.sh / drift-refresh.sh run as separate processes and keep the guard.
+export SKIP_AWS_BOOTSTRAP_PREFLIGHT=1
+export SKIP_GCP_BOOTSTRAP_PREFLIGHT=1
+
 tfInit
 if [[ "$ignore_drift" == "true" ]]; then
   tfDestroy --ignore-drift
