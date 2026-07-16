@@ -251,11 +251,17 @@ persistInfraRepo() {
     echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty at persist time — cloud-provision's git_repo.auto.tfvars.json did not reach the apply working tree. [sandbox-infrastructure-template#143]" >&2
   fi
 
-  # gitMergeInfraMain returns non-zero on a merge conflict; guard it so
-  # persistInfraRepo (called under `set -e`) never aborts the caller.
+  # Each helper is individually guarded with `|| echo` so persistInfraRepo
+  # honors its "Always returns 0" contract in EVERY caller context — not only
+  # when the call site adds its own `|| …` (which suspends `set -e` across the
+  # whole body). Without these guards a hard git failure (gitMergeInfraMain's
+  # merge-conflict `return 1`, or a gitCommit/gitPushInfra that aborts mid-body
+  # under an active `set -e`, e.g. a rejecting pre-commit hook) could brick an
+  # already-applied deploy if a future caller ever invoked persistInfraRepo bare.
+  # Belt-and-suspenders on the exact #143 brick path.
   gitMergeInfraMain || echo "⚠️  [git-infra] WARNING: gitMergeInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
-  gitCommit "auto-commit: deployed infrastructure [ci skip]"
-  gitPushInfra
+  gitCommit "auto-commit: deployed infrastructure [ci skip]" || echo "⚠️  [git-infra] WARNING: gitCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
+  gitPushInfra || echo "⚠️  [git-infra] WARNING: gitPushInfra returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
 
   return 0
 }
