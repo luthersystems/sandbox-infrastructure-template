@@ -125,16 +125,33 @@ set -uo pipefail
 #   iam:CreateRole / iam:GetRole / iam:TagRole / iam:PutRolePolicy /
 #   iam:AttachRolePolicy / iam:CreatePolicy / iam:PassRole
 #                                            admin terraform role + inspector role
+#   iam:CreatePolicyVersion / iam:TagPolicy  least-privilege companion (#147
+#                                            design §6(b)): once the deploy
+#                                            role's policy is the customer-
+#                                            managed InsideOutWrite policy,
+#                                            re-provision UPDATES it in place
+#                                            via iam:CreatePolicyVersion (not
+#                                            iam:CreatePolicy) and creation
+#                                            carries the Project tag via
+#                                            iam:TagPolicy. Without these a
+#                                            credential passes first-deploy
+#                                            preflight then 403s mid-apply on
+#                                            the NEXT re-provision — the #2243
+#                                            failure class relocated. Harmless
+#                                            today: admin roles trivially
+#                                            simulate-pass both.
 #   sts:AssumeRole                           admin role assumed by the terraform SA
 #   sts:GetCallerIdentity                    AWS provider init
 # ----------------------------------------------------------------------------
 REQUIRED_ACTIONS=(
   iam:AttachRolePolicy
   iam:CreatePolicy
+  iam:CreatePolicyVersion
   iam:CreateRole
   iam:GetRole
   iam:PassRole
   iam:PutRolePolicy
+  iam:TagPolicy
   iam:TagRole
   kms:CreateAlias
   kms:CreateKey

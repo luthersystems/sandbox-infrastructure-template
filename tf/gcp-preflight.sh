@@ -84,8 +84,22 @@ set -uo pipefail
 #   iam.serviceAccounts.{get,set}IamPolicy   the two SA token-creator bindings
 #   resourcemanager.projects.get             provider project read
 #   resourcemanager.projects.{get,set}IamPolicy  the five project IAM bindings
+#   iam.roles.{create,update}                least-privilege companion (#147
+#                                            design §7/§7.3): once the
+#                                            roles/owner grant is replaced by a
+#                                            scoped custom role
+#                                            (google_project_iam_custom_role),
+#                                            cloud-provision must CREATE it on
+#                                            first apply and UPDATE its
+#                                            includedPermissions on
+#                                            re-provision. Harmless today: the
+#                                            Owner-grant check already gates
+#                                            GCP bootstrap, and Owner implies
+#                                            both permissions.
 # ----------------------------------------------------------------------------
 REQUIRED_PERMISSIONS=(
+  iam.roles.create
+  iam.roles.update
   iam.serviceAccounts.create
   iam.serviceAccounts.get
   iam.serviceAccounts.getIamPolicy

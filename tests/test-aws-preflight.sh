@@ -25,7 +25,7 @@ ROLE="arn:aws:iam::123456789012:role/insideout-bootstrap"
 # Full required set — must stay in sync with REQUIRED_ACTIONS in the script AND
 # with reliable bootstrap_permissions.go::bootstrapAWSIAMActions() (drift guard
 # below cross-checks the script against this literal).
-ALL_ACTIONS='["iam:AttachRolePolicy","iam:CreatePolicy","iam:CreateRole","iam:GetRole","iam:PassRole","iam:PutRolePolicy","iam:TagRole","kms:CreateAlias","kms:CreateKey","kms:DescribeKey","kms:PutKeyPolicy","kms:TagResource","s3:CreateBucket","s3:GetBucketVersioning","s3:PutBucketPolicy","s3:PutBucketPublicAccessBlock","s3:PutBucketVersioning","s3:PutEncryptionConfiguration","sts:AssumeRole","sts:GetCallerIdentity"]'
+ALL_ACTIONS='["iam:AttachRolePolicy","iam:CreatePolicy","iam:CreatePolicyVersion","iam:CreateRole","iam:GetRole","iam:PassRole","iam:PutRolePolicy","iam:TagPolicy","iam:TagRole","kms:CreateAlias","kms:CreateKey","kms:DescribeKey","kms:PutKeyPolicy","kms:TagResource","s3:CreateBucket","s3:GetBucketVersioning","s3:PutBucketPolicy","s3:PutBucketPublicAccessBlock","s3:PutBucketVersioning","s3:PutEncryptionConfiguration","sts:AssumeRole","sts:GetCallerIdentity"]'
 
 # simulate_response <jq-decision-expr> — emit an `aws iam simulate-principal-policy`
 # shaped JSON where each required action's EvalDecision is computed by the jq
@@ -77,16 +77,16 @@ else
 fi
 
 echo ""
-echo "Test 3: empty allowed list -> FAIL CLOSED, all 20 missing (exit 1)"
+echo "Test 3: empty allowed list -> FAIL CLOSED, all 22 missing (exit 1)"
 resp_empty="$WORKDIR/resp_empty.json"
 echo '{"EvaluationResults": []}' > "$resp_empty"
 run_preflight 1 "zero allowed fails closed" "$ROLE" \
   "AWS_PREFLIGHT_TEST_SIMULATE_FILE=$resp_empty"
 missing_lines="$(grep -c '^\[aws-preflight\]   - ' <<<"$OUT")"
-if [[ "$missing_lines" -eq 20 ]]; then
-  pass "lists all 20 missing actions"
+if [[ "$missing_lines" -eq 22 ]]; then
+  pass "lists all 22 missing actions"
 else
-  fail "expected 20 missing action lines, got $missing_lines"
+  fail "expected 22 missing action lines, got $missing_lines"
 fi
 
 echo ""
@@ -162,7 +162,7 @@ script_actions="$(grep -E '^[[:space:]]+(iam|kms|s3|sts):[A-Za-z]+$' "$PREFLIGHT
   | sort -u)"
 golden_actions="$(jq -r '.[]' <<<"$ALL_ACTIONS" | sort -u)"
 if [[ "$script_actions" == "$golden_actions" ]]; then
-  pass "REQUIRED_ACTIONS matches the 20-action golden set"
+  pass "REQUIRED_ACTIONS matches the 22-action golden set"
 else
   fail "REQUIRED_ACTIONS drifted from golden set"
   echo "--- script ---"; echo "$script_actions"
