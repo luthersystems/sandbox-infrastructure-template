@@ -1,23 +1,21 @@
-# Deploy-role policy artifacts — SCAFFOLD (issue #147)
+# Deploy-role policy artifacts (issue #147)
 
-**Status: PLACEHOLDER. NOT ATTACHED to any IAM role. Not enforced.**
-
-These JSON bodies are the *reviewable, version-controlled artifact* for
-replacing `AdministratorAccess` on the customer-account deploy roles with a
-scoped least-privilege policy. They are surfaced only as **unused Terraform
-outputs** via `../least_privilege_scaffold.tf`. The live attachment in
-`../main.tf` (`aws_iam_role_policy_attachment.admin`) still uses
-`AdministratorAccess` and is unchanged by this scaffold.
+**Status: Phase 0 of the staged rollout is LIVE in `../main.tf`** — the deploy
+role attaches a customer-managed, **admin-equivalent** `InsideOutWrite` policy
+(inline in `main.tf`) in place of the AWS-managed `AdministratorAccess`, plus
+the deny-only permission boundary below. Phase 0 is permission-neutral: the
+attached body still allows `*` on `*`; only the policy *object* (the identity)
+changed, and the role name/ARN is untouched.
 
 Full rationale, options analysis, migration/rollout, blast radius, and test plan:
 [`docs/design/least-privilege-deploy-role.md`](../../../docs/design/least-privilege-deploy-role.md).
 
-| File | What it is |
-|---|---|
-| `insideout-write.json` | The derived `InsideOutWrite` deploy policy: a per-service allowlist covering every AWS service the composer can provision, plus bounded IAM + `iam:PassRole` (scoped by `iam:PassedToService`). |
-| `insideout-deploy-boundary.json` | Defense-in-depth **permission boundary** (deny-only): `Allow *` minus the provably out-of-scope surface (Organizations, Account/Billing, IAM-user/credential creation, security-monitoring teardown). A strict superset of real deploy usage → attachable without breaking a deploy. |
+| File | Status | What it is |
+|---|---|---|
+| `insideout-deploy-boundary.json` | **LIVE (Phase 0)** — attached as the role's `permissions_boundary` via `aws_iam_policy.insideout_deploy_boundary` in `../main.tf` | Defense-in-depth **permission boundary** (deny-only): `Allow *` minus the provably out-of-scope surface (Organizations, Account/Billing, IAM-user/credential creation, security-monitoring teardown). A strict superset of real deploy usage → non-enforcing for any real deploy. |
+| `insideout-write.json` | **PLACEHOLDER — NOT attached** (Phase-2 target; surfaced only as an unused output by `../least_privilege_scaffold.tf`) | The derived scoped `InsideOutWrite` deploy policy body: a per-service allowlist covering every AWS service the composer can provision, plus bounded IAM + `iam:PassRole` (scoped by `iam:PassedToService`). Phase 2 narrows the live admin-equivalent body down to this. |
 
-## These are placeholders — do not hand-maintain, do not attach as-is
+## `insideout-write.json` is a placeholder — do not hand-maintain, do not attach as-is
 
 - **Generator-owned.** The real `insideout-write.json` must be **generated from
   `insideout-terraform-presets/pkg/composer/iam_actions.go`** (the same metadata
@@ -32,8 +30,12 @@ Full rationale, options analysis, migration/rollout, blast radius, and test plan
   transitive services (`autoscaling`, `ecr`, `sns`, `events`, `tag`, …) that
   never appear in the create-only seed. That delta is confirmed empirically in
   the **shadow / CloudTrail phase** before enforcement (design doc §8.2).
-- **Attaching either body requires the staged rollout + broad apply testing** in
-  the design doc (§8 migration, §10 test plan) — plus the §6(b) preflight
-  companion change (`iam:CreatePolicyVersion` / `iam:TagPolicy`) so the bootstrap
-  credential can create *and update* this customer-managed policy. Attaching a
-  too-tight grant breaks every customer deploy — worse than the status quo.
+- **Attaching it requires the staged rollout + broad apply testing** in the
+  design doc (§8 migration, §10 test plan) — plus the §6(b) preflight companion
+  change (`iam:CreatePolicyVersion` / `iam:TagPolicy`) so the bootstrap
+  credential can *update* this customer-managed policy on re-provision.
+  Attaching a too-tight grant breaks every customer deploy — worse than the
+  status quo.
+- **Editing `insideout-deploy-boundary.json` is a live change** (it is
+  `file()`-read into the attached boundary policy). Keep it deny-only; any new
+  Deny must be provably outside real deploy usage (§4 option 3).

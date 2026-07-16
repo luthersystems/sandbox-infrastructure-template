@@ -39,12 +39,88 @@ resource "aws_iam_role" "admin" {
   name               = module.luthername_admin.name
   assume_role_policy = data.aws_iam_policy_document.admin_assume_policy.json
 
+  # #147 Phase 0 (design doc §8.1): deny-only permission boundary — a hard cap
+  # that removes only provably-out-of-scope surface (Organizations/Billing
+  # control plane, IAM users/login credentials, security-monitoring teardown).
+  # Strict superset of real deploy usage ⇒ effective permissions of a real
+  # deploy are unchanged. Rollback: remove this line and re-apply — it is
+  # independent of the policy swap below.
+  permissions_boundary = aws_iam_policy.insideout_deploy_boundary.arn
+
+  tags = module.luthername_admin.tags
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Least-privilege deploy role — Phase 0 (issue #147):
+# docs/design/least-privilege-deploy-role.md §8.1 — "swap the role first,
+# tighten later". PERMISSION-NEUTRAL by design:
+#
+#   * InsideOutWrite is a brand-new CUSTOMER-MANAGED policy whose Phase-0 body
+#     is admin-equivalent (Allow * on *) — the same effective surface as the
+#     AWS-managed AdministratorAccess it replaces. Real deploys behave exactly
+#     as today; only the attached policy OBJECT (the identity) changes.
+#   * The role name/ARN is unchanged, so every downstream consumer of
+#     `bootstrap_role` (auto-vars, cloud-provision assume_role, cached
+#     STS/Oracle paths) and the #2243 preflight — which simulates ACTIONS
+#     against the role ARN, never a policy name (design doc §6(a)/§6(c)) —
+#     keep working across the swap.
+#   * Rollback: point aws_iam_role_policy_attachment.admin back at
+#     arn:aws:iam::aws:policy/AdministratorAccess and re-apply.
+#
+# Phase 2 later narrows only the BODY of this policy (an in-place
+# CreatePolicyVersion — never a role/ARN change) to the generator-owned
+# allowlist kept as ./policies/insideout-write.json (surfaced, unattached, by
+# least_privilege_scaffold.tf). Do NOT attach that scoped body yet: enforcement
+# is gated on the §8.2 CloudTrail shadow phase and the §6(b) preflight
+# companion change (iam:CreatePolicyVersion / iam:TagPolicy).
+# ─────────────────────────────────────────────────────────────────────────────
+resource "aws_iam_policy" "insideout_write" {
+  name        = "${module.luthername_admin.name}-insideout-write"
+  description = "InsideOut deploy policy (#147 Phase 0: admin-equivalent body; Phase 2 narrows it to the generated allowlist — see policies/insideout-write.json)."
+
+  # The Phase-0 body is inline and admin-equivalent ON PURPOSE. The checked-in
+  # policies/insideout-write.json is the NARROWER generator-output placeholder
+  # for Phase 2 — inlining here (instead of file()-ing that JSON) keeps the
+  # scoped body un-attached until the shadow/audit phase validates it; wiring
+  # it early risks mid-apply 403s (the reliable#2243 failure class).
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AdminEquivalentPhase0"
+        Effect   = "Allow"
+        Action   = "*"
+        Resource = "*"
+      }
+    ]
+  })
+
+  # Tagged like every other resource this stage creates. Tagging a policy at
+  # create time requires iam:TagPolicy, which the §6(b) preflight companion
+  # change now covers: reliable#2259 (bootstrapAWSIAMActions, shipped in
+  # reliable v0.62.0) and template#158 (aws-preflight.sh REQUIRED_ACTIONS) both
+  # simulate it, so a credential that passes preflight can apply this change.
+  tags = module.luthername_admin.tags
+}
+
+# Deny-only boundary body (generator-output placeholder, see
+# policies/README.md). Deny-only ⇒ non-enforcing for real deploy usage; safe
+# to attach in Phase 0 per design doc §4 option 3 / §8.1.
+resource "aws_iam_policy" "insideout_deploy_boundary" {
+  name        = "${module.luthername_admin.name}-insideout-deploy-boundary"
+  description = "Deny-only permission boundary for the InsideOut deploy role (#147 Phase 0 defense-in-depth)."
+  policy      = file("${path.module}/policies/insideout-deploy-boundary.json")
+
+  # Tagged like insideout_write above — iam:TagPolicy is preflighted as of
+  # reliable#2259 / template#158.
   tags = module.luthername_admin.tags
 }
 
 resource "aws_iam_role_policy_attachment" "admin" {
-  role       = aws_iam_role.admin.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  role = aws_iam_role.admin.name
+  # #147 Phase 0: the customer-managed InsideOutWrite policy (admin-equivalent
+  # body, above) replaces arn:aws:iam::aws:policy/AdministratorAccess.
+  policy_arn = aws_iam_policy.insideout_write.arn
 }
 
 output "admin_role_name" {
