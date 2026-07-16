@@ -95,11 +95,12 @@ resource "aws_iam_policy" "insideout_write" {
     ]
   })
 
-  # Deliberately untagged: tagging a policy at create time additionally
-  # requires iam:TagPolicy, which is not yet in the bootstrap preflight lists
-  # (design doc §6(b) — that companion change gates Phase 2). Untagged,
-  # iam:CreatePolicy alone suffices, so a credential that passes today's
-  # preflight can apply this change.
+  # Tagged like every other resource this stage creates. Tagging a policy at
+  # create time requires iam:TagPolicy, which the §6(b) preflight companion
+  # change now covers: reliable#2259 (bootstrapAWSIAMActions, shipped in
+  # reliable v0.62.0) and template#158 (aws-preflight.sh REQUIRED_ACTIONS) both
+  # simulate it, so a credential that passes preflight can apply this change.
+  tags = module.luthername_admin.tags
 }
 
 # Deny-only boundary body (generator-output placeholder, see
@@ -110,7 +111,9 @@ resource "aws_iam_policy" "insideout_deploy_boundary" {
   description = "Deny-only permission boundary for the InsideOut deploy role (#147 Phase 0 defense-in-depth)."
   policy      = file("${path.module}/policies/insideout-deploy-boundary.json")
 
-  # Untagged for the same §6(b) preflight reason as insideout_write above.
+  # Tagged like insideout_write above — iam:TagPolicy is preflighted as of
+  # reliable#2259 / template#158.
+  tags = module.luthername_admin.tags
 }
 
 resource "aws_iam_role_policy_attachment" "admin" {
