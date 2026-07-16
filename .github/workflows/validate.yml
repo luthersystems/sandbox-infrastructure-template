@@ -144,4 +144,5 @@ jobs:
           bash tests/test-gcp-preflight.sh
           bash tests/test-aws-preflight.sh
           bash tests/test-destroy-preflight-skip.sh
+          bash tests/test-drift-refresh-preflight-skip.sh
           bash tests/test-preflight-binary-swap.sh
