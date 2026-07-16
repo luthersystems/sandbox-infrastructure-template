@@ -20,7 +20,7 @@ WORKDIR="$(mktemp -d /tmp/test-gcp-preflight-XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # Full required set — must stay in sync with REQUIRED_PERMISSIONS in the script.
-ALL_PERMS='["iam.serviceAccounts.create","iam.serviceAccounts.get","iam.serviceAccounts.getIamPolicy","iam.serviceAccounts.setIamPolicy","resourcemanager.projects.get","resourcemanager.projects.getIamPolicy","resourcemanager.projects.setIamPolicy","storage.buckets.create","storage.buckets.get","storage.buckets.update"]'
+ALL_PERMS='["iam.roles.create","iam.roles.update","iam.serviceAccounts.create","iam.serviceAccounts.get","iam.serviceAccounts.getIamPolicy","iam.serviceAccounts.setIamPolicy","resourcemanager.projects.get","resourcemanager.projects.getIamPolicy","resourcemanager.projects.setIamPolicy","storage.buckets.create","storage.buckets.get","storage.buckets.update"]'
 
 # run_preflight <expected_exit> <label> [extra env assignments...] -- writes the
 # combined output to $OUT and asserts the exit code.
@@ -50,7 +50,7 @@ echo ""
 echo "Test 2: missing the two #2243 create perms -> FAIL CLOSED (exit 1)"
 resp_partial="$WORKDIR/resp_partial.json"
 # Everything EXCEPT storage.buckets.create and iam.serviceAccounts.create.
-echo '{"permissions": ["iam.serviceAccounts.get","iam.serviceAccounts.getIamPolicy","iam.serviceAccounts.setIamPolicy","resourcemanager.projects.get","resourcemanager.projects.getIamPolicy","resourcemanager.projects.setIamPolicy","storage.buckets.get","storage.buckets.update"]}' > "$resp_partial"
+echo '{"permissions": ["iam.roles.create","iam.roles.update","iam.serviceAccounts.get","iam.serviceAccounts.getIamPolicy","iam.serviceAccounts.setIamPolicy","resourcemanager.projects.get","resourcemanager.projects.getIamPolicy","resourcemanager.projects.setIamPolicy","storage.buckets.get","storage.buckets.update"]}' > "$resp_partial"
 run_preflight 1 "missing create perms fails closed" \
   "GCP_PREFLIGHT_TEST_RESPONSE_FILE=$resp_partial" "GCP_PREFLIGHT_TEST_HTTP_CODE=200"
 if grep -q "storage.buckets.create" <<<"$OUT" && grep -q "iam.serviceAccounts.create" <<<"$OUT"; then
@@ -65,15 +65,15 @@ else
 fi
 
 echo ""
-echo "Test 3: empty granted list -> FAIL CLOSED, all 10 missing (exit 1)"
+echo "Test 3: empty granted list -> FAIL CLOSED, all 12 missing (exit 1)"
 resp_empty="$WORKDIR/resp_empty.json"
 echo '{"permissions": []}' > "$resp_empty"
 run_preflight 1 "zero perms fails closed" \
   "GCP_PREFLIGHT_TEST_RESPONSE_FILE=$resp_empty" "GCP_PREFLIGHT_TEST_HTTP_CODE=200"
-if [[ "$(grep -c '^\[gcp-preflight\]   - ' <<<"$OUT")" -eq 10 ]]; then
-  pass "lists all 10 missing permissions"
+if [[ "$(grep -c '^\[gcp-preflight\]   - ' <<<"$OUT")" -eq 12 ]]; then
+  pass "lists all 12 missing permissions"
 else
-  fail "expected 10 missing permission lines, got $(grep -c '^\[gcp-preflight\]   - ' <<<"$OUT")"
+  fail "expected 12 missing permission lines, got $(grep -c '^\[gcp-preflight\]   - ' <<<"$OUT")"
 fi
 
 echo ""
@@ -125,12 +125,12 @@ echo "Test 9: required list in script matches the golden set (drift guard)"
 # drifted from the mirrored reliable bootstrapGCPIAMPermissions() set. Extract
 # only whole-line array entries (indented token on its own line) so comment
 # fragments like "storage.buckets.{create,get,update}" cannot pollute the set.
-script_perms="$(grep -E '^[[:space:]]+(iam\.serviceAccounts|resourcemanager\.projects|storage\.buckets)\.[a-zA-Z]+$' "$PREFLIGHT" \
+script_perms="$(grep -E '^[[:space:]]+(iam\.roles|iam\.serviceAccounts|resourcemanager\.projects|storage\.buckets)\.[a-zA-Z]+$' "$PREFLIGHT" \
   | sed 's/^[[:space:]]*//' \
   | sort -u)"
 golden_perms="$(jq -r '.[]' <<<"$ALL_PERMS" | sort -u)"
 if [[ "$script_perms" == "$golden_perms" ]]; then
-  pass "REQUIRED_PERMISSIONS matches the 10-permission golden set"
+  pass "REQUIRED_PERMISSIONS matches the 12-permission golden set"
 else
   fail "REQUIRED_PERMISSIONS drifted from golden set"
   echo "--- script ---"; echo "$script_perms"
