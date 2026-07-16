@@ -10,9 +10,67 @@ locals {
 # AWS Bootstrap
 # ============================================================================
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Least-privilege deploy role — Phase 0 (issue #147), durable-role half:
+# docs/design/least-privilege-deploy-role.md §8.1 — "swap the role first,
+# tighten later". Mirrors tf/account-setup/main.tf (the bootstrap_role half,
+# merged in #157) for the durable `<short_project_id>-luther-terraform` role
+# provisioned by tf-modules//aws-platform-ui-bootstrap (inputs added in
+# tf-modules#71, released v55.23.0). PERMISSION-NEUTRAL by design:
+#
+#   * deploy_policy_json below is the same brand-new CUSTOMER-MANAGED
+#     InsideOutWrite body as account-setup's — Phase-0 content is
+#     admin-equivalent (Allow * on *), the same effective surface as the
+#     AWS-managed AdministratorAccess it replaces inside the module. Real
+#     deploys behave exactly as today; only the attached policy OBJECT (the
+#     identity) changes.
+#   * The role name/ARN is unchanged (the module keeps the attachment's
+#     resource address too — tf-modules#71 deliberately did not count-gate
+#     it), so every downstream consumer of `terraform_role` (the vm/k8s/
+#     custom-stack backend role_arn, cached STS/Oracle paths) and the #2243
+#     preflight — which simulates ACTIONS against the role ARN, never a
+#     policy name (design doc §6(a)/§6(c)) — keep working across the swap.
+#   * Rollback: set deploy_policy_json / permissions_boundary_arn back to ""
+#     (module defaults) and re-apply — the module re-attaches
+#     arn:aws:iam::aws:policy/AdministratorAccess and drops the boundary.
+#
+# Phase 2 later narrows only the BODY of the module-created policy (an
+# in-place CreatePolicyVersion — never a role/ARN change) to the
+# generator-owned allowlist kept as
+# tf/account-setup/policies/insideout-write.json. Do NOT wire that scoped
+# body yet: enforcement is gated on the §8.2 CloudTrail shadow phase and the
+# §6(b) preflight companion change (iam:CreatePolicyVersion / iam:TagPolicy).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Deny-only boundary body — read cross-stage from account-setup, whose
+# policies/insideout-deploy-boundary.json is the single source of truth for
+# BOTH deploy roles (it is generator-output; see
+# tf/account-setup/policies/README.md). The cross-stage file() is safe here:
+# the template repo is always one tree at plan time (CI checks out the whole
+# repo; at deploy time mars mounts the git root, and this stage already
+# writes cross-stage via local_file to ../vm-provision et al.). Deny-only ⇒
+# non-enforcing for real deploy usage; safe to attach in Phase 0 per design
+# doc §4 option 3 / §8.1.
+resource "aws_iam_policy" "insideout_deploy_boundary" {
+  name        = "${local.admin_role_name}-insideout-deploy-boundary"
+  description = "Deny-only permission boundary for the durable InsideOut terraform role (#147 Phase 0 defense-in-depth)."
+  policy      = file("${path.module}/../account-setup/policies/insideout-deploy-boundary.json")
+
+  # Tagged like the inspector role this stage creates. Tagging a policy at
+  # create time requires iam:TagPolicy, which the §6(b) preflight companion
+  # change covers: reliable#2259 (bootstrapAWSIAMActions, shipped in reliable
+  # v0.62.0) and template#158 (aws-preflight.sh REQUIRED_ACTIONS) both
+  # simulate it, so a credential that passes preflight can apply this change.
+  tags = {
+    Project   = var.project_id
+    ManagedBy = "terraform"
+    Purpose   = "insideout-deploy-boundary"
+  }
+}
+
 module "bootstrap" {
   count  = 1
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=v55.15.2"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=v55.23.0"
 
   admin_role_name     = local.admin_role_name
   create_dns          = var.create_dns
@@ -23,6 +81,36 @@ module "bootstrap" {
   create_state_bucket = true
   admin_principals    = [var.terraform_sa_role]
   kms_alias_suffix    = format("%s-tfstate", var.short_project_id)
+
+  # #147 Phase 0: the customer-managed InsideOutWrite policy (admin-equivalent
+  # body, header comment above) replaces the module's AdministratorAccess
+  # attachment on the durable terraform role.
+  #
+  # The Phase-0 body is inline and admin-equivalent ON PURPOSE. The checked-in
+  # tf/account-setup/policies/insideout-write.json is the NARROWER
+  # generator-output placeholder for Phase 2 — inlining here (instead of
+  # file()-ing that JSON) keeps the scoped body un-attached until the
+  # shadow/audit phase validates it; wiring it early risks mid-apply 403s
+  # (the reliable#2243 failure class).
+  deploy_policy_json = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AdminEquivalentPhase0"
+        Effect   = "Allow"
+        Action   = "*"
+        Resource = "*"
+      }
+    ]
+  })
+
+  # #147 Phase 0 (design doc §8.1): deny-only permission boundary — a hard cap
+  # that removes only provably-out-of-scope surface (Organizations/Billing
+  # control plane, IAM users/login credentials, security-monitoring teardown).
+  # Strict superset of real deploy usage ⇒ effective permissions of a real
+  # deploy are unchanged. Rollback: set back to "" and re-apply — independent
+  # of the policy swap above.
+  permissions_boundary_arn = aws_iam_policy.insideout_deploy_boundary.arn
 
   providers = {
     aws    = aws
