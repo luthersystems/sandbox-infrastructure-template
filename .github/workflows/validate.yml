@@ -135,6 +135,9 @@ jobs:
       - name: Run tests
         run: |
           bash tests/test-prepare-custom-stack.sh
+          bash tests/test-infra-push.sh
+          bash tests/test-apply-scripts.sh
+          bash tests/test-drift-check.sh
           bash tests/test-tf-destroy-init.sh
           bash tests/test-mars-entrypoint-compat.sh
           bash tests/test-reverse-import-wrapper.sh
