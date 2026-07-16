@@ -1,40 +1,32 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Least-privilege deploy role — SCAFFOLD ONLY (issue #147). NOT ENFORCED.
+# Least-privilege deploy role — Phase-2 TARGET scaffold (issue #147).
 #
-# This file does NOT change how the deploy role is authorized. The live
-# attachment `aws_iam_role_policy_attachment.admin` in main.tf still attaches
-# arn:aws:iam::aws:policy/AdministratorAccess. Here we only surface the derived
-# least-privilege policy artifacts as (unused) Terraform outputs so they are
-# version-controlled, diffable, and Terraform-consumable — ready to wire once
-# the staged rollout + broad apply-test plan in
-# docs/design/least-privilege-deploy-role.md is executed.
+# Phase 0 (docs/design/least-privilege-deploy-role.md §8.1) is LIVE in main.tf:
+# the deploy role now attaches the customer-managed, admin-equivalent
+# InsideOutWrite policy (aws_iam_policy.insideout_write) in place of the
+# AWS-managed AdministratorAccess, capped by the deny-only permission boundary
+# (aws_iam_policy.insideout_deploy_boundary, whose body — the former second
+# scaffold output — is consumed live from
+# ./policies/insideout-deploy-boundary.json and is therefore no longer
+# surfaced here).
 #
-# Deliberately inert:
-#   * no aws_iam_policy / aws_iam_role_policy_attachment / permissions_boundary
-#   * only `file()` reads + `output` blocks — creates NO AWS resource
+# This file now carries only the piece that is still NOT enforced: the SCOPED
+# Phase-2 policy body ./policies/insideout-write.json — the generator-output
+# placeholder that InsideOutWrite's admin-equivalent body will be narrowed to
+# (an in-place policy-version update; never a role/ARN change) once the §8.2
+# CloudTrail shadow phase and the §6(b) preflight companion change
+# (iam:CreatePolicyVersion / iam:TagPolicy) have landed. It stays surfaced as
+# an unused output so it remains version-controlled, diffable, and
+# Terraform-consumable.
 #
-# The JSON bodies under ./policies/ are GENERATOR-OUTPUT PLACEHOLDERS. The real
-# InsideOutWrite policy is emitted from composer metadata
+# The JSON body is a GENERATOR-OUTPUT PLACEHOLDER: the real artifact is emitted
+# from composer metadata
 # (insideout-terraform-presets/pkg/composer/iam_actions.go — see the drafted
-# presets generator ticket) so it stays in lockstep with the set of supported
-# components. Do not hand-maintain them long-term, and do not attach either body
-# without the migration (§6) + test plan (§8) in the design doc.
+# presets generator ticket in the design doc §11). Do not hand-maintain it
+# long-term, and do not attach it without executing §8 + §10 of the design doc.
 # ─────────────────────────────────────────────────────────────────────────────
 
-locals {
-  # Derived least-privilege deploy policy (service allowlist + bounded IAM).
-  insideout_write_policy_json = file("${path.module}/policies/insideout-write.json")
-
-  # Defense-in-depth permission boundary (deny-only cap; strict superset of use).
-  insideout_deploy_boundary_json = file("${path.module}/policies/insideout-deploy-boundary.json")
-}
-
 output "insideout_write_policy_scaffold" {
-  description = "SCAFFOLD (#147, NOT attached): derived least-privilege InsideOutWrite deploy policy body. See docs/design/least-privilege-deploy-role.md."
-  value       = local.insideout_write_policy_json
-}
-
-output "insideout_deploy_boundary_scaffold" {
-  description = "SCAFFOLD (#147, NOT attached): defense-in-depth deploy permission-boundary body (deny-only). See docs/design/least-privilege-deploy-role.md."
-  value       = local.insideout_deploy_boundary_json
+  description = "SCAFFOLD (#147, Phase-2 target — NOT attached): scoped least-privilege InsideOutWrite deploy policy body. The LIVE Phase-0 body on the role is admin-equivalent; see main.tf and docs/design/least-privilege-deploy-role.md §8."
+  value       = file("${path.module}/policies/insideout-write.json")
 }
