@@ -140,6 +140,7 @@ jobs:
           bash tests/test-reverse-import-wrapper.sh
           bash tests/test-external-id.sh
           bash tests/test-state-backend-output-parity.sh
+          bash tests/test-state-region.sh
           bash tests/test-plan-all.sh
           bash tests/test-gcp-preflight.sh
           bash tests/test-aws-preflight.sh
