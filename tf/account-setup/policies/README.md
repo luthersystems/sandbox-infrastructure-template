@@ -31,7 +31,9 @@ Full rationale, options analysis, migration/rollout, blast radius, and test plan
   `Describe/Get/List/Modify/Delete/Tag` lifecycle — hence `<service>:*` — plus
   transitive services (`autoscaling`, `ecr`, `sns`, `events`, `tag`, …) that
   never appear in the create-only seed. That delta is confirmed empirically in
-  the **shadow / CloudTrail phase** before enforcement (design doc §6.2).
+  the **shadow / CloudTrail phase** before enforcement (design doc §8.2).
 - **Attaching either body requires the staged rollout + broad apply testing** in
-  the design doc (§6 migration, §8 test plan). Attaching a too-tight grant breaks
-  every customer deploy — worse than the status quo.
+  the design doc (§8 migration, §10 test plan) — plus the §6(b) preflight
+  companion change (`iam:CreatePolicyVersion` / `iam:TagPolicy`) so the bootstrap
+  credential can create *and update* this customer-managed policy. Attaching a
+  too-tight grant breaks every customer deploy — worse than the status quo.
