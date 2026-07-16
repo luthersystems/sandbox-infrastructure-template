@@ -120,13 +120,25 @@ ensure_infra_remote() {
     else
       git remote add infra "$url"
     fi
-    echo "🔧 infra remote configured → $url"
+    echo "🔧 [git-infra] infra remote configured → $url"
+  else
+    # LOUD, greppable signal for hypothesis (1) in
+    # sandbox-infrastructure-template#143: cloud-provision writes
+    # tf/auto-vars/git_repo.auto.tfvars.json with repo_clone_ssh_url, but if
+    # that auto-var did not reach this working tree the infra remote is never
+    # wired and the per-project -infra repo stays empty. Non-fatal: may be
+    # benign on early stages (before cloud-provision) but is a real problem on
+    # custom-stack-provision.
+    echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty in ${AUTO_VARS_DIR} — 'infra' remote NOT configured; the per-project -infra repo will NOT be populated. [sandbox-infrastructure-template#143]" >&2
   fi
 }
 
 configure_git() {
   if ! has_git_repo; then
-    echo "⚠️  configure_git: no .git at $MARS_PROJECT_ROOT"
+    # LOUD, greppable signal for hypothesis (2) in #143: no .git at the project
+    # root means prepare-custom-stack's ensure_git_from_infra never ran (or its
+    # clone failed), so nothing can be committed or pushed to the -infra repo.
+    echo "⚠️  [git-infra] WARNING: configure_git: no .git at ${MARS_PROJECT_ROOT} — commit/push to the -infra repo will be SKIPPED. [sandbox-infrastructure-template#143]" >&2
     return 1
   fi
   pushd "$MARS_PROJECT_ROOT" >/dev/null
@@ -185,13 +197,67 @@ gitMergeOriginMain() {
 
 gitPushInfra() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
-  if git remote get-url infra >/dev/null 2>&1; then
-    echo "🚀 Pushing to infra…"
-    git push infra HEAD
-  else
-    echo "Skipping gitPushInfra: no infra remote configured"
+
+  if ! git remote get-url infra >/dev/null 2>&1; then
+    # Previously this returned 0 silently ("Skipping gitPushInfra: no infra
+    # remote configured"), which is exactly how #143 went unnoticed: a
+    # successful apply left the -infra repo empty and reported SUCCESS. Warn
+    # LOUDLY (greppable) instead. Still non-fatal — a push problem must never
+    # turn an already-successful deploy into a failure.
+    echo "⚠️  [git-infra] WARNING: no 'infra' remote configured — NOT pushing; the per-project -infra repo will stay EMPTY. [sandbox-infrastructure-template#143]" >&2
+    popd >/dev/null
+    return 0
   fi
+
+  # A freshly-cloned empty infra repo has no HEAD until gitCommit runs. If there
+  # is still nothing to push, say so loudly rather than pushing nothing.
+  if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "⚠️  [git-infra] WARNING: no HEAD/commit to push (nothing was committed) — the per-project -infra repo will stay EMPTY. [sandbox-infrastructure-template#143]" >&2
+    popd >/dev/null
+    return 0
+  fi
+
+  echo "🚀 [git-infra] Pushing HEAD to infra remote…"
+  if git push infra HEAD; then
+    echo "✅ [git-infra] Pushed to infra remote — per-project -infra repo populated."
+  else
+    echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the deploy key / remote URL. [sandbox-infrastructure-template#143]" >&2
+  fi
+
   popd >/dev/null
+}
+
+# persistInfraRepo commits the applied working tree and pushes it to the
+# per-project -infra GitHub repo. It is the durable-persistence entry point for
+# the apply code paths that ACTUALLY run in production — apply-with-outputs.sh
+# (--check-drift) and apply-plan.sh — which, unlike apply.sh, never otherwise
+# reach gitPushInfra. That gap is the root cause of #143: ui-core always sets
+# checkDrift=true on custom-stack applies, so the git merge/commit/push in
+# apply.sh was dead code and 89/89 -infra repos were left empty.
+#
+# Contract: NON-FATAL and LOUD. A deploy that already applied must never be
+# turned into a failure by a git/push problem, and every skip/failure is logged
+# with a greppable "[git-infra] WARNING:" prefix so a silent no-op can never
+# regress unnoticed again. Always returns 0.
+persistInfraRepo() {
+  echo "📦 [git-infra] Persisting applied stack to the per-project -infra repo…"
+
+  # Up-front LOUD signals for the two silent-failure hypotheses in #143. These
+  # are pure diagnostics; the helper calls below also degrade gracefully.
+  if ! has_git_repo; then
+    echo "⚠️  [git-infra] WARNING: no .git at ${MARS_PROJECT_ROOT} at persist time — prepare-custom-stack's ensure_git_from_infra should have cloned the -infra repo. Stack will NOT be pushed. [sandbox-infrastructure-template#143]" >&2
+  fi
+  if [ -z "$(getTfVar repo_clone_ssh_url)" ]; then
+    echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty at persist time — cloud-provision's git_repo.auto.tfvars.json did not reach the apply working tree. [sandbox-infrastructure-template#143]" >&2
+  fi
+
+  # gitMergeInfraMain returns non-zero on a merge conflict; guard it so
+  # persistInfraRepo (called under `set -e`) never aborts the caller.
+  gitMergeInfraMain || echo "⚠️  [git-infra] WARNING: gitMergeInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
+  gitCommit "auto-commit: deployed infrastructure [ci skip]"
+  gitPushInfra
+
+  return 0
 }
 
 gitMergeInfraMain() {

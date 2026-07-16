@@ -85,6 +85,21 @@ if [[ "$check_drift" == "true" ]]; then
 
   terraform apply -input=false apply.tfplan
   captureOutputs
+
+  # Persist the applied stack to the per-project -infra repo (#143).
+  #
+  # This drift-check branch — NOT apply.sh — is what ui-core actually runs for a
+  # custom-stack apply (it always sets checkDrift=true), so without this call
+  # gitPushInfra is never reached and the -infra repo stays empty despite a
+  # SUCCESS. Scope to custom-stack-provision: that stage carries the full
+  # generated stack and has the infra .git + remote wired by
+  # prepare-custom-stack; earlier stages have no .git yet and would only emit
+  # spurious warnings. Non-fatal by contract — a push problem must not fail an
+  # already-applied deploy.
+  if [[ "$lifecycle" == "custom-stack-provision" ]]; then
+    persistInfraRepo || \
+      echo "⚠️  [git-infra] WARNING: persistInfraRepo returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
+  fi
 else
   # Simple mode: delegate to apply.sh (includes git merge/commit/push)
   bash "$SCRIPT_DIR/apply.sh" "$lifecycle"
