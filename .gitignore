@@ -4,9 +4,32 @@ secrets/
 tf/auto-vars/skip_remote_state.auto.tfvars.json
 .claude/scheduled_tasks.lock
 
-# Generated at deploy time by _selectCloudFiles() from .tf.tmpl templates
-tf/*/providers-*.tf
+# Deploy-time-generated provider + resource files, materialized by
+# _selectCloudFiles() (shell_utils.sh) copying each
+# tf/**/{providers-<cloud>,<cloud>-resources}.tf.tmpl onto its .tmpl-less
+# basename. They are regenerated on every deploy and must never ride the
+# persistInfraRepo() `git add -A` snapshot push to the per-project -infra repo.
+#
+# NARROWED from the historic over-broad `tf/*/providers-*.tf` glob — a
+# snapshot-fidelity gap caught by the bridge team's e2e. That glob ALSO matched
+# the composer-archive-owned providers-imported.tf / providers-aliases.tf
+# (insideout-terraform-presets #677), which the InsideOut composer emits into
+# the custom-stack archive and rsyncs into tf/custom-stack-provision/. Those are
+# real stack files that MUST survive into the reviewable -infra snapshot, but
+# the glob silently excluded them from the `git add -A` push. Deploys were
+# unaffected (they read the rsync'd worktree on disk, not git) — this was
+# snapshot fidelity only. Exclude ONLY the exact generated basenames:
+tf/*/providers-aws.tf
+tf/*/providers-gcp.tf
+# <cloud>-resources.tf (aws-resources.tf / gcp-resources.tf) are also produced
+# by _selectCloudFiles(); the composer emits NO *-resources.tf, so this stays as
+# the correct generated-only glob.
 tf/*/*-resources.tf
+# Belt-and-suspenders: re-include the composer-archive-owned provider siblings
+# so they are always committed, even if the generated-file glob above is ever
+# widened back to `tf/*/providers-*.tf`. Keep these negations. #677
+!tf/*/providers-imported.tf
+!tf/*/providers-aliases.tf
 
 # Terraform's tooling cache. Regenerable on next `terraform init` from
 # mars's filesystem_mirror. Without this rule the ~750 MiB AWS provider
