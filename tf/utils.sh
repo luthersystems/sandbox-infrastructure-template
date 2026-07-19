@@ -34,6 +34,39 @@ tfSetup() {
   if [ -d "auto-vars" ]; then
     cp -rf auto-vars/* "${workspace}/" 2>/dev/null || true
   fi
+
+  # #160 Phase 1: stage the customer cloud credentials from the gitignored
+  # secrets/ dir into the stage working dir as a single auto-loaded tfvars file
+  # (zz-secret.auto.tfvars.json — the zz- prefix sorts it last so it overrides).
+  # Because secrets/ (and tf/*/zz-secret.auto.tfvars.json) are gitignored, this
+  # keeps credentials OFF the persistInfraRepo `git add -A` push — unlike
+  # common.auto.tfvars.json under tf/auto-vars/. tfSetup's CWD is tf/ (not the
+  # project root), so use the absolute $MARS_PROJECT_ROOT path. Multiple
+  # *.auto.tfvars.json cannot be concatenated (invalid JSON), so copy only the
+  # canonical cloud-credentials.auto.tfvars.json and warn on any other match.
+  # Guarded on MARS_PROJECT_ROOT being set (the real apply paths always export
+  # it before sourcing utils.sh; some narrow unit tests source utils.sh without
+  # it, and the original relative-only tfSetup never referenced it — so under
+  # `set -u` the unset case must stay a no-op). No-op when secrets/ is absent or
+  # has no tfvars (today's state): nullglob makes the loop body simply not run.
+  if [ -n "${MARS_PROJECT_ROOT:-}" ] && [ -d "${MARS_PROJECT_ROOT}/secrets" ]; then
+    local secrets_dir="${MARS_PROJECT_ROOT}/secrets"
+    local canonical="${secrets_dir}/cloud-credentials.auto.tfvars.json"
+    local sf staged=0
+    shopt -s nullglob
+    for sf in "${secrets_dir}"/*.auto.tfvars.json; do
+      if [ "$sf" = "$canonical" ]; then
+        cp -f "$sf" "${workspace}/zz-secret.auto.tfvars.json"
+        staged=1
+      else
+        echo "⚠️  [secrets] WARNING: ignoring non-canonical secrets tfvars '$sf' — only cloud-credentials.auto.tfvars.json is staged (concatenating multiple JSON tfvars is invalid). [sandbox-infrastructure-template#160]" >&2
+      fi
+    done
+    shopt -u nullglob
+    if [ "$staged" = 1 ]; then
+      echo "🔐 [secrets] staged secrets/cloud-credentials.auto.tfvars.json → ${workspace}/zz-secret.auto.tfvars.json [sandbox-infrastructure-template#160]"
+    fi
+  fi
 }
 
 tfSetup
