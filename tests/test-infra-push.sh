@@ -102,11 +102,17 @@ make_project() {
 environment: test
 EOF
   echo '{"cloud_provider": "aws"}' > "$proj/tf/auto-vars/common.auto.tfvars.json"
+  # Decoy deploy-time output artifact — must never ride the -infra push (#160).
+  echo '{"dummy": true}' > "$proj/outputs/dummy.json"
   cp "$REPO_ROOT/shell_utils.sh" "$proj/shell_utils.sh"
   cp "$REPO_ROOT/tf/utils.sh" "$proj/tf/utils.sh"
   cp "$REPO_ROOT/tf/drift-check.sh" "$proj/tf/drift-check.sh"
   cp "$REPO_ROOT/tf/apply-with-outputs.sh" "$proj/tf/apply-with-outputs.sh"
   cp "$REPO_ROOT/tf/apply-plan.sh" "$proj/tf/apply-plan.sh"
+  # Copy the repo's REAL .gitignore into the fixture so `git add -A` in
+  # persistInfraRepo honors the #160 denylist — this is what makes the Case G
+  # canary below actually exercise the exclusions rather than pass vacuously.
+  cp "$REPO_ROOT/.gitignore" "$proj/.gitignore"
   # Mock apply.sh (only reached by simple mode, which these tests don't use).
   printf '#!/usr/bin/env bash\necho "apply.sh $*" >> "%s"\n' "$CMD_LOG" > "$proj/tf/apply.sh"
   chmod +x "$proj/tf/apply.sh"
@@ -339,6 +345,90 @@ if [[ "$first_count" -ge 1 && "$second_count" -gt "$first_count" ]]; then
   pass "F: re-deploy added a new commit to the -infra repo ($first_count → $second_count)"
 else
   fail "F: re-deploy did not advance the -infra repo ($first_count → $second_count)"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case G: #160 canary — sensitive artifacts never reach the -infra repo ==="
+# =============================================================================
+# make_project copies the repo's real .gitignore into the fixture and drops
+# decoys (tf/auto-vars/common.auto.tfvars.json + outputs/dummy.json). Here we
+# additionally drop secrets/ credential files, a saved plan, a backend json, and
+# a per-stage tfvars copy, then run a real custom-stack apply and assert the
+# pushed tree carries NONE of them — the #143 push path must not leak the #160
+# artifacts. tfSetup also stages secrets/cloud-credentials.auto.tfvars.json into
+# tf/custom-stack-provision/zz-secret.auto.tfvars.json, so the *.auto.tfvars.json
+# assertion also covers the Phase-1 staged credential copy.
+PROJ="$(make_project projG)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"   # writes a decoy tf/auto-vars/common.auto.tfvars.json
+init_project_git "$PROJ"
+
+# Decoy sensitive artifacts that MUST NOT be pushed to the -infra repo (#160):
+mkdir -p "$PROJ/secrets"
+echo '{"bootstrap_role":"arn:aws:iam::1:role/x","aws_external_id":"topsecret"}' \
+  > "$PROJ/secrets/cloud-credentials.auto.tfvars.json"
+echo 'deploy-key-material' > "$PROJ/secrets/infra_deploy_key.pem"
+mkdir -p "$PROJ/tf/custom-stack-provision"
+echo '{"cloud_provider":"aws"}' > "$PROJ/tf/custom-stack-provision/common.auto.tfvars.json"
+echo 'plan-bytes'              > "$PROJ/tf/custom-stack-provision/apply.tfplan"
+echo '{}'                      > "$PROJ/tf/custom-stack-provision/backend.tf.json"
+
+set +e
+outG="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcG=$?
+set -e
+
+[[ "$rcG" -eq 0 ]] && pass "G: apply exits 0" || fail "G: expected exit 0, got $rcG. Output: $outG"
+
+# The push must have happened, else the tree-content assertions are vacuous.
+if [[ "$(bare_commit_count "$BARE")" -ge 1 ]]; then
+  pass "G: a ref landed on the -infra repo"
+else
+  fail "G: nothing pushed — canary would be vacuous. Output: $outG"
+fi
+
+# Enumerate the pushed tree once.
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+
+# Sanity: a known-good, non-secret file IS present — proves the denylist did not
+# nuke the whole tree (i.e. the canary can actually observe a leak).
+if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
+  pass "G: known-good file (shell_utils.sh) is present in the pushed tree"
+else
+  fail "G: expected shell_utils.sh in the pushed tree. Tree: $pushed_tree"
+fi
+
+# The #160 canary assertions:
+if echo "$pushed_tree" | grep -q '\.auto\.tfvars\.json$'; then
+  fail "G: a *.auto.tfvars.json rode the -infra push (#160 leak). Tree: $pushed_tree"
+else
+  pass "G: NO *.auto.tfvars.json in the pushed tree"
+fi
+
+if echo "$pushed_tree" | grep -q '^outputs/'; then
+  fail "G: outputs/ rode the -infra push (#160 leak). Tree: $pushed_tree"
+else
+  pass "G: NO outputs/ directory in the pushed tree"
+fi
+
+if echo "$pushed_tree" | grep -q '^secrets/'; then
+  fail "G: secrets/ rode the -infra push (#160 leak). Tree: $pushed_tree"
+else
+  pass "G: NO secrets/ directory in the pushed tree"
+fi
+
+# Bonus coverage for the rest of the #160 denylist exercised by the decoys above.
+if echo "$pushed_tree" | grep -q '\.tfplan$'; then
+  fail "G: a *.tfplan rode the -infra push (#160 leak). Tree: $pushed_tree"
+else
+  pass "G: NO *.tfplan in the pushed tree"
+fi
+
+if echo "$pushed_tree" | grep -q 'backend\.tf\.json$'; then
+  fail "G: backend.tf.json rode the -infra push (#160 leak). Tree: $pushed_tree"
+else
+  pass "G: NO backend.tf.json in the pushed tree"
 fi
 
 # --- Summary -----------------------------------------------------------------

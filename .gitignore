@@ -17,3 +17,56 @@ tf/*/*-resources.tf
 # strips the worktree before targz) and ui-core#382 (the .git history
 # bloat follow-up).
 .terraform/
+
+# ===========================================================================
+# sandbox-infrastructure-template#160 — keep deploy-time tfvars, cloud
+# credentials, and terraform outputs OUT of the per-project -infra repo.
+#
+# persistInfraRepo() (shell_utils.sh) runs `git add -A` against the -infra
+# clone after every custom-stack apply; `git add -A` honors .gitignore, so
+# anything matched here is never committed/pushed to the customer's -infra
+# GitHub repo. Every pipeline read of these files is on-disk (getTfVar /
+# terraform auto-load), so excluding them from git is zero-deployment-risk.
+# ===========================================================================
+
+# tf/auto-vars/ holds the deploy-time common.auto.tfvars.json (cloud
+# credentials + base64 archive blob), the repo_clone_ssh_url, skip_remote_state,
+# etc. — all written at apply time and all sensitive. Ignore the directory's
+# contents. Use `tf/auto-vars/*` (not `tf/auto-vars/`) so the repo's own
+# tracked, NON-secret scaffolding under vars/ can be re-included below — this is
+# git-idiomatic, not a weakening of the pattern (`*` covers the same direct
+# children). #160
+tf/auto-vars/*
+# Negation carve-out for the paths `git ls-files` shows tracked before #160:
+#   tf/auto-vars/vars/common/config.tfvars   (comment-only tfvars scaffold)
+#   tf/auto-vars/vars/default/README         (docs)
+# They are static, non-secret, and NOT written at deploy time (no script or CI
+# injects them), so keep them tracked rather than weakening the pattern. #160
+# NOTE: tf/auto-vars/common.auto.tfvars.json is deliberately NOT carved out —
+# it is the exact credentials/archive blob #160 exists to exclude, so
+# re-including it would reintroduce the leak. It stays tracked in THIS repo as a
+# harmless `{}` seed (gitignore never untracks) but is excluded from the -infra
+# push.
+!tf/auto-vars/vars/
+!tf/auto-vars/vars/**
+
+# Any *.auto.tfvars.json anywhere: the tf/auto-vars/ credential blob AND the
+# per-stage copies tfSetup drops into tf/<stage>/ (`cp -rf auto-vars/*`), plus
+# the Phase-1 secrets copy. Placed AFTER the vars/ carve-out so a stray
+# *.auto.tfvars.json under vars/ is still excluded. #160
+*.auto.tfvars.json
+
+# Terraform JSON backend config generated at deploy time. #160
+backend.tf.json
+
+# Saved terraform plan files (e.g. apply.tfplan, refresh.tfplan, <id>.tfplan). #160
+*.tfplan
+
+# outputs/ holds terraform outputs + drift.json + tfplan*.json written at apply
+# time (apply-with-outputs.sh / apply-plan.sh / drift-refresh.sh). #160
+outputs/
+
+# Phase-1 per-stage decrypted secrets copy tfSetup stages from
+# secrets/cloud-credentials.auto.tfvars.json. Belt-and-suspenders (already
+# matched by *.auto.tfvars.json above). #160
+tf/*/zz-secret.auto.tfvars.json

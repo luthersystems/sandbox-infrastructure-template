@@ -48,7 +48,9 @@ mustGetAnsibleField() {
 AUTO_VARS_DIR="${MARS_PROJECT_ROOT}/tf/auto-vars"
 
 # getTfVar VAR_NAME
-#   Print the value of VAR_NAME from any JSON file in auto-vars/ or empty string if not found
+#   Print the value of VAR_NAME from any JSON file in auto-vars/ (or, as a
+#   fallback, the gitignored secrets/*.auto.tfvars.json credential drop) or
+#   empty string if not found.
 getTfVar() {
   local key="$1"
 
@@ -58,9 +60,20 @@ getTfVar() {
     exit 1
   fi
 
-  # jq filter to get the variable from any JSON file in the directory, first match wins
+  # jq filter to get the variable from any JSON file, first match wins.
+  #
+  # Scan order matters (#160): tf/auto-vars/*.json FIRST, so behavior is
+  # unchanged while ui-core still writes credentials into
+  # tf/auto-vars/common.auto.tfvars.json; THEN fall back to the gitignored
+  # secrets/*.auto.tfvars.json credential drop. secrets/ is excluded from the
+  # persistInfraRepo `git add -A` push, so credentials placed there never leak
+  # into the per-project -infra repo (unlike common.auto.tfvars.json). Absent or
+  # empty secrets/ is a silent no-op: the `[[ -e ]]` guard (existing style, no
+  # nullglob) skips the unexpanded glob, so nothing errors under callers' `set
+  # -euo pipefail` when secrets/ has no *.auto.tfvars.json (today's state).
   local result=""
-  for file in "$AUTO_VARS_DIR"/*.json; do
+  local file val
+  for file in "$AUTO_VARS_DIR"/*.json "$MARS_PROJECT_ROOT"/secrets/*.auto.tfvars.json; do
     # skip if no matching files
     [[ -e "$file" ]] || continue
 
