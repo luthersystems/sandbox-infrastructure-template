@@ -33,9 +33,12 @@ provider "aws" {
 
   # Customer access keys, when the customer connected with keys instead of a
   # role. setupCloudEnv refuses a cloud-provision run that has neither, so
-  # this provider never falls back to the runner's IRSA identity.
-  access_key = var.cloud_provider == "aws" && var.aws_access_key_id != "" ? var.aws_access_key_id : null
-  secret_key = var.cloud_provider == "aws" && var.aws_access_key_id != "" ? var.aws_secret_access_key : null
+  # this provider never falls back to the runner's IRSA identity. A role wins:
+  # ui-core never deletes stored keys, so a project that later gains a
+  # bootstrap_role still carries them, and the role trusts the runner, not
+  # the customer's keys.
+  access_key = local.use_access_keys ? var.aws_access_key_id : null
+  secret_key = local.use_access_keys ? var.aws_secret_access_key : null
 
   assume_role {
     role_arn    = var.cloud_provider == "aws" ? var.bootstrap_role : null
@@ -46,4 +49,8 @@ provider "aws" {
 provider "aws" {
   alias  = "platform-account"
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
+}
+
+locals {
+  use_access_keys = var.cloud_provider == "aws" && var.bootstrap_role == "" && var.aws_access_key_id != ""
 }

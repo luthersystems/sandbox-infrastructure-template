@@ -99,6 +99,7 @@ for v in aws_access_key_id aws_secret_access_key; do
 done
 if grep -q "access_key *= .*var.aws_access_key_id" "$PROV"; then pass "provider sets access_key"; else fail "provider missing access_key"; fi
 if grep -q "secret_key *= .*var.aws_secret_access_key" "$PROV"; then pass "provider sets secret_key"; else fail "provider missing secret_key"; fi
+if grep -q 'use_access_keys *= .*var.bootstrap_role == ""' "$PROV"; then pass "keys only used without a bootstrap_role"; else fail "keys not gated on an empty bootstrap_role"; fi
 
 echo ""
 echo "================================"
