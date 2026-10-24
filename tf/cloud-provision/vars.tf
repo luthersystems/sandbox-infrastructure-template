@@ -100,6 +100,25 @@ variable "aws_external_id" {
   default     = ""
 }
 
+# Static access keys: ui-core's alternative to bootstrap_role when the customer
+# connects with an access key pair instead of a role ARN. Without these
+# declarations the keys were dropped ("The root module does not declare a
+# variable named aws_access_key_id") and the provider ran as the runner's own
+# IRSA identity (luthersystems/reliable#2461).
+variable "aws_access_key_id" {
+  description = "AWS access key ID (alternative to bootstrap_role)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_secret_access_key" {
+  description = "AWS secret access key (required with aws_access_key_id)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 # ============================================================================
 # GCP Variables (required when cloud_provider = gcp)
 # ============================================================================

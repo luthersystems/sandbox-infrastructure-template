@@ -31,6 +31,12 @@ terraform {
 provider "aws" {
   region = var.cloud_provider == "aws" ? var.aws_region : "us-west-2"
 
+  # Customer access keys, when the customer connected with keys instead of a
+  # role. setupCloudEnv refuses a cloud-provision run that has neither, so
+  # this provider never falls back to the runner's IRSA identity.
+  access_key = var.cloud_provider == "aws" && var.aws_access_key_id != "" ? var.aws_access_key_id : null
+  secret_key = var.cloud_provider == "aws" && var.aws_access_key_id != "" ? var.aws_secret_access_key : null
+
   assume_role {
     role_arn    = var.cloud_provider == "aws" ? var.bootstrap_role : null
     external_id = var.cloud_provider == "aws" && var.aws_external_id != "" ? var.aws_external_id : null
