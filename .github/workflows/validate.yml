@@ -152,3 +152,4 @@ jobs:
           bash tests/test-destroy-preflight-skip.sh
           bash tests/test-drift-refresh-preflight-skip.sh
           bash tests/test-preflight-binary-swap.sh
+          bash tests/test-aws-credential-guard.sh
