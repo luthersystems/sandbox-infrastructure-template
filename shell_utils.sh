@@ -533,11 +533,26 @@ setupCloudEnv() {
       # JUMP_ROLE_ARN is unset, so the ambient (IRSA) creds the preflight uses to
       # assume bootstrap_role match those terraform will use.
       if [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
-        local aws_bootstrap_role aws_external_id aws_region_v
+        local aws_bootstrap_role aws_external_id aws_region_v aws_access_key_id
         aws_bootstrap_role=$(getTfVar "bootstrap_role")
         aws_external_id=$(getTfVar "aws_external_id")
         aws_region_v=$(getTfVar "aws_region")
-        if ! AWS_BOOTSTRAP_ROLE="$aws_bootstrap_role" \
+        aws_access_key_id=$(getTfVar "aws_access_key_id")
+        # Customer credentials are required (luthersystems/reliable#2461).
+        # With neither a bootstrap_role nor access keys, the aws provider
+        # falls back to the runner's own IRSA identity and builds the
+        # customer's stack in the platform account. Refuse instead.
+        if [[ -z "$aws_bootstrap_role" && -z "$aws_access_key_id" ]]; then
+          echo_error "ERROR: no customer AWS credentials (bootstrap_role or aws_access_key_id) — refusing to run as the runner's own identity. [reliable#2461]"
+          return 1
+        fi
+        # Access-key mode: ui-core already simulated the required actions
+        # against these keys before dispatch. The preflight below only
+        # knows role and ambient modes, and ambient would check the runner
+        # instead of the customer, so skip it here.
+        if [[ -n "$aws_access_key_id" && -z "$aws_bootstrap_role" ]]; then
+          echo "AWS credentials: customer access keys (bootstrap preflight skipped)"
+        elif ! AWS_BOOTSTRAP_ROLE="$aws_bootstrap_role" \
              AWS_EXTERNAL_ID="$aws_external_id" \
              AWS_PREFLIGHT_REGION="${aws_region_v:-us-east-1}" \
              bash "$MARS_PROJECT_ROOT/tf/aws-preflight.sh" "$aws_bootstrap_role"; then
