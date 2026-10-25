@@ -2,6 +2,18 @@ locals {
   repo_name = "${var.short_project_id}-infra"
 }
 
+# The org the repo was first created in. It keeps that value when repo_org
+# changes later (ignore_changes), so the precondition below can tell a
+# project's org apart from the one this run was given.
+# common-infrastructure#269.
+resource "terraform_data" "repo_org_pin" {
+  input = var.repo_org
+
+  lifecycle {
+    ignore_changes = [input]
+  }
+}
+
 # GitHub repo is created for both AWS and GCP
 resource "github_repository" "infra" {
   name        = local.repo_name
@@ -12,6 +24,19 @@ resource "github_repository" "infra" {
   has_issues           = true
   has_wiki             = false
   vulnerability_alerts = var.vulnerability_alerts
+
+  lifecycle {
+    # With another repo_org, the provider looks the repo up in the new org,
+    # does not find it, and plans a new, empty repo there: the stack's
+    # history stays behind and the customer AWS account's OIDC trust is
+    # rewritten to the new repo. Fail instead. To move a project, transfer
+    # its repo on GitHub and update this pin with
+    # `terraform apply -replace=terraform_data.repo_org_pin`.
+    precondition {
+      condition     = terraform_data.repo_org_pin.output == var.repo_org
+      error_message = "repo_org changed from \"${terraform_data.repo_org_pin.output}\" to \"${var.repo_org}\" for an existing project. A project's -infra repo stays in the org it was created in (common-infrastructure#269)."
+    }
+  }
 }
 
 # Generate an SSH keypair for deploy

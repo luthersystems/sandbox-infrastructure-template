@@ -23,6 +23,8 @@ Each stage lives in `tf/<stage>/` and is run via `tf/plan.sh` or `tf/apply.sh` f
 
 Stages share data via `tf/auto-vars/*.json` (auto-loaded tfvars) and Terraform remote state data sources.
 
+`tf/cloud-provision/repo.tf` creates the per-project `<short_project_id>-infra` repo in the GitHub org `repo_org` (default `luthersystems`). `terraform_data.repo_org_pin` keeps the org the repo was created in, and a precondition fails a later run that sends another org, so a redeploy never creates an empty repo in a new org (common-infrastructure#269). To move a project, transfer its repo, then apply with `-replace=terraform_data.repo_org_pin`. `tests/test-repo-org-pin.sh` pins this.
+
 ### Dual-Cloud Pattern
 
 Cloud selection via `cloud_provider` variable (`"aws"` or `"gcp"`). Resources use conditional `count`:
