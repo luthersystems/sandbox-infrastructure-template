@@ -10,12 +10,15 @@ set -euo pipefail
 # new, empty repo there. The pin keeps the org the repo was created in, and
 # a precondition on github_repository.infra fails such a plan.
 #
-# The test copies the real repo.tf into a scratch module with mock providers
-# and runs `terraform test`:
+# The test copies the real stage files into a scratch module with mock
+# providers and runs `terraform test`:
 #   1. a first apply creates the repo and pins its org;
 #   2. a later plan with the same org passes;
-#   3. a later plan with another org fails the precondition;
-#   4. -replace of the pin (the documented move path) accepts the new org.
+#   3. the org check ignores case, as GitHub does;
+#   4. a later plan with another org fails the precondition;
+#   5. -replace of the pin (the documented move path) records the new org;
+#   6. a project whose repo predates the pin seeds it from the recorded clone
+#      URL, so the run that adds the pin is guarded too.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -28,7 +31,12 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-cp "$ROOT/tf/cloud-provision/repo.tf" "$work/repo.tf"
+# The real stage files, so the test follows their variables and provider.
+# main.tf (which defines is_aws/is_gcp among much else) and the per-cloud
+# templates are left out; stub.tf supplies what repo.tf needs from them.
+for f in repo.tf vars.tf unused-vars.tf providers.tf versions.tf; do
+  cp "$ROOT/tf/cloud-provision/$f" "$work/$f"
+done
 
 cat >"$work/stub.tf" <<'EOF'
 terraform {
@@ -48,53 +56,9 @@ terraform {
   }
 }
 
-provider "github" {
-  owner = var.repo_org
-}
-
 locals {
   is_aws = true
   is_gcp = false
-}
-
-variable "short_project_id" {
-  type    = string
-  default = "abcd1234"
-}
-
-variable "repo_org" {
-  type    = string
-  default = "luthersystems"
-}
-
-variable "github_username" {
-  type    = string
-  default = ""
-}
-
-variable "collaborator_permission" {
-  type    = string
-  default = "admin"
-}
-
-variable "vulnerability_alerts" {
-  type    = bool
-  default = true
-}
-
-variable "aws_region" {
-  type    = string
-  default = "us-west-2"
-}
-
-variable "gcp_project_id" {
-  type    = string
-  default = ""
-}
-
-variable "gcp_region" {
-  type    = string
-  default = ""
 }
 EOF
 
@@ -104,6 +68,12 @@ mock_provider "github" {}
 mock_provider "local" {}
 mock_provider "time" {}
 mock_provider "tls" {}
+
+variables {
+  domain           = "example.com"
+  short_project_id = "abcd1234"
+  project_id       = "abcd1234-project"
+}
 
 run "create_pins_org" {
   command = apply
@@ -126,6 +96,14 @@ run "same_org_passes" {
   }
 }
 
+run "same_org_other_case_passes" {
+  command = plan
+
+  variables {
+    repo_org = "LutherSystems"
+  }
+}
+
 run "other_org_fails" {
   command = plan
 
@@ -137,7 +115,7 @@ run "other_org_fails" {
 }
 
 run "replace_pin_moves_org" {
-  command = plan
+  command = apply
 
   plan_options {
     replace = [terraform_data.repo_org_pin]
@@ -145,6 +123,52 @@ run "replace_pin_moves_org" {
 
   variables {
     repo_org = "insideout-envs"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "insideout-envs"
+    error_message = "replacing the pin did not record the new org"
+  }
+}
+EOF
+
+# A project whose repo predates the pin: its state has no pin, and its
+# git_repo.auto.tfvars.json recorded the clone URL but no repo_org. A new
+# pin's output is unknown until apply, so the precondition runs at apply:
+# these runs apply.
+cat >"$work/tests/seed.tftest.hcl" <<'EOF'
+mock_provider "github" {}
+mock_provider "local" {}
+mock_provider "time" {}
+mock_provider "tls" {}
+
+variables {
+  domain             = "example.com"
+  short_project_id   = "abcd1234"
+  project_id         = "abcd1234-project"
+  repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
+}
+
+run "unpinned_project_other_org_fails" {
+  command = apply
+
+  variables {
+    repo_org = "insideout-envs"
+  }
+
+  expect_failures = [github_repository.infra]
+}
+
+run "unpinned_project_same_org_passes" {
+  command = apply
+
+  variables {
+    repo_org = "luthersystems"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems"
+    error_message = "the pin did not take the org from the recorded clone URL"
   }
 }
 EOF
