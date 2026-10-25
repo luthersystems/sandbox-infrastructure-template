@@ -29,8 +29,12 @@ resource "github_repository" "infra" {
     # With another repo_org, the provider looks the repo up in the new org,
     # does not find it, and plans a new, empty repo there: the stack's
     # history stays behind and the customer AWS account's OIDC trust is
-    # rewritten to the new repo. Fail instead. To move a project, transfer
-    # its repo on GitHub and update this pin with
+    # rewritten to the new repo. Fail instead. Usually an existing project
+    # already keeps its org: git_repo.auto.tfvars.json (below) records it and
+    # loads after common.auto.tfvars.json, where Oracle's repo_org lands. This
+    # catches the case where that file is missing or has no repo_org. To move
+    # a project, transfer its repo on GitHub, set repo_org in the project's
+    # tf/auto-vars/git_repo.auto.tfvars.json, and update this pin with
     # `terraform apply -replace=terraform_data.repo_org_pin`.
     precondition {
       condition     = terraform_data.repo_org_pin.output == var.repo_org
