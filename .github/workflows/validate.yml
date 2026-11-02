@@ -160,3 +160,4 @@ jobs:
           bash tests/test-preflight-binary-swap.sh
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh
+          bash tests/test-gcp-management-identity.sh
