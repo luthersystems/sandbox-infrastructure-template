@@ -19,8 +19,8 @@ set -euo pipefail
 #   5. -replace of the pin (the documented move path) records the new org;
 #   6. a project whose repo predates the pin seeds it from the recorded clone
 #      URL, so the run that adds the pin is guarded too;
-#   7. with adopt_infra_repo, the stage imports the repo that ui-core's
-#      GitHub App created, and a later run keeps it.
+#   7. with adopt_infra_repo, the import block is valid and the runs plan
+#      and apply; its shape (target, id, condition) is checked by pattern.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -176,9 +176,10 @@ run "unpinned_project_same_org_passes" {
 EOF
 
 # ui-core's GitHub App (ui-infrastructure#442) creates the repo before this
-# stage runs, and the stage adopts it with an import block. A new project
-# imports the repo; a project that already has it in state is not changed by
-# the import, so the flag is safe on every run.
+# stage runs, and the stage adopts it with an import block. A mock provider
+# cannot import, so these runs prove only that the import block is valid
+# config and that runs with the flag on plan and apply; the shape of the
+# block itself is checked with a pattern after the test.
 cat >"$work/tests/adopt.tftest.hcl" <<'EOF'
 mock_provider "github" {}
 mock_provider "local" {}
@@ -235,3 +236,18 @@ else
   echo "FAIL: repo_org pin" >&2
   exit 1
 fi
+
+# The import block must adopt github_repository.infra by the project's repo
+# name, and only with adopt_infra_repo: an unconditional import fails a
+# project on the PAT flow, whose repo Terraform creates.
+block="$(awk '/^import \{/,/^\}/' "$ROOT/tf/cloud-provision/repo.tf" | tr -s ' ')"
+for want in \
+  'for_each = var.adopt_infra_repo ? toset([local.repo_name]) : toset([])' \
+  'to = github_repository.infra' \
+  'id = each.value'; do
+  if ! grep -qF -- "$want" <<<"$block"; then
+    echo "FAIL: the repo import block lacks: $want" >&2
+    exit 1
+  fi
+done
+echo "PASS: repo import block"
