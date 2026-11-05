@@ -1,5 +1,5 @@
 module "storage" {
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-storage?ref=v55.30.0"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-storage?ref=v55.33.0"
 
   luther_project = var.short_project_id
   luther_env     = var.luther_env
@@ -36,7 +36,7 @@ output "static_bucket_kms_key_arn" {
 }
 
 module "main" {
-  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-main?ref=v55.30.0"
+  source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-main?ref=v55.33.0"
 
   luther_project           = var.short_project_id
   luther_env               = var.luther_env
@@ -46,6 +46,7 @@ module "main" {
   storage_kms_key_arn      = module.storage.kms_key_main_arn
   ansible_relative_path    = "../../ansible"
   eks_worker_count         = var.eks_worker_count
+  enable_dlm_snapshots     = var.enable_dlm_snapshots
   eks_worker_spot_price    = var.eks_worker_spot_price
   eks_worker_instance_type = var.eks_worker_instance_type
 
