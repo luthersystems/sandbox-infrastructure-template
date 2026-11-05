@@ -54,6 +54,14 @@ variable "repo_org" {
   default = "luthersystems"
 }
 
+# Set by ui-core (TF_VAR_adopt_infra_repo) when its GitHub App created the
+# repo before this stage runs. See the import block in repo.tf.
+variable "adopt_infra_repo" {
+  description = "Import the -infra repo that ui-core's GitHub App created, instead of creating it."
+  type        = bool
+  default     = false
+}
+
 variable "github_username" {
   description = "GitHub username to invite as collaborator on the infra repo"
   type        = string

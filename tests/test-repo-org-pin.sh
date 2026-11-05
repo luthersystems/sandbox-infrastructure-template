@@ -18,7 +18,9 @@ set -euo pipefail
 #   4. a later plan with another org fails the precondition;
 #   5. -replace of the pin (the documented move path) records the new org;
 #   6. a project whose repo predates the pin seeds it from the recorded clone
-#      URL, so the run that adds the pin is guarded too.
+#      URL, so the run that adds the pin is guarded too;
+#   7. with adopt_infra_repo, the stage imports the repo that ui-core's
+#      GitHub App created, and a later run keeps it.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -169,6 +171,58 @@ run "unpinned_project_same_org_passes" {
   assert {
     condition     = terraform_data.repo_org_pin.output == "luthersystems"
     error_message = "the pin did not take the org from the recorded clone URL"
+  }
+}
+EOF
+
+# ui-core's GitHub App (ui-infrastructure#442) creates the repo before this
+# stage runs, and the stage adopts it with an import block. A new project
+# imports the repo; a project that already has it in state is not changed by
+# the import, so the flag is safe on every run.
+cat >"$work/tests/adopt.tftest.hcl" <<'EOF'
+mock_provider "github" {}
+mock_provider "local" {}
+mock_provider "time" {}
+mock_provider "tls" {}
+
+# A mock provider cannot import; override_resource gives the imported repo.
+override_resource {
+  target = github_repository.infra
+  values = {
+    name = "abcd1234-infra"
+  }
+}
+
+variables {
+  domain           = "example.com"
+  short_project_id = "abcd1234"
+  project_id       = "abcd1234-project"
+  repo_org         = "luthersystems"
+}
+
+run "new_project_adopts_repo" {
+  command = apply
+
+  variables {
+    adopt_infra_repo = true
+  }
+
+  assert {
+    condition     = github_repository.infra.name == "abcd1234-infra"
+    error_message = "the adopted repo is not the project's"
+  }
+}
+
+run "adopted_repo_in_state_is_kept" {
+  command = plan
+
+  variables {
+    adopt_infra_repo = true
+  }
+
+  assert {
+    condition     = github_repository.infra.name == "abcd1234-infra"
+    error_message = "a second run with the flag lost the repo"
   }
 }
 EOF

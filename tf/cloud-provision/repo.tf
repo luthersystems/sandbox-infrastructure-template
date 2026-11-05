@@ -20,6 +20,19 @@ resource "terraform_data" "repo_org_pin" {
   }
 }
 
+# With ui-core's GitHub App (ui-infrastructure#442), ui-core creates the
+# repo with the App before Terraform runs, so the repo joins the App's
+# installation and the step's token, limited to this one repo, can reach it.
+# That token cannot create a repo, so Terraform adopts the repo here instead.
+# An import of a resource already in state is a no-op, so this is safe on
+# every run. Off (the default) keeps the org PAT flow, where Terraform
+# creates the repo and an import would fail on a repo that does not exist.
+import {
+  for_each = var.adopt_infra_repo ? toset([local.repo_name]) : toset([])
+  to       = github_repository.infra
+  id       = each.value
+}
+
 # GitHub repo is created for both AWS and GCP
 resource "github_repository" "infra" {
   name        = local.repo_name
