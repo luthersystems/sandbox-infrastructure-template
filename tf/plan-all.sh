@@ -44,7 +44,21 @@ mkdir -p "$OUTPUTS_DIR"
 # get picked up as the canonical alias below — feeding stale data to
 # reliable's tag-only classifier. Per-stage plan.sh invocations write their
 # own per-stage file and aren't affected.
-rm -f "$OUTPUTS_DIR"/tfplan-*.json "$OUTPUTS_DIR/tfplan.json"
+#
+# PLAN_ALL_CONTINUE=true means this run continues a plan-all that an earlier
+# step of the same workflow started. ui-core plans the custom stack in its
+# own step, so the step that runs customer Terraform does not get the GitHub
+# token that cloud-provision needs (ui-infrastructure#442). The earlier
+# stages' plan JSON and summary rows must then survive this run.
+PLAN_ALL_CONTINUE="${PLAN_ALL_CONTINUE:-false}"
+if [[ "$PLAN_ALL_CONTINUE" == "true" ]]; then
+  for stage in $STAGES; do
+    rm -f "$OUTPUTS_DIR/tfplan-${stage}.json"
+  done
+  rm -f "$OUTPUTS_DIR/tfplan.json"
+else
+  rm -f "$OUTPUTS_DIR"/tfplan-*.json "$OUTPUTS_DIR/tfplan.json" "$OUTPUTS_DIR/plan-summary.json"
+fi
 
 had_error=false
 had_changes=false
@@ -55,6 +69,22 @@ cleanup_plan_all() {
   rm -rf "$results_dir"
 }
 trap cleanup_plan_all EXIT
+
+# Rows of the earlier step's stages (PLAN_ALL_CONTINUE), kept in the summary.
+PRIOR_STAGES=""
+if [[ "$PLAN_ALL_CONTINUE" == "true" && -f "$OUTPUTS_DIR/plan-summary.json" ]]; then
+  for stage in $(jq -r '.stages // {} | keys[]' "$OUTPUTS_DIR/plan-summary.json"); do
+    case " $STAGES " in *" $stage "*) continue ;; esac
+    jq --arg s "$stage" '.stages[$s]' "$OUTPUTS_DIR/plan-summary.json" > "$results_dir/$stage.json"
+    PRIOR_STAGES="$PRIOR_STAGES $stage"
+    if [[ "$(jq -r '.has_changes // false' "$results_dir/$stage.json")" == "true" ]]; then
+      had_changes=true
+    fi
+    if [[ "$(jq -r '.error // false' "$results_dir/$stage.json")" == "true" ]]; then
+      had_error=true
+    fi
+  done
+fi
 
 for stage in $STAGES; do
   echo ""
@@ -159,7 +189,7 @@ summary="$(
   total_destroy=0
   total_import=0
 
-  for stage in $STAGES; do
+  for stage in $PRIOR_STAGES $STAGES; do
     stage_file="$results_dir/$stage.json"
     if [[ -f "$stage_file" ]]; then
       stage_data="$(cat "$stage_file")"

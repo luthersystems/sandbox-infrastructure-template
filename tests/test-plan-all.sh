@@ -838,6 +838,71 @@ else
   fail "strip-all: idempotent re-run expected exit 0, got $exit_code2. Output: $output2"
 fi
 
+# ============================================================
+# Test: split plan (PLAN_ALL_CONTINUE). ui-core plans cloud-provision in one
+# step and the custom stack in a second step without the GitHub token. The
+# second run must keep the first run's stage in the summary and plan JSON.
+# ============================================================
+echo ""
+echo "Test: split plan with PLAN_ALL_CONTINUE..."
+
+echo '{"resource_changes": [{"address": "a.b", "change": {"actions": ["create"]}}]}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+
+run_plan_stage() {
+  (
+    cd "$PROJECT/tf"
+    export MARS_PROJECT_ROOT="$PROJECT"
+    export MARS="$MOCK_MARS"
+    export HOME="$WORKDIR"
+    PLAN_STAGES="$1" PLAN_ALL_CONTINUE="$2" bash "$PROJECT/tf/plan-all.sh"
+  ) 2>&1
+}
+
+rm -rf "$PROJECT/outputs"
+mkdir -p "$PROJECT/outputs"
+set +e
+out_a="$(run_plan_stage cloud-provision false)"
+rc_a=$?
+out_b="$(run_plan_stage custom-stack-provision true)"
+rc_b=$?
+set -e
+
+if [[ "$rc_a" -eq 0 && "$rc_b" -eq 0 ]]; then
+  pass "split plan: both steps exit 0"
+else
+  fail "split plan: exits $rc_a, $rc_b. Output: $out_a $out_b"
+fi
+
+if jq -e '(.stages | keys) == ["cloud-provision", "custom-stack-provision"]' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "split plan: summary keeps the first step's stage"
+else
+  fail "split plan: summary stages wrong: $(cat "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if jq -e '.total.add == 1 and .has_changes == true' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1; then
+  pass "split plan: totals and has_changes include the first step"
+else
+  fail "split plan: totals wrong: $(cat "$PROJECT/outputs/plan-summary.json")"
+fi
+
+if [[ -f "$PROJECT/outputs/tfplan-cloud-provision.json" ]]; then
+  pass "split plan: first step's plan JSON kept"
+else
+  fail "split plan: tfplan-cloud-provision.json was removed"
+fi
+
+# Without PLAN_ALL_CONTINUE a run starts clean.
+set +e
+run_plan_stage custom-stack-provision false >/dev/null
+set -e
+if jq -e '(.stages | keys) == ["custom-stack-provision"]' "$PROJECT/outputs/plan-summary.json" >/dev/null 2>&1 &&
+  [[ ! -f "$PROJECT/outputs/tfplan-cloud-provision.json" ]]; then
+  pass "split plan: a run without PLAN_ALL_CONTINUE drops earlier stages"
+else
+  fail "split plan: stale stages kept without PLAN_ALL_CONTINUE"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
