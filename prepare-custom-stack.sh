@@ -204,7 +204,9 @@ git_clone_with_token() {
     # ui-core gives this step no GitHub token when the step can run
     # customer-changed code (ui-infrastructure#442). The sandbox stack repo
     # is public, so clone it anonymously; a private repo fails in git.
-    log "GITHUB_TOKEN is not set: cloning ${url} without a token"
+    log "GITHUB_TOKEN is not set: cloning ${url} without a token (a private repo fails here)"
+    # Fail on an auth prompt instead of waiting for input.
+    export GIT_TERMINAL_PROMPT=0
   elif [[ "$token_url" =~ ^https:// ]]; then
     token_url="${url/https:\/\//https:\/\/${GITHUB_TOKEN}@}"
   fi

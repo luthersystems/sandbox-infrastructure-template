@@ -236,7 +236,7 @@ canonical_src=""
 if [[ -f "$OUTPUTS_DIR/tfplan-custom-stack-provision.json" ]]; then
   canonical_src="$OUTPUTS_DIR/tfplan-custom-stack-provision.json"
 else
-  for stage in $STAGES; do
+  for stage in $PRIOR_STAGES $STAGES; do
     if [[ -f "$OUTPUTS_DIR/tfplan-${stage}.json" ]]; then
       canonical_src="$OUTPUTS_DIR/tfplan-${stage}.json"
     fi
