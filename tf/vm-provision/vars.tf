@@ -66,7 +66,7 @@ variable "aws_external_id" {
 }
 
 variable "enable_dlm_snapshots" {
-  description = "DLM EBS snapshots of the cluster's volumes (tag KubernetesCluster): every 2 hours, kept 7 days"
+  description = "DLM EBS snapshots of the cluster's volumes (tag KubernetesCluster): every 2 hours, kept 7 days. Off by default; set true to turn on"
   type        = bool
-  default     = true
+  default     = false
 }
