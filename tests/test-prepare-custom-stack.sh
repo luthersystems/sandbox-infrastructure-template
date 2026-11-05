@@ -677,6 +677,32 @@ else
   fail "SHA ref (ssh): preserved files not intact"
 fi
 
+# ============================================================
+# Repo mode without GITHUB_TOKEN: ui-core gives this step no token
+# (ui-infrastructure#442), so a public repo must clone anonymously.
+# ============================================================
+echo ""
+echo "Repo mode without GITHUB_TOKEN..."
+rm -f "$TARGET/.terraform-version"
+set +e
+notoken_out="$(
+  cd "$PROJECT"
+  export MARS_PROJECT_ROOT="$PROJECT"
+  export CUSTOM_ARCHIVE_TGZ=""
+  export CUSTOM_REPO_URL="file://$REPO_BARE"
+  export CUSTOM_REF="main"
+  export CUSTOM_AUTH="token"
+  unset GITHUB_TOKEN
+  bash prepare-custom-stack.sh 2>&1
+)"
+notoken_rc=$?
+set -e
+if [[ "$notoken_rc" -eq 0 && "$(cat "$TARGET/.terraform-version" 2>/dev/null)" == "1.9.0" ]]; then
+  pass "repo mode without token: cloned anonymously"
+else
+  fail "repo mode without token: rc=$notoken_rc. Output: $notoken_out"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"

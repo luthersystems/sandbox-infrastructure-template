@@ -199,12 +199,13 @@ is_commit_sha() { [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]; }
 
 git_clone_with_token() {
   local url="$1" ref="$2" dest="$3"
-  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    log "ERROR: CUSTOM_AUTH=token but GITHUB_TOKEN is not set"
-    exit 2
-  fi
   local token_url="$url"
-  if [[ "$token_url" =~ ^https:// ]]; then
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    # ui-core gives this step no GitHub token when the step can run
+    # customer-changed code (ui-infrastructure#442). The sandbox stack repo
+    # is public, so clone it anonymously; a private repo fails in git.
+    log "GITHUB_TOKEN is not set: cloning ${url} without a token"
+  elif [[ "$token_url" =~ ^https:// ]]; then
     token_url="${url/https:\/\//https:\/\/${GITHUB_TOKEN}@}"
   fi
   if is_commit_sha "$ref"; then
