@@ -1,3 +1,3 @@
 terraform {
-  required_version = ">= 1.4" # terraform_data (repo.tf)
+  required_version = ">= 1.7" # terraform_data, import for_each (repo.tf)
 }
