@@ -232,7 +232,9 @@ echo "=== Case C: no .git → LOUD warning, no push, apply still succeeds ==="
 # =============================================================================
 PROJ="$(make_project projC)"
 BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
+# A remote the apply step cannot clone either (persistInfraRepo tries,
+# since a step with the GitHub App token can clone what prepare could not).
+set_repo_clone_url "$PROJ" "file://$WORKDIR/no-such-repo.git"
 # NOTE: deliberately NOT initializing .git at the project root.
 
 set +e
@@ -496,6 +498,109 @@ if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-aws.tf"
   fail "H: deploy-generated providers-aws.tf leaked into the snapshot (glob too narrow). Tree: $pushed_tree_H"
 else
   pass "H: deploy-generated providers-aws.tf correctly excluded from the snapshot"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case I: the custom-stack apply clones the -infra repo when prepare could not ==="
+# =============================================================================
+# With ui-core's GitHub App, prepare-custom-stack has no token and no deploy
+# key, so it leaves the tree without .git; the apply step has the token and
+# clones the repo itself (cloneInfraRepo in persistInfraRepo,
+# luthersystems/ui-infrastructure#442).
+PROJ="$(make_project projI)"
+BARE="$(fresh_bare)"
+SEED="$WORKDIR/seedI"
+git init -q -b main "$SEED"
+git -C "$SEED" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "earlier deploy"
+git -C "$SEED" push -q "$BARE" main
+git -C "$BARE" symbolic-ref HEAD refs/heads/main
+set_repo_clone_url "$PROJ" "file://$BARE"
+mkdir -p "$PROJ/tf/custom-stack-provision"
+echo 'resource "null_resource" "x" {}' > "$PROJ/tf/custom-stack-provision/main.tf"
+
+set +e
+outI="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcI=$?
+set -e
+
+[[ "$rcI" -eq 0 ]] && pass "I: apply exits 0" || fail "I: expected exit 0, got $rcI. Output: $outI"
+if [[ "$(bare_commit_count "$BARE")" -ge 2 ]]; then
+  pass "I: the apply cloned the repo and pushed on top of its history"
+else
+  fail "I: expected a new commit on the -infra repo. Output: $outI"
+fi
+if git -C "$BARE" ls-tree -r --name-only main | grep -qx "tf/custom-stack-provision/main.tf"; then
+  pass "I: the pushed tree has the custom stack"
+else
+  fail "I: custom stack missing from the pushed tree: $(git -C "$BARE" ls-tree -r --name-only main | tr "\n" " ") Output: $outI"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case J: git access with the GitHub App token ==="
+# =============================================================================
+PROJ="$(make_project projJ)"
+TOKEN_FILE="$WORKDIR/app-token"
+echo "ghs_testtoken" > "$TOKEN_FILE"
+set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
+init_project_git "$PROJ"
+git -C "$PROJ" config core.sshCommand "ssh -i old-key"
+
+outJ="$(
+  export MARS_PROJECT_ROOT="$PROJ" GITHUB_GIT_TOKEN_FILE="$TOKEN_FILE"
+  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
+  configure_git >/dev/null 2>&1
+  echo "remote=$(git -C "$PROJ" remote get-url infra)"
+  printf 'protocol=https\nhost=github.com\npath=luthersystems-infra-test/abcd1234-infra.git\n\n' |
+    GIT_TERMINAL_PROMPT=0 git -C "$PROJ" credential fill
+  echo "ssh=$(git -C "$PROJ" config --local core.sshCommand || true)"
+)"
+if echo "$outJ" | grep -qx "remote=https://github.com/luthersystems-infra-test/abcd1234-infra.git"; then
+  pass "J: with a token, the infra remote is the HTTPS URL"
+else
+  fail "J: infra remote is not HTTPS. Output: $outJ"
+fi
+if echo "$outJ" | grep -qx "password=ghs_testtoken" && echo "$outJ" | grep -qx "username=x-access-token"; then
+  pass "J: git gets the token from the credential helper"
+else
+  fail "J: credential helper did not give the token. Output: $outJ"
+fi
+if echo "$outJ" | grep -qx "ssh="; then
+  pass "J: an earlier deploy key's sshCommand is removed"
+else
+  fail "J: core.sshCommand still set. Output: $outJ"
+fi
+if grep -rqF "ghs_testtoken" "$PROJ/.git/config"; then
+  fail "J: the token is in .git/config, which travels in the project archive"
+else
+  pass "J: the token is not in .git/config"
+fi
+
+outJ2="$(
+  export MARS_PROJECT_ROOT="$PROJ"
+  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
+  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
+  echo "url=$(infra_remote_url)"
+)"
+if echo "$outJ2" | grep -qx "url=git@github.com:luthersystems-infra-test/abcd1234-infra.git"; then
+  pass "J: without a token, the SSH URL stays"
+else
+  fail "J: without a token, expected the SSH URL. Output: $outJ2"
+fi
+
+PROJ="$(make_project projJ3)"
+set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
+outJ3="$(
+  export MARS_PROJECT_ROOT="$PROJ"
+  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
+  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
+  cloneInfraRepo 2>&1; echo "rc=$?"
+)"
+if echo "$outJ3" | grep -qF "No GitHub token or deploy key" && echo "$outJ3" | grep -qx "rc=0" && [[ ! -e "$PROJ/.git" ]]; then
+  pass "J: with no token and no deploy key, the SSH clone is skipped (non-fatal)"
+else
+  fail "J: expected a skipped clone. Output: $outJ3"
 fi
 
 # --- Summary -----------------------------------------------------------------
