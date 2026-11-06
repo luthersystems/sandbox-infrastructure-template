@@ -124,9 +124,152 @@ configure_deploy_ssh() {
   git config --local core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
 }
 
+# ---------------------------------------------------------------------------
+# Git access to the -infra repo with ui-core's GitHub App
+# (luthersystems/ui-infrastructure#442).
+#
+# With the App on, ui-core gives a step a one-hour installation token for the
+# project's -infra repo only, in a file: GITHUB_GIT_TOKEN_FILE (git access
+# only, for the custom-stack apply) or GITHUB_TOKEN_FILE (the stages with the
+# github provider). The repo then lives in an org of its own, where deploy
+# keys are off (a new org cannot turn them on without Enterprise Cloud), so
+# Terraform makes no deploy key (create_infra_deploy_key = false) and git
+# clones, fetches and pushes over HTTPS with that token. Without a token
+# file, git uses the deploy key over SSH as before.
+#
+# The token never goes into .git/config, which travels in the project
+# archive: the credential helper there reads the file when git asks.
+# ---------------------------------------------------------------------------
+
+# infra_git_token_file prints the token file of this step, if it has one.
+infra_git_token_file() {
+  local f
+  for f in "${GITHUB_GIT_TOKEN_FILE:-}" "${GITHUB_TOKEN_FILE:-}"; do
+    if [[ -n "$f" && -r "$f" ]]; then
+      echo "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# infra_https_url URL prints the HTTPS form of a git@github.com: URL, and any
+# other URL as it is.
+infra_https_url() {
+  local url="$1"
+  if [[ "$url" =~ ^git@github\.com:(.+)$ ]]; then
+    echo "https://github.com/${BASH_REMATCH[1]}"
+  else
+    echo "$url"
+  fi
+}
+
+# infra_git_credential_helper FILE prints a git credential helper that gives
+# the token in FILE for each request.
+infra_git_credential_helper() {
+  local q
+  q=$(printf '%q' "$1")
+  echo "!f() { test \"\$1\" = get || return 0; echo username=x-access-token; echo \"password=\$(tr -d '\\n' < ${q})\"; }; f"
+}
+
+# infra_git_auth_args prints, one per line, the "-c" options that give one
+# git command the token of this step (nothing without a token file). The
+# empty helper first drops any helper from another config file.
+infra_git_auth_args() {
+  local tok
+  tok=$(infra_git_token_file) || return 0
+  printf '%s\n' -c "credential.https://github.com.helper=" \
+    -c "credential.https://github.com.helper=$(infra_git_credential_helper "$tok")"
+}
+
+# configure_infra_git_auth sets the repo's git access: the token over HTTPS
+# when the step has one, else the deploy key over SSH.
+configure_infra_git_auth() {
+  local tok
+  if tok=$(infra_git_token_file); then
+    git config --local --unset-all credential.https://github.com.helper 2>/dev/null || true
+    git config --local --add credential.https://github.com.helper ''
+    git config --local --add credential.https://github.com.helper "$(infra_git_credential_helper "$tok")"
+    # A deploy key from an earlier run must not take over.
+    git config --local --unset core.sshCommand 2>/dev/null || true
+    echo "🔑 [git-infra] using the GitHub App token over HTTPS"
+    return 0
+  fi
+  configure_deploy_ssh
+}
+
+# infra_remote_url prints the URL of the -infra repo for this step: HTTPS
+# when the step has a token, else the recorded SSH URL.
+infra_remote_url() {
+  local url
+  url=$(getTfVar "repo_clone_ssh_url")
+  if [[ -z "$url" || "$url" == "null" ]]; then
+    return 0
+  fi
+  if infra_git_token_file >/dev/null; then
+    infra_https_url "$url"
+  else
+    echo "$url"
+  fi
+}
+
+# cloneInfraRepo gives a working tree without .git (an extracted project
+# archive) the git state of the -infra repo, so that gitCommit and
+# gitPushInfra work. Non-fatal: on any problem it warns and returns 0.
+cloneInfraRepo() {
+  if has_git_repo; then
+    return 0
+  fi
+
+  local infra_url
+  infra_url=$(infra_remote_url)
+  if [[ -z "$infra_url" ]]; then
+    echo "[git-infra] No repo_clone_ssh_url set; skipping infra clone" >&2
+    return 0
+  fi
+
+  local deploy_key="$MARS_PROJECT_ROOT/secrets/infra_deploy_key.pem"
+  local git_ssh_cmd="ssh -o StrictHostKeyChecking=no"
+  local auth_args=()
+  mapfile -t auth_args < <(infra_git_auth_args)
+  if ((${#auth_args[@]} == 0)); then
+    if [[ -f "$deploy_key" ]]; then
+      chmod 600 "$deploy_key"
+      git_ssh_cmd="ssh -i $deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
+    elif [[ "$infra_url" == git@* ]]; then
+      # SSH with no deploy key and no token: the clone can only fail. A
+      # later step that has the token clones the repo (persistInfraRepo).
+      echo "[git-infra] No GitHub token or deploy key in this step; skipping infra clone" >&2
+      return 0
+    fi
+  fi
+
+  echo "[git-infra] Cloning infra repo to initialize git state: $infra_url" >&2
+  local tmp_clone
+  tmp_clone="$(mktemp -d)"
+  if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$git_ssh_cmd" git "${auth_args[@]}" clone "$infra_url" "$tmp_clone/repo"; then
+    echo "⚠️  [git-infra] WARNING: failed to clone infra repo; git commit/push will be skipped" >&2
+    rm -rf "$tmp_clone"
+    return 0
+  fi
+
+  # Move .git into the working directory so the git helpers work.
+  mv "$tmp_clone/repo/.git" "$MARS_PROJECT_ROOT/.git"
+  rm -rf "$tmp_clone"
+
+  # Rename origin → infra (ensure_infra_remote expects "infra" remote)
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+  if git remote get-url origin >/dev/null 2>&1; then
+    git remote rename origin infra
+  fi
+  popd >/dev/null
+
+  echo "[git-infra] Git state initialized from infra repo" >&2
+}
+
 ensure_infra_remote() {
   # repo_clone_ssh_url should be set via terraform auto-vars
-  url=$(getTfVar "repo_clone_ssh_url")
+  url=$(infra_remote_url)
   if [ -n "$url" ]; then
     if git remote get-url infra >/dev/null 2>&1; then
       git remote set-url infra "$url"
@@ -149,7 +292,7 @@ ensure_infra_remote() {
 configure_git() {
   if ! has_git_repo; then
     # LOUD, greppable signal for hypothesis (2) in #143: no .git at the project
-    # root means prepare-custom-stack's ensure_git_from_infra never ran (or its
+    # root means cloneInfraRepo never ran (or its
     # clone failed), so nothing can be committed or pushed to the -infra repo.
     echo "⚠️  [git-infra] WARNING: configure_git: no .git at ${MARS_PROJECT_ROOT} — commit/push to the -infra repo will be SKIPPED. [sandbox-infrastructure-template#143]" >&2
     return 1
@@ -157,7 +300,7 @@ configure_git() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
   ensure_git_identity
   disable_filemode
-  configure_deploy_ssh
+  configure_infra_git_auth
   ensure_infra_remote
   popd >/dev/null
 }
@@ -234,7 +377,7 @@ gitPushInfra() {
   if git push infra HEAD; then
     echo "✅ [git-infra] Pushed to infra remote — per-project -infra repo populated."
   else
-    echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the deploy key / remote URL. [sandbox-infrastructure-template#143]" >&2
+    echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the GitHub token or deploy key and the remote URL. [sandbox-infrastructure-template#143]" >&2
   fi
 
   popd >/dev/null
@@ -257,8 +400,12 @@ persistInfraRepo() {
 
   # Up-front LOUD signals for the two silent-failure hypotheses in #143. These
   # are pure diagnostics; the helper calls below also degrade gracefully.
+  # prepare-custom-stack clones the -infra repo when it can. With the GitHub
+  # App it cannot (that step gets no token), so clone it here, in the step
+  # that has one.
+  cloneInfraRepo || true
   if ! has_git_repo; then
-    echo "⚠️  [git-infra] WARNING: no .git at ${MARS_PROJECT_ROOT} at persist time — prepare-custom-stack's ensure_git_from_infra should have cloned the -infra repo. Stack will NOT be pushed. [sandbox-infrastructure-template#143]" >&2
+    echo "⚠️  [git-infra] WARNING: no .git at ${MARS_PROJECT_ROOT} at persist time — cloneInfraRepo (prepare-custom-stack, or this step) could not clone the -infra repo. Stack will NOT be pushed. [sandbox-infrastructure-template#143]" >&2
   fi
   if [ -z "$(getTfVar repo_clone_ssh_url)" ]; then
     echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty at persist time — cloud-provision's git_repo.auto.tfvars.json did not reach the apply working tree. [sandbox-infrastructure-template#143]" >&2

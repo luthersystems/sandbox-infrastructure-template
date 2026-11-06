@@ -62,6 +62,14 @@ variable "adopt_infra_repo" {
   default     = false
 }
 
+# Set to false by ui-core (TF_VAR_create_infra_deploy_key) when its GitHub
+# App is on. See the deploy key in repo.tf.
+variable "create_infra_deploy_key" {
+  description = "Make a write deploy key for git over SSH to the -infra repo. Off when git uses ui-core's GitHub App token."
+  type        = bool
+  default     = true
+}
+
 variable "github_username" {
   description = "GitHub username to invite as collaborator on the infra repo"
   type        = string

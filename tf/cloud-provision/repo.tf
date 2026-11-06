@@ -64,23 +64,28 @@ resource "github_repository" "infra" {
   }
 }
 
-# Generate an SSH keypair for deploy
+# A write deploy key, for git over SSH to the repo (shell_utils.sh). Off with
+# ui-core's GitHub App (TF_VAR_create_infra_deploy_key=false): the repo is
+# then in an org where deploy keys are off, and git uses the step's App token
+# over HTTPS instead. Turning it off destroys the key and its file.
 resource "tls_private_key" "deploy" {
+  count     = var.create_infra_deploy_key ? 1 : 0
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
-# Add the public key as a writeable deploy key on the repo
 resource "github_repository_deploy_key" "infra" {
+  count      = var.create_infra_deploy_key ? 1 : 0
   repository = github_repository.infra.name
   title      = "infra-deploy-key"
-  key        = tls_private_key.deploy.public_key_openssh
+  key        = tls_private_key.deploy[0].public_key_openssh
   read_only  = false
 }
 
 # Persist private key to local file
 resource "local_file" "deploy_private_key" {
-  content         = tls_private_key.deploy.private_key_pem
+  count           = var.create_infra_deploy_key ? 1 : 0
+  content         = tls_private_key.deploy[0].private_key_pem
   filename        = "${path.module}/../../secrets/infra_deploy_key.pem"
   file_permission = "0400"
 }
@@ -150,4 +155,21 @@ resource "github_repository_collaborator" "user" {
   repository = github_repository.infra.name
   username   = var.github_username
   permission = var.collaborator_permission
+}
+
+# The deploy key resources took a count (create_infra_deploy_key). Keep an
+# existing project's key, not a new one.
+moved {
+  from = tls_private_key.deploy
+  to   = tls_private_key.deploy[0]
+}
+
+moved {
+  from = github_repository_deploy_key.infra
+  to   = github_repository_deploy_key.infra[0]
+}
+
+moved {
+  from = local_file.deploy_private_key
+  to   = local_file.deploy_private_key[0]
 }
