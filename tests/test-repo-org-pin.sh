@@ -20,7 +20,10 @@ set -euo pipefail
 #   6. a project whose repo predates the pin seeds it from the recorded clone
 #      URL, so the run that adds the pin is guarded too;
 #   7. with adopt_infra_repo, the import block is valid and the runs plan
-#      and apply; its shape (target, id, condition) is checked by pattern.
+#      and apply; its shape (target, id, condition) is checked by pattern;
+#   8. infra_repo_moved_to_org (ui-core's move-infra-repo, #442) re-pins a
+#      moved project to its new org, keeps it on later runs, and fails when
+#      it differs from repo_org.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -227,6 +230,104 @@ run "adopted_repo_in_state_is_kept" {
   }
 }
 EOF
+
+# ui-core's move-infra-repo (ui-infrastructure#442) transfers a project's
+# repo to another org, records the new org and clone URL, and sets
+# infra_repo_moved_to_org. The pin must follow without -replace.
+cat >"$work/tests/move.tftest.hcl" <<'EOF2'
+mock_provider "github" {}
+mock_provider "local" {}
+mock_provider "time" {}
+mock_provider "tls" {}
+
+variables {
+  domain           = "example.com"
+  short_project_id = "abcd1234"
+  project_id       = "abcd1234-project"
+}
+
+run "create_in_old_org" {
+  command = apply
+
+  variables {
+    repo_org           = "luthersystems"
+    repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems"
+    error_message = "the first apply did not pin repo_org"
+  }
+}
+
+run "not_moved_keeps_pin" {
+  command = plan
+
+  variables {
+    repo_org           = "luthersystems"
+    repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems"
+    error_message = "a run with no move changed the pin"
+  }
+}
+
+run "moved_var_other_than_repo_org_fails" {
+  command = plan
+
+  variables {
+    repo_org                = "luthersystems"
+    repo_clone_ssh_url      = "git@github.com:luthersystems/abcd1234-infra.git"
+    infra_repo_moved_to_org = "luthersystems-infra"
+  }
+
+  expect_failures = [terraform_data.repo_org_pin]
+}
+
+run "move_repins_to_new_org" {
+  command = apply
+
+  variables {
+    repo_org                = "luthersystems-infra"
+    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
+    infra_repo_moved_to_org = "Luthersystems-Infra"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems-infra"
+    error_message = "the move did not re-pin the new org"
+  }
+}
+
+run "moved_project_later_run_passes" {
+  command = apply
+
+  variables {
+    repo_org                = "luthersystems-infra"
+    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
+    infra_repo_moved_to_org = "luthersystems-infra"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems-infra"
+    error_message = "a later run of a moved project lost the pin"
+  }
+}
+
+run "moved_project_back_to_old_org_fails" {
+  command = plan
+
+  variables {
+    repo_org                = "luthersystems"
+    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
+    infra_repo_moved_to_org = "luthersystems-infra"
+  }
+
+  expect_failures = [terraform_data.repo_org_pin]
+}
+EOF2
 
 cd "$work"
 "$TF" init -backend=false -input=false >/dev/null

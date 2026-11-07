@@ -62,6 +62,16 @@ variable "adopt_infra_repo" {
   default     = false
 }
 
+# Set by ui-core's move-infra-repo command (ui-infrastructure#442) after it
+# moves the -infra repo to another org: that org. A change replaces
+# terraform_data.repo_org_pin, so the pin takes the new org. Null for a
+# project that never moved.
+variable "infra_repo_moved_to_org" {
+  description = "The org the -infra repo was moved to, or null. A change re-pins the repo's org."
+  type        = string
+  default     = null
+}
+
 # Set to false by ui-core (TF_VAR_create_infra_deploy_key) when its GitHub
 # App is on. See the deploy key in repo.tf.
 variable "create_infra_deploy_key" {

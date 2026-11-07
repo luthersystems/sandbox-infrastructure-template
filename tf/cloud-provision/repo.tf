@@ -12,11 +12,25 @@ locals {
 # has a repo but no pin (created before this resource) takes the org from its
 # recorded clone URL, so the run that adds the pin is guarded too.
 # common-infrastructure#269.
+#
+# A move to another org (ui-core's move-infra-repo command,
+# ui-infrastructure#442) transfers the repo, records the new org and clone
+# URL in git_repo.auto.tfvars.json, and sets infra_repo_moved_to_org to the
+# new org. The change of triggers_replace replaces the pin, and the new pin
+# takes the new org from the recorded clone URL. The variable is null for
+# every project that never moved, as triggers_replace is in its state, so
+# those runs plan no change.
 resource "terraform_data" "repo_org_pin" {
-  input = local.recorded_repo_org != "" ? local.recorded_repo_org : lower(var.repo_org)
+  input            = local.recorded_repo_org != "" ? local.recorded_repo_org : lower(var.repo_org)
+  triggers_replace = var.infra_repo_moved_to_org == null ? null : lower(var.infra_repo_moved_to_org)
 
   lifecycle {
     ignore_changes = [input]
+
+    precondition {
+      condition     = var.infra_repo_moved_to_org == null ? true : lower(var.infra_repo_moved_to_org) == lower(var.repo_org)
+      error_message = "infra_repo_moved_to_org is \"${var.infra_repo_moved_to_org == null ? "" : var.infra_repo_moved_to_org}\", but repo_org is \"${var.repo_org}\": a moved project's repo_org must be the org it moved to."
+    }
   }
 }
 
@@ -52,9 +66,9 @@ resource "github_repository" "infra" {
     # already keeps its org: git_repo.auto.tfvars.json (below) records it and
     # loads after common.auto.tfvars.json, where Oracle's repo_org lands. This
     # catches the case where that file has no repo_org. GitHub org names are
-    # case-insensitive, so the check is too. To move a project (by hand, with
-    # Terraform against the project's state): transfer its repo on GitHub, set
-    # repo_org and repo_clone_ssh_url in the project's
+    # case-insensitive, so the check is too. To move a project, run ui-core's
+    # move-infra-repo command (see repo_org_pin), or by hand: transfer its
+    # repo on GitHub, set repo_org and repo_clone_ssh_url in the project's
     # tf/auto-vars/git_repo.auto.tfvars.json, and apply with
     # `-replace=terraform_data.repo_org_pin`.
     precondition {
