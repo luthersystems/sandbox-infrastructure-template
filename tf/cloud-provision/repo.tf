@@ -12,8 +12,18 @@ locals {
 # has a repo but no pin (created before this resource) takes the org from its
 # recorded clone URL, so the run that adds the pin is guarded too.
 # common-infrastructure#269.
+#
+# A move to another org (ui-core's move-infra-repo command,
+# ui-infrastructure#442) transfers the repo and records the new org and clone
+# URL in git_repo.auto.tfvars.json. triggers_replace follows the recorded
+# clone URL's org, so that change replaces the pin, and the new pin takes the
+# new org. A repo_org change alone (no transfer) leaves the record, so the
+# pin keeps the old org and the precondition below still fails the run. The
+# first run with this trigger replaces each existing pin once, with the same
+# org; on that run the precondition is checked at apply, not at plan.
 resource "terraform_data" "repo_org_pin" {
-  input = local.recorded_repo_org != "" ? local.recorded_repo_org : lower(var.repo_org)
+  input            = local.recorded_repo_org != "" ? local.recorded_repo_org : lower(var.repo_org)
+  triggers_replace = local.recorded_repo_org != "" ? local.recorded_repo_org : null
 
   lifecycle {
     ignore_changes = [input]
@@ -52,14 +62,14 @@ resource "github_repository" "infra" {
     # already keeps its org: git_repo.auto.tfvars.json (below) records it and
     # loads after common.auto.tfvars.json, where Oracle's repo_org lands. This
     # catches the case where that file has no repo_org. GitHub org names are
-    # case-insensitive, so the check is too. To move a project (by hand, with
-    # Terraform against the project's state): transfer its repo on GitHub, set
-    # repo_org and repo_clone_ssh_url in the project's
-    # tf/auto-vars/git_repo.auto.tfvars.json, and apply with
-    # `-replace=terraform_data.repo_org_pin`.
+    # case-insensitive, so the check is too. To move a project, run ui-core's
+    # move-infra-repo command, or by hand: transfer its repo on GitHub, then
+    # set repo_org and repo_clone_ssh_url in the project's
+    # tf/auto-vars/git_repo.auto.tfvars.json (the pin follows; see
+    # repo_org_pin).
     precondition {
       condition     = terraform_data.repo_org_pin.output == lower(var.repo_org)
-      error_message = "repo_org changed from \"${terraform_data.repo_org_pin.output}\" to \"${var.repo_org}\" for an existing project. A project's -infra repo stays in the org it was created in (common-infrastructure#269)."
+      error_message = "repo_org changed from \"${terraform_data.repo_org_pin.output}\" to \"${var.repo_org}\" for an existing project. A project's -infra repo stays in the org it was created in (common-infrastructure#269). To move it, use ui-core's jobs move-infra-repo (ui-infrastructure#442)."
     }
   }
 }
