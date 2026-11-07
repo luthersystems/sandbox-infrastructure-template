@@ -14,23 +14,19 @@ locals {
 # common-infrastructure#269.
 #
 # A move to another org (ui-core's move-infra-repo command,
-# ui-infrastructure#442) transfers the repo, records the new org and clone
-# URL in git_repo.auto.tfvars.json, and sets infra_repo_moved_to_org to the
-# new org. The change of triggers_replace replaces the pin, and the new pin
-# takes the new org from the recorded clone URL. The variable is null for
-# every project that never moved, as triggers_replace is in its state, so
-# those runs plan no change.
+# ui-infrastructure#442) transfers the repo and records the new org and clone
+# URL in git_repo.auto.tfvars.json. triggers_replace follows the recorded
+# clone URL's org, so that change replaces the pin, and the new pin takes the
+# new org. A repo_org change alone (no transfer) leaves the record, so the
+# pin keeps the old org and the precondition below still fails the run. The
+# first run with this trigger replaces each existing pin once, with the same
+# org; on that run the precondition is checked at apply, not at plan.
 resource "terraform_data" "repo_org_pin" {
   input            = local.recorded_repo_org != "" ? local.recorded_repo_org : lower(var.repo_org)
-  triggers_replace = var.infra_repo_moved_to_org == null ? null : lower(var.infra_repo_moved_to_org)
+  triggers_replace = local.recorded_repo_org != "" ? local.recorded_repo_org : null
 
   lifecycle {
     ignore_changes = [input]
-
-    precondition {
-      condition     = var.infra_repo_moved_to_org == null ? true : lower(var.infra_repo_moved_to_org) == lower(var.repo_org)
-      error_message = "infra_repo_moved_to_org is \"${var.infra_repo_moved_to_org == null ? "" : var.infra_repo_moved_to_org}\", but repo_org is \"${var.repo_org}\": a moved project's repo_org must be the org it moved to."
-    }
   }
 }
 
@@ -67,13 +63,13 @@ resource "github_repository" "infra" {
     # loads after common.auto.tfvars.json, where Oracle's repo_org lands. This
     # catches the case where that file has no repo_org. GitHub org names are
     # case-insensitive, so the check is too. To move a project, run ui-core's
-    # move-infra-repo command (see repo_org_pin), or by hand: transfer its
-    # repo on GitHub, set repo_org and repo_clone_ssh_url in the project's
-    # tf/auto-vars/git_repo.auto.tfvars.json, and apply with
-    # `-replace=terraform_data.repo_org_pin`.
+    # move-infra-repo command, or by hand: transfer its repo on GitHub, then
+    # set repo_org and repo_clone_ssh_url in the project's
+    # tf/auto-vars/git_repo.auto.tfvars.json (the pin follows; see
+    # repo_org_pin).
     precondition {
       condition     = terraform_data.repo_org_pin.output == lower(var.repo_org)
-      error_message = "repo_org changed from \"${terraform_data.repo_org_pin.output}\" to \"${var.repo_org}\" for an existing project. A project's -infra repo stays in the org it was created in (common-infrastructure#269)."
+      error_message = "repo_org changed from \"${terraform_data.repo_org_pin.output}\" to \"${var.repo_org}\" for an existing project. A project's -infra repo stays in the org it was created in (common-infrastructure#269). To move it, use ui-core's jobs move-infra-repo (ui-infrastructure#442)."
     }
   }
 }

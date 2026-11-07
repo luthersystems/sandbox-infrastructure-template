@@ -21,9 +21,10 @@ set -euo pipefail
 #      URL, so the run that adds the pin is guarded too;
 #   7. with adopt_infra_repo, the import block is valid and the runs plan
 #      and apply; its shape (target, id, condition) is checked by pattern;
-#   8. infra_repo_moved_to_org (ui-core's move-infra-repo, #442) re-pins a
-#      moved project to its new org, keeps it on later runs, and fails when
-#      it differs from repo_org.
+#   8. a move (ui-core's move-infra-repo, #442: the recorded clone URL and
+#      repo_org name the new org) re-pins the project without -replace, keeps
+#      it on later runs, and a repo_org that differs from the recorded org
+#      still fails.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -232,8 +233,8 @@ run "adopted_repo_in_state_is_kept" {
 EOF
 
 # ui-core's move-infra-repo (ui-infrastructure#442) transfers a project's
-# repo to another org, records the new org and clone URL, and sets
-# infra_repo_moved_to_org. The pin must follow without -replace.
+# repo to another org and records the new org and clone URL. The pin must
+# follow without -replace.
 cat >"$work/tests/move.tftest.hcl" <<'EOF2'
 mock_provider "github" {}
 mock_provider "local" {}
@@ -274,25 +275,23 @@ run "not_moved_keeps_pin" {
   }
 }
 
-run "moved_var_other_than_repo_org_fails" {
+run "repo_org_change_without_move_fails" {
   command = plan
 
   variables {
-    repo_org                = "luthersystems"
-    repo_clone_ssh_url      = "git@github.com:luthersystems/abcd1234-infra.git"
-    infra_repo_moved_to_org = "luthersystems-infra"
+    repo_org           = "luthersystems-infra"
+    repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
   }
 
-  expect_failures = [terraform_data.repo_org_pin]
+  expect_failures = [github_repository.infra]
 }
 
 run "move_repins_to_new_org" {
   command = apply
 
   variables {
-    repo_org                = "luthersystems-infra"
-    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
-    infra_repo_moved_to_org = "Luthersystems-Infra"
+    repo_org           = "Luthersystems-Infra"
+    repo_clone_ssh_url = "git@github.com:luthersystems-infra/abcd1234-infra.git"
   }
 
   assert {
@@ -305,9 +304,8 @@ run "moved_project_later_run_passes" {
   command = apply
 
   variables {
-    repo_org                = "luthersystems-infra"
-    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
-    infra_repo_moved_to_org = "luthersystems-infra"
+    repo_org           = "luthersystems-infra"
+    repo_clone_ssh_url = "git@github.com:luthersystems-infra/abcd1234-infra.git"
   }
 
   assert {
@@ -320,12 +318,11 @@ run "moved_project_back_to_old_org_fails" {
   command = plan
 
   variables {
-    repo_org                = "luthersystems"
-    repo_clone_ssh_url      = "git@github.com:luthersystems-infra/abcd1234-infra.git"
-    infra_repo_moved_to_org = "luthersystems-infra"
+    repo_org           = "luthersystems"
+    repo_clone_ssh_url = "git@github.com:luthersystems-infra/abcd1234-infra.git"
   }
 
-  expect_failures = [terraform_data.repo_org_pin]
+  expect_failures = [github_repository.infra]
 }
 EOF2
 
