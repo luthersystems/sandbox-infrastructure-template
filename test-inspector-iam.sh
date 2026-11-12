@@ -10,6 +10,7 @@ SHORT_PROJECT_ID="${2:-}"
 if [[ -z "$GCP_PROJECT_ID" || -z "$SHORT_PROJECT_ID" ]]; then
   echo "Usage: $0 <gcp_project_id> <short_project_id> [<inspector_wif_principal_set>]"
   echo "Example: $0 my-project-123 abc"
+  echo "Example: $0 my-project-123 abc principalSet://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/<role ARN>"
   exit 1
 fi
 
@@ -68,7 +69,7 @@ TOKEN_CREATORS="$(gcloud iam service-accounts get-iam-policy "$INSPECTOR_SA" \
 if grep -q "^serviceAccount:" <<<"$TOKEN_CREATORS"; then
   echo "   ✓ Token creator binding exists (deployment service account)"
 else
-  echo "   ✗ Token creator binding missing"
+  echo "   ✗ Token creator binding missing (deployment service account)"
   MISSING_ROLES+=("roles/iam.serviceAccountTokenCreator (on SA)")
 fi
 if [[ -n "$EXPECTED_WIF" ]]; then

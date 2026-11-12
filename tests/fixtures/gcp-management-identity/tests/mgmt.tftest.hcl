@@ -151,7 +151,7 @@ run "inspector_wif_on" {
   command = apply
 
   variables {
-    inspector_wif_principal_set = "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-argo-role-terraform0"
+    inspector_wif_principal_set = "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-main-role-umbrella-oracle0"
   }
 
   assert {
@@ -165,7 +165,7 @@ run "inspector_wif_on" {
   }
 
   assert {
-    condition     = google_service_account_iam_member.inspector_wif_token_creator[0].member == "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-argo-role-terraform0"
+    condition     = google_service_account_iam_member.inspector_wif_token_creator[0].member == "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-main-role-umbrella-oracle0"
     error_message = "inspector WIF grant does not go to inspector_wif_principal_set"
   }
 
@@ -197,6 +197,17 @@ run "inspector_wif_rejects_other_members" {
 
   variables {
     inspector_wif_principal_set = "serviceAccount:someone@cust-proj.iam.gserviceaccount.com"
+  }
+
+  expect_failures = [var.inspector_wif_principal_set]
+}
+
+# A principalSet:// URI that does not name a workload identity pool.
+run "inspector_wif_rejects_non_pool_principal_set" {
+  command = plan
+
+  variables {
+    inspector_wif_principal_set = "principalSet://iam.googleapis.com/projects/123/locations/global/workforcePools/x/*"
   }
 
   expect_failures = [var.inspector_wif_principal_set]

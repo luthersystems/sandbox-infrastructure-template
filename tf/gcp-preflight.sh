@@ -75,6 +75,15 @@
 #   service-account key path: $GOOGLE_APPLICATION_CREDENTIALS
 set -uo pipefail
 
+# Not checked here: the org policy constraint iam.allowedPolicyMemberDomains
+# (domain-restricted sharing). With inspector_wif_principal_set set,
+# cloud-provision grants a principalSet:// member from the InsideOut identity
+# pool, which is outside the customer's organization. If the customer's
+# organization enforces that constraint without an exception for this pool,
+# the apply of google_service_account_iam_member.inspector_wif_token_creator
+# fails with a precondition error (ui-core#157). The customer must allow the
+# member, or leave the variable empty and keep the stored-key path.
+
 # ----------------------------------------------------------------------------
 # Required bootstrap permissions — mirror of reliable
 # bootstrap_permissions.go::bootstrapGCPIAMPermissions(). Grounded in

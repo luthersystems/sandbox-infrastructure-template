@@ -73,12 +73,9 @@ if [[ ${#sa_iam_resources[@]} -lt 10 ]]; then
 fi
 # Grants that a variable turns on and off. They are IAM members only (the
 # service account they sit on keeps prevent_destroy), so removing one is safe.
-REMOVABLE_GRANTS=(inspector_wif_token_creator)
-for want in "${REMOVABLE_GRANTS[@]}"; do
-  if ! printf '%s\n' "${sa_iam_resources[@]}" | grep -q " ${want}\$"; then
-    fail "removable grant $want is missing"
-  fi
-done
+# Each entry is "type name", so only that exact resource is exempt.
+REMOVABLE_GRANTS=("google_service_account_iam_member inspector_wif_token_creator")
+removable_seen=0
 for entry in "${sa_iam_resources[@]}"; do
   type="${entry%% *}"
   rname="${entry##* }"
@@ -89,9 +86,10 @@ for entry in "${sa_iam_resources[@]}"; do
   ' "$SRC")"
   if [[ -z "$block" ]]; then
     fail "resource $type.$rname block not found"
-  elif [[ " ${REMOVABLE_GRANTS[*]} " == *" $rname "* ]]; then
+  elif printf '%s\n' "${REMOVABLE_GRANTS[@]}" | grep -qxF "$entry"; then
     # A removable grant must not carry prevent_destroy, or clearing its
     # variable would fail the plan. It must be optional (count).
+    removable_seen=$((removable_seen + 1))
     if grep -Eq '^[[:space:]]*prevent_destroy[[:space:]]*=[[:space:]]*true' <<<"$block"; then
       fail "removable grant $type.$rname has prevent_destroy"
     elif ! grep -Eq '^[[:space:]]*count[[:space:]]*=' <<<"$block"; then
@@ -105,6 +103,9 @@ for entry in "${sa_iam_resources[@]}"; do
     fail "resource $type.$rname has no prevent_destroy"
   fi
 done
+if [[ $removable_seen -ne ${#REMOVABLE_GRANTS[@]} ]]; then
+  fail "found $removable_seen of ${#REMOVABLE_GRANTS[@]} removable grants (${REMOVABLE_GRANTS[*]})"
+fi
 for want in insideout_management management_owner management_token_creator; do
   if ! printf '%s\n' "${sa_iam_resources[@]}" | grep -q " ${want}\$"; then
     fail "management resource $want is missing"

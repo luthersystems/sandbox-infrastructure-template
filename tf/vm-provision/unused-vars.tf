@@ -70,3 +70,8 @@ variable "repo_clone_ssh_url" {
   type    = string
   default = ""
 }
+
+variable "inspector_wif_principal_set" {
+  type    = string
+  default = ""
+}

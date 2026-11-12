@@ -175,9 +175,13 @@ variable "inspector_wif_principal_set" {
   description = "Workload identity principal set that may impersonate the GCP inspector service account (empty: none)"
   type        = string
   default     = ""
+  nullable    = false
 
   validation {
-    condition     = var.inspector_wif_principal_set == "" || startswith(var.inspector_wif_principal_set, "principalSet://iam.googleapis.com/")
-    error_message = "inspector_wif_principal_set must be empty or start with principalSet://iam.googleapis.com/."
+    # A principal set of a workload identity pool: the pool's resource path,
+    # then the attribute selector (for the platform pools,
+    # attribute.aws_role/<assumed-role ARN>).
+    condition     = var.inspector_wif_principal_set == "" || can(regex("^principalSet://iam\\.googleapis\\.com/projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]{4,32}/[^[:space:]]+$", var.inspector_wif_principal_set))
+    error_message = "inspector_wif_principal_set must be empty or a workload identity pool principal set: principalSet://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/<attribute>."
   }
 }
