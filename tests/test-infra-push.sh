@@ -603,6 +603,80 @@ else
   fail "J: expected a skipped clone. Output: $outJ3"
 fi
 
+# =============================================================================
+echo ""
+echo "=== Case K: #160 — a TRACKED credentials file is untracked, not pushed ==="
+# =============================================================================
+# The real leak: the template tracked tf/auto-vars/common.auto.tfvars.json as a
+# `{}` seed. .gitignore does not stop git from committing a file it already
+# tracks, so after ui-core wrote cloud credentials into it, `git add -A`
+# committed them and the push sent them to the -infra repo. Case G passes even
+# with that bug, because its fixture never tracks the file. Here the -infra repo
+# already tracks the seed (as every repo built from the old template does), and
+# the deploy writes a fake key into it.
+PROJ="$(make_project projK)"
+BARE="$(fresh_bare)"
+init_project_git "$PROJ"
+echo '{}' > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
+git -C "$PROJ" add -f tf/auto-vars/common.auto.tfvars.json
+git -C "$PROJ" commit -q -m "old template: seed tracked"
+git -C "$PROJ" push -q "file://$BARE" main
+# Deploy time: credentials and the repo URL land in the tracked file.
+jq -n --arg url "file://$BARE" \
+  '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-K"}' \
+  > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
+
+set +e
+outK="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcK=$?
+set -e
+
+[[ "$rcK" -eq 0 ]] && pass "K: apply exits 0" || fail "K: expected exit 0, got $rcK. Output: $outK"
+
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
+  pass "K: the deploy pushed the stack (the next checks are not vacuous)"
+else
+  fail "K: expected shell_utils.sh in the pushed tree. Output: $outK"
+fi
+if echo "$pushed_tree" | grep -qx "tf/auto-vars/common.auto.tfvars.json"; then
+  fail "K: the tracked common.auto.tfvars.json is still in the pushed tree (#160 leak)"
+else
+  pass "K: common.auto.tfvars.json is no longer in the -infra repo tree"
+fi
+# Capture first: `git log | grep -q` under pipefail reads as "no match" when
+# grep exits early and git dies of SIGPIPE.
+pushed_history="$(git -C "$BARE" log -p --all)"
+if grep -qF "FAKE-SECRET-K" <<<"$pushed_history"; then
+  fail "K: the deploy-time secret reached the -infra repo history (#160 leak)"
+else
+  pass "K: the deploy-time secret is in no pushed commit"
+fi
+if grep -qF "FAKE-SECRET-K" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
+  pass "K: the file stays on disk for later steps (only the git tracking goes)"
+else
+  fail "K: the credentials file was removed from disk"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case L: the template tracks no file that its .gitignore ignores ==="
+# =============================================================================
+# Guards the whole class behind Case K: a tracked file that .gitignore ignores
+# is committed anyway by `git add -A` in every project tree cloned from this
+# repo. Fix a hit with `git rm --cached <path>`, or add a `!` carve-out to
+# .gitignore if the file is meant to be tracked.
+if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  tracked_ignored="$(git -C "$REPO_ROOT" ls-files --cached --ignored --exclude-per-directory=.gitignore)"
+  if [[ -z "$tracked_ignored" ]]; then
+    pass "L: no tracked file is ignored"
+  else
+    fail "L: tracked files that .gitignore ignores (they reach -infra repos): $tracked_ignored"
+  fi
+else
+  echo "  SKIP: L: $REPO_ROOT is not a git checkout"
+fi
+
 # --- Summary -----------------------------------------------------------------
 echo ""
 echo "================================"

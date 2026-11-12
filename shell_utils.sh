@@ -305,6 +305,53 @@ configure_git() {
   popd >/dev/null
 }
 
+# untrackIgnoredFiles stages the removal from git of every tracked file that
+# the repo's .gitignore files ignore. The files stay on disk. gitCommit calls it
+# just before `git add -A`, so the removal goes into that same commit.
+#
+# Why it exists (sandbox-infrastructure-template#160): .gitignore only stops
+# git from ADDING an untracked file. A file that is already tracked stays
+# tracked, and `git add -A` commits each new version of it. The template once
+# tracked tf/auto-vars/common.auto.tfvars.json as a `{}` seed, so every project
+# tree cloned from it (and every -infra repo built from that tree) still tracks
+# the file. At deploy time ui-core writes the cloud credentials into it, and
+# gitCommit committed them and gitPushInfra pushed them to the -infra repo.
+#
+# Why all ignored files and not one name: .gitignore is the one list of what
+# must not reach an -infra repo. Untracking every tracked file it matches makes
+# that list true for files committed before a rule was added (for example
+# outputs/ from before #160), with no second list to keep in step.
+#
+# Why only the repo's .gitignore files: --exclude-per-directory reads them and
+# not core.excludesFile or .git/info/exclude, so a developer's global ignore
+# (such as .idea/) never untracks a repo file from commit.sh.
+#
+# Why only in gitCommit and not before the merges: a commit of the removal
+# before `git merge infra/main` turns an infra/main edit of the same file into a
+# modify/delete conflict, and git then writes infra's old copy over the current
+# credentials on disk. Left alone, the merges behave as before.
+#
+# Non-fatal: it warns and returns 0, so a git problem never fails a deploy that
+# already applied. The old versions stay in the -infra repo history; this
+# function does not rewrite history.
+untrackIgnoredFiles() {
+  local files
+  files="$(git ls-files --cached --ignored --exclude-per-directory=.gitignore)"
+  if [[ -z "$files" ]]; then
+    return 0
+  fi
+
+  echo "🔒 [git-infra] Untracking file(s) that .gitignore ignores (#160):" >&2
+  sed 's/^/    /' <<<"$files" >&2
+  # -z with xargs keeps odd names intact and splits a long list. Literal
+  # pathspecs, so a name with * or [ ] untracks only itself.
+  if ! git ls-files -z --cached --ignored --exclude-per-directory=.gitignore |
+    xargs -0 -r git --literal-pathspecs rm --cached --quiet --ignore-unmatch --; then
+    echo "⚠️  [git-infra] WARNING: git rm --cached failed; ignored files may still be committed. [sandbox-infrastructure-template#160]" >&2
+  fi
+  return 0
+}
+
 gitCommit() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
@@ -315,6 +362,9 @@ gitCommit() {
   fi
 
   msg="${1:-auto-commit: infrastructure changes [ci skip]}"
+  # Before `git add -A`: add -A commits new versions of TRACKED files even when
+  # .gitignore matches them. #160
+  untrackIgnoredFiles
   git add -A
 
   if git diff --cached --quiet; then

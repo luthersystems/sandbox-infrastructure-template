@@ -1,4 +1,9 @@
-secrets/
+# secrets/ holds deploy keys and credential drops. `secrets/*` and not
+# `secrets/` so the tracked README can be re-included: untrackIgnoredFiles
+# (shell_utils.sh) untracks every tracked file that this file ignores, and
+# without the carve-out it would drop the README from every -infra repo. #160
+secrets/*
+!secrets/README.md
 .tmp/
 .template_version
 tf/auto-vars/skip_remote_state.auto.tfvars.json
@@ -46,10 +51,12 @@ tf/*/*-resources.tf
 # credentials, and terraform outputs OUT of the per-project -infra repo.
 #
 # persistInfraRepo() (shell_utils.sh) runs `git add -A` against the -infra
-# clone after every custom-stack apply; `git add -A` honors .gitignore, so
-# anything matched here is never committed/pushed to the customer's -infra
-# GitHub repo. Every pipeline read of these files is on-disk (getTfVar /
-# terraform auto-load), so excluding them from git is zero-deployment-risk.
+# clone after every custom-stack apply. `git add -A` skips an UNTRACKED file
+# matched here, but it still commits new versions of a TRACKED one, so
+# gitCommit first untracks every tracked file matched here
+# (untrackIgnoredFiles). Every pipeline read of these files is on-disk
+# (getTfVar / terraform auto-load), so excluding them from git is
+# zero-deployment-risk.
 # ===========================================================================
 
 # tf/auto-vars/ holds the deploy-time common.auto.tfvars.json (cloud
@@ -67,9 +74,12 @@ tf/auto-vars/*
 # injects them), so keep them tracked rather than weakening the pattern. #160
 # NOTE: tf/auto-vars/common.auto.tfvars.json is deliberately NOT carved out —
 # it is the exact credentials/archive blob #160 exists to exclude, so
-# re-including it would reintroduce the leak. It stays tracked in THIS repo as a
-# harmless `{}` seed (gitignore never untracks) but is excluded from the -infra
-# push.
+# re-including it would reintroduce the leak. This repo once tracked it as a
+# `{}` seed. That was the leak: .gitignore does not stop git from committing a
+# file it already tracks, so `git add -A` pushed the credentials to -infra
+# repos. The template no longer tracks it, and untrackIgnoredFiles
+# (shell_utils.sh) untracks it in project trees and -infra repos that still do.
+# tests/test-infra-push.sh fails if this repo tracks any file it ignores.
 !tf/auto-vars/vars/
 !tf/auto-vars/vars/**
 
