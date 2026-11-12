@@ -27,11 +27,16 @@ set -euo pipefail
 #      tokens for the management account, also when the steady-state
 #      gcp_impersonate_service_account variable is set;
 #   4. the outputs return the management account's email and ID;
-#   5. the inspector account keeps roles/viewer and is not the management one.
+#   5. the inspector account keeps roles/viewer and is not the management one;
+#   6. inspector_wif_principal_set (ui-core#157): empty grants nothing; a
+#      principal set gets roles/iam.serviceAccountTokenCreator on the
+#      inspector, and the deployment identity keeps its grant (the stored-key
+#      fallback); a value that is not a principalSet:// URI fails validation.
 # A static check also confirms prevent_destroy stays on each service account
 # and IAM resource in the file: GCP soft-deletes service accounts for 30 days,
 # so a delete-then-create would fail and leave the project without its durable
-# identity (issues #104, #106).
+# identity (issues #104, #106). The one exception is the WIF grant, which must
+# stay removable: the check confirms it has a count and no prevent_destroy.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -61,11 +66,19 @@ trap 'rm -rf "$work"' EXIT
 mapfile -t sa_iam_resources < <(sed -nE \
   's/^resource "(google_service_account|google_project_iam_member|google_service_account_iam_member)" "([A-Za-z0-9_-]+)" \{.*/\1 \2/p' \
   "$SRC")
-# 9 such resources exist today (inspector and management). Fewer means the
+# 10 such resources exist today (inspector and management). Fewer means the
 # pattern stopped matching, not that the resources went away.
-if [[ ${#sa_iam_resources[@]} -lt 9 ]]; then
-  fail "found only ${#sa_iam_resources[@]} service account / IAM resources; expected at least 9"
+if [[ ${#sa_iam_resources[@]} -lt 10 ]]; then
+  fail "found only ${#sa_iam_resources[@]} service account / IAM resources; expected at least 10"
 fi
+# Grants that a variable turns on and off. They are IAM members only (the
+# service account they sit on keeps prevent_destroy), so removing one is safe.
+REMOVABLE_GRANTS=(inspector_wif_token_creator)
+for want in "${REMOVABLE_GRANTS[@]}"; do
+  if ! printf '%s\n' "${sa_iam_resources[@]}" | grep -q " ${want}\$"; then
+    fail "removable grant $want is missing"
+  fi
+done
 for entry in "${sa_iam_resources[@]}"; do
   type="${entry%% *}"
   rname="${entry##* }"
@@ -76,6 +89,16 @@ for entry in "${sa_iam_resources[@]}"; do
   ' "$SRC")"
   if [[ -z "$block" ]]; then
     fail "resource $type.$rname block not found"
+  elif [[ " ${REMOVABLE_GRANTS[*]} " == *" $rname "* ]]; then
+    # A removable grant must not carry prevent_destroy, or clearing its
+    # variable would fail the plan. It must be optional (count).
+    if grep -Eq '^[[:space:]]*prevent_destroy[[:space:]]*=[[:space:]]*true' <<<"$block"; then
+      fail "removable grant $type.$rname has prevent_destroy"
+    elif ! grep -Eq '^[[:space:]]*count[[:space:]]*=' <<<"$block"; then
+      fail "removable grant $type.$rname has no count"
+    else
+      pass "removable grant $type.$rname has a count and no prevent_destroy"
+    fi
   elif grep -Eq '^[[:space:]]*prevent_destroy[[:space:]]*=[[:space:]]*true' <<<"$block"; then
     pass "resource $type.$rname has prevent_destroy"
   else

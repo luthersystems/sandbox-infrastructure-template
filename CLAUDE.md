@@ -25,6 +25,8 @@ Stages share data via `tf/auto-vars/*.json` (auto-loaded tfvars) and Terraform r
 
 `tf/cloud-provision/repo.tf` creates the per-project `<short_project_id>-infra` repo in the GitHub org `repo_org` (default `luthersystems`). `terraform_data.repo_org_pin` keeps the org the repo was created in (for a project that predates the pin, the org of its recorded `repo_clone_ssh_url`), and a precondition fails a later run that sends another org, compared case-insensitively, so a redeploy never creates an empty repo in a new org (common-infrastructure#269). Usually the precondition is a backstop: the `repo_org` that `git_repo.auto.tfvars.json` records sorts after `common.auto.tfvars.json`, so an existing project already keeps its org; the precondition fires when that file has no `repo_org`. To move a project, use ui-core's `jobs move-infra-repo` command (ui-infrastructure#442): it transfers the repo and sets `repo_org` and `repo_clone_ssh_url` in the project's `tf/auto-vars/git_repo.auto.tfvars.json` (and `repo_org` in its stored tfvars). The pin's `triggers_replace` follows the recorded clone URL's org, so the next cloud-provision run re-pins it; a `repo_org` change without a new recorded URL still fails. By hand: transfer the repo and make the same file changes. `tests/test-repo-org-pin.sh` pins this.
 
+On GCP, `tf/cloud-provision/gcp-resources.tf.tmpl` creates the read-only inspector service account `insideout-inspector-<short_project_id>` (roles/viewer, storage.objectViewer, secretmanager.viewer, run.viewer). Two identities may mint tokens for it (roles/iam.serviceAccountTokenCreator on the account): the deployment service account (client_email of the uploaded key), which ui-core keeps as a stored-key fallback, and, when ui-core sets `inspector_wif_principal_set` in `tf/auto-vars/common.auto.tfvars.json`, the InsideOut oracle's principal set in the platform workload identity pool (`principalSet://iam.googleapis.com/projects/<n>/locations/global/workloadIdentityPools/insideout-oracle-<env>/attribute.aws_role/<role ARN>`), so the oracle reaches the inspector with no stored key (ui-core#157). That grant has a count and no prevent_destroy: an empty value removes it. `tests/test-gcp-management-identity.sh` pins both.
+
 ### Dual-Cloud Pattern
 
 Cloud selection via `cloud_provider` variable (`"aws"` or `"gcp"`). Resources use conditional `count`:
@@ -79,8 +81,8 @@ bash run-ansible.sh ansible/app.yaml default true 2
 ### Testing
 
 ```bash
-# Validate GCP inspector IAM bindings
-./test-inspector-iam.sh <gcp_project_id> <short_project_id>
+# Validate GCP inspector IAM bindings (pass the principal set to require the WIF binding)
+./test-inspector-iam.sh <gcp_project_id> <short_project_id> [<inspector_wif_principal_set>]
 ```
 
 There is no general test suite. Validation happens through `terraform plan` (dry run), Ansible `--check` mode, and the inspector IAM test script.

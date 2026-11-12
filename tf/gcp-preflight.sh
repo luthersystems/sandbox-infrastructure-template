@@ -81,7 +81,7 @@ set -uo pipefail
 # tf/cloud-provision/gcp-resources.tf.tmpl:
 #   storage.buckets.{create,get,update}      google_storage_bucket.tfstate
 #   iam.serviceAccounts.{create,get}         inspector + management SAs
-#   iam.serviceAccounts.{get,set}IamPolicy   the two SA token-creator bindings
+#   iam.serviceAccounts.{get,set}IamPolicy   the SA token-creator bindings
 #   resourcemanager.projects.get             provider project read
 #   resourcemanager.projects.{get,set}IamPolicy  the five project IAM bindings
 #   iam.roles.{create,update}                least-privilege companion (#147

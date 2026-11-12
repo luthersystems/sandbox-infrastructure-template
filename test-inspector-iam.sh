@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test script to verify GCP inspector service account IAM bindings
-# Usage: ./test-inspector-iam.sh <gcp_project_id> <short_project_id>
+# Usage: ./test-inspector-iam.sh <gcp_project_id> <short_project_id> [<inspector_wif_principal_set>]
 
 set -euo pipefail
 
@@ -8,7 +8,7 @@ GCP_PROJECT_ID="${1:-}"
 SHORT_PROJECT_ID="${2:-}"
 
 if [[ -z "$GCP_PROJECT_ID" || -z "$SHORT_PROJECT_ID" ]]; then
-  echo "Usage: $0 <gcp_project_id> <short_project_id>"
+  echo "Usage: $0 <gcp_project_id> <short_project_id> [<inspector_wif_principal_set>]"
   echo "Example: $0 my-project-123 abc"
   exit 1
 fi
@@ -51,18 +51,38 @@ for role in "${REQUIRED_ROLES[@]}"; do
   fi
 done
 
-# Check token creator binding
+# Check token creator bindings. The deployment service account's binding is
+# required (ui-core's stored-key path). A principalSet:// member is the
+# InsideOut oracle's Workload Identity Federation binding, present only when
+# cloud-provision ran with inspector_wif_principal_set (ui-core#157); it is
+# reported, not required. Pass the expected principal set as $3 (or
+# INSPECTOR_WIF_PRINCIPAL_SET) to require that exact member.
+EXPECTED_WIF="${3:-${INSPECTOR_WIF_PRINCIPAL_SET:-}}"
 echo ""
-echo "3. Checking token creator binding..."
-if gcloud iam service-accounts get-iam-policy "$INSPECTOR_SA" \
+echo "3. Checking token creator bindings..."
+TOKEN_CREATORS="$(gcloud iam service-accounts get-iam-policy "$INSPECTOR_SA" \
   --project="$GCP_PROJECT_ID" \
   --flatten="bindings[].members" \
   --filter="bindings.role:roles/iam.serviceAccountTokenCreator" \
-  --format="value(bindings.members)" | grep -q "serviceAccount:"; then
-  echo "   ✓ Token creator binding exists"
+  --format="value(bindings.members)" || true)"
+if grep -q "^serviceAccount:" <<<"$TOKEN_CREATORS"; then
+  echo "   ✓ Token creator binding exists (deployment service account)"
 else
   echo "   ✗ Token creator binding missing"
   MISSING_ROLES+=("roles/iam.serviceAccountTokenCreator (on SA)")
+fi
+if [[ -n "$EXPECTED_WIF" ]]; then
+  if grep -qxF "$EXPECTED_WIF" <<<"$TOKEN_CREATORS"; then
+    echo "   ✓ Workload Identity Federation binding exists: $EXPECTED_WIF"
+  else
+    echo "   ✗ Workload Identity Federation binding missing: $EXPECTED_WIF"
+    MISSING_ROLES+=("roles/iam.serviceAccountTokenCreator (on SA) for $EXPECTED_WIF")
+  fi
+elif grep -q "^principalSet://" <<<"$TOKEN_CREATORS"; then
+  echo "   ✓ Workload Identity Federation binding exists:"
+  grep "^principalSet://" <<<"$TOKEN_CREATORS" | sed 's/^/     /'
+else
+  echo "   - No Workload Identity Federation binding (inspector_wif_principal_set not set)"
 fi
 
 # Summary
