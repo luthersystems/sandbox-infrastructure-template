@@ -104,7 +104,7 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `tf/drift-refresh.sh` | Refresh-only plan + drift check (standalone) |
 | `tf/apply-with-outputs.sh` | Apply + capture terraform outputs (simple or drift-checked) |
 | `tf/apply-plan.sh` | Apply saved .tfplan file + capture outputs |
-| `tf/auto-vars/common.auto.tfvars.json` | Shared Terraform variables across stages |
+| `tf/auto-vars/common.auto.tfvars.json` | Shared Terraform variables across stages, with the cloud credentials. ui-core writes it at deploy time; git does not track it (#160) |
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
 | `.mars-version` | Pinned Mars CLI version |

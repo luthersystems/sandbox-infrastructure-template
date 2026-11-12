@@ -40,7 +40,7 @@ User asks to apply Terraform changes for a stage.
 
 - Mars CLI must be installed (check `.mars-version`)
 - Cloud credentials must be configured
-- `tf/auto-vars/common.auto.tfvars.json` must exist
+- `tf/auto-vars/common.auto.tfvars.json` must exist. ui-core writes it at deploy time; for a local run, write it yourself. Never commit it: it holds cloud credentials (#160)
 - The `infra` git remote must be configured (for auto-push)
 
 ## Anti-patterns

@@ -37,7 +37,7 @@ User asks to plan, dry-run, or preview Terraform changes for a stage.
 
 - Mars CLI must be installed (check `.mars-version` for required version)
 - Cloud credentials must be configured
-- `tf/auto-vars/common.auto.tfvars.json` must exist with required variables
+- `tf/auto-vars/common.auto.tfvars.json` must exist with required variables. ui-core writes it at deploy time; for a local run, write it yourself. Never commit it: it holds cloud credentials (#160)
 
 ## Anti-patterns
 
