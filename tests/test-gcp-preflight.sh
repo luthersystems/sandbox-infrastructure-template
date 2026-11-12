@@ -122,12 +122,16 @@ fi
 echo ""
 echo "Test 9: required list in script matches the golden set (drift guard)"
 # Cheap cross-check that the script's REQUIRED_PERMISSIONS array has not
-# drifted from the mirrored reliable bootstrapGCPIAMPermissions() set. Extract
-# only whole-line array entries (indented token on its own line) so comment
-# fragments like "storage.buckets.{create,get,update}" cannot pollute the set.
-script_perms="$(grep -E '^[[:space:]]+(iam\.roles|iam\.serviceAccounts|resourcemanager\.projects|storage\.buckets)\.[a-zA-Z]+$' "$PREFLIGHT" \
-  | sed 's/^[[:space:]]*//' \
-  | sort -u)"
+# drifted from the mirrored reliable bootstrapGCPIAMPermissions() set. Read the
+# real array by evaluating the script's REQUIRED_PERMISSIONS=( ... ) block, so a
+# trailing comment or space on an entry cannot hide it from this check.
+script_array="$(sed -n '/^REQUIRED_PERMISSIONS=(/,/^)/p' "$PREFLIGHT")"
+if [[ -z "$script_array" ]]; then
+  fail "could not find the REQUIRED_PERMISSIONS=( ... ) block in $PREFLIGHT"
+fi
+REQUIRED_PERMISSIONS=()
+eval "$script_array"
+script_perms="$(printf '%s\n' "${REQUIRED_PERMISSIONS[@]}" | sort -u)"
 golden_perms="$(jq -r '.[]' <<<"$ALL_PERMS" | sort -u)"
 if [[ "$script_perms" == "$golden_perms" ]]; then
   pass "REQUIRED_PERMISSIONS matches the 10-permission golden set"
@@ -138,26 +142,42 @@ else
 fi
 
 echo ""
-echo "================================"
-echo "  $PASS passed, $FAIL failed"
-echo "================================"
-echo ""
 echo "Test 10: an Owner-only service account -> PASS (exit 0) (reliable#2506)"
-# What testIamPermissions returns at project level for a service account
-# that holds only roles/owner: Owner has storage.buckets.create but not
-# storage.buckets.get or storage.buckets.update at project level (GCS
-# resolves those on the bucket's own policy). Requiring them refused every
-# Owner-only bootstrap, the role this preflight itself tells users to grant.
+# The testIamPermissions answer for a service account that holds only
+# roles/owner: everything in the list, plus Owner's other project-level
+# storage permissions, but not storage.buckets.get or storage.buckets.update
+# (project-level Owner lacks them; GCS resolves them on the bucket's own
+# policy). Requiring them refused every Owner-only bootstrap, the role this
+# preflight tells users to grant.
 resp_owner="$WORKDIR/resp_owner.json"
-echo '{"permissions": ["iam.roles.create","iam.roles.update","iam.serviceAccounts.create","iam.serviceAccounts.get","iam.serviceAccounts.getIamPolicy","iam.serviceAccounts.setIamPolicy","resourcemanager.projects.get","resourcemanager.projects.getIamPolicy","resourcemanager.projects.setIamPolicy","storage.buckets.create"]}' > "$resp_owner"
+jq -c '{permissions: (. + ["storage.buckets.delete","storage.buckets.list"])}' <<<"$ALL_PERMS" > "$resp_owner"
 run_preflight 0 "Owner-only service account passes" \
   "GCP_PREFLIGHT_TEST_RESPONSE_FILE=$resp_owner" "GCP_PREFLIGHT_TEST_HTTP_CODE=200"
 for p in storage.buckets.get storage.buckets.update; do
-  if grep -qxE "[[:space:]]+${p//./\\.}" "$PREFLIGHT"; then
-    fail "REQUIRED_PERMISSIONS must not list $p (roles/owner lacks it at project level)"
+  if printf '%s\n' "${REQUIRED_PERMISSIONS[@]}" | grep -qxF "$p"; then
+    fail "REQUIRED_PERMISSIONS must not list $p (project-level roles/owner lacks it)"
   else
     pass "REQUIRED_PERMISSIONS does not list $p"
   fi
 done
 
+echo ""
+echo "Test 11: cloud-provision still grants roles/owner (the reason Test 10 is safe)"
+# Leaving out storage.buckets.get/update is safe only while the connecting
+# service account must hold Owner: cloud-provision grants roles/owner to the
+# management SA, and GCP permits that only from an Owner. An Owner reaches the
+# tfstate bucket through its projectOwner binding. When #147 replaces that
+# grant with a scoped custom role, a non-Owner SA can get this far, and the
+# preflight must check bucket read and update again (on the bucket). This test
+# fails first so that change cannot ship without it.
+if grep -Pzoq 'resource "google_project_iam_member" "management_owner" \{[^}]*role\s*=\s*"roles/owner"' "$SCRIPT_DIR/tf/cloud-provision/gcp-resources.tf.tmpl"; then
+  pass "management_owner still grants roles/owner"
+else
+  fail "management_owner no longer grants roles/owner: add a bucket read/update check to the preflight (reliable#2506)"
+fi
+
+echo ""
+echo "================================"
+echo "  $PASS passed, $FAIL failed"
+echo "================================"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

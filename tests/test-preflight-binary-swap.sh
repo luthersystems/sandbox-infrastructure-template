@@ -118,7 +118,7 @@ echo "Test G4: test seam set -> legacy path wins even with the binary on PATH (s
 # A denied 200 verdict via the seam: legacy classifier must fail closed, and the
 # binary must NOT be consulted (seam beats binary — tier precedence).
 resp_denied="$WORKDIR/gcp_denied.json"
-echo '{"permissions": ["storage.buckets.get"]}' > "$resp_denied"
+echo '{"permissions": ["storage.buckets.create"]}' > "$resp_denied"
 reset_stub
 OUT="$(PATH="$STUBDIR:$PATH" STUB_ARGS_LOG="$STUB_ARGS_LOG" STUB_EXIT=0 \
   GCP_PREFLIGHT_TEST_RESPONSE_FILE="$resp_denied" GCP_PREFLIGHT_TEST_HTTP_CODE=200 \

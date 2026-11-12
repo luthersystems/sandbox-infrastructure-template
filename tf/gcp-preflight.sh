@@ -95,7 +95,11 @@ set -uo pipefail
 #                                            resolves them on the bucket's own
 #                                            policy). Requiring them refused
 #                                            every Owner-only SA
-#                                            (reliable#2506).
+#                                            (reliable#2506). Safe only while
+#                                            the caller must be Owner (the
+#                                            management_owner grant needs it);
+#                                            tests/test-gcp-preflight.sh
+#                                            Test 11 fails if that grant goes.
 #   iam.serviceAccounts.{create,get}         inspector + management SAs
 #   iam.serviceAccounts.{get,set}IamPolicy   the SA token-creator bindings
 #   resourcemanager.projects.get             provider project read
