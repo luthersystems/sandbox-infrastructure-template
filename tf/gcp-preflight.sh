@@ -88,7 +88,14 @@ set -uo pipefail
 # Required bootstrap permissions — mirror of reliable
 # bootstrap_permissions.go::bootstrapGCPIAMPermissions(). Grounded in
 # tf/cloud-provision/gcp-resources.tf.tmpl:
-#   storage.buckets.{create,get,update}      google_storage_bucket.tfstate
+#   storage.buckets.create                   google_storage_bucket.tfstate.
+#                                            Not get or update: this check is
+#                                            at project level, and project-
+#                                            level roles/owner lacks them (GCS
+#                                            resolves them on the bucket's own
+#                                            policy). Requiring them refused
+#                                            every Owner-only SA
+#                                            (reliable#2506).
 #   iam.serviceAccounts.{create,get}         inspector + management SAs
 #   iam.serviceAccounts.{get,set}IamPolicy   the SA token-creator bindings
 #   resourcemanager.projects.get             provider project read
@@ -117,8 +124,6 @@ REQUIRED_PERMISSIONS=(
   resourcemanager.projects.getIamPolicy
   resourcemanager.projects.setIamPolicy
   storage.buckets.create
-  storage.buckets.get
-  storage.buckets.update
 )
 
 log() { echo "[gcp-preflight] $*"; }
