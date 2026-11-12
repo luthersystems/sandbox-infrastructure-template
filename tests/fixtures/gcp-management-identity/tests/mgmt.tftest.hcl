@@ -133,3 +133,82 @@ run "steady_state_impersonation" {
     error_message = "with impersonation set, output gcp_management_sa_email changed"
   }
 }
+
+# Inspector Workload Identity Federation (ui-core#157). Without
+# inspector_wif_principal_set the stage grants nothing new.
+run "inspector_wif_off" {
+  command = apply
+
+  assert {
+    condition     = length(google_service_account_iam_member.inspector_wif_token_creator) == 0
+    error_message = "with inspector_wif_principal_set empty, the inspector WIF grant must not exist"
+  }
+}
+
+# With it set, the oracle's principal set may mint tokens for the inspector,
+# and the deployment identity keeps its grant (ui-core's stored-key fallback).
+run "inspector_wif_on" {
+  command = apply
+
+  variables {
+    inspector_wif_principal_set = "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-main-role-umbrella-oracle0"
+  }
+
+  assert {
+    condition     = length(google_service_account_iam_member.inspector_wif_token_creator) == 1
+    error_message = "with inspector_wif_principal_set set, the inspector WIF grant is missing"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.inspector_wif_token_creator[0].role == "roles/iam.serviceAccountTokenCreator"
+    error_message = "inspector WIF grant has the wrong role"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.inspector_wif_token_creator[0].member == "principalSet://iam.googleapis.com/projects/331634342407/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/arn:aws:sts::824331038818:assumed-role/plt-or-test-main-role-umbrella-oracle0"
+    error_message = "inspector WIF grant does not go to inspector_wif_principal_set"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.inspector_wif_token_creator[0].service_account_id == google_service_account.insideout_inspector.name
+    error_message = "inspector WIF grant is not on the inspector account"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.inspector_token_creator.member == "serviceAccount:deployer@cust-proj.iam.gserviceaccount.com"
+    error_message = "the deployment identity lost its token-creator grant on the inspector (the stored-key fallback)"
+  }
+}
+
+# Clearing the variable removes the grant again.
+run "inspector_wif_removed" {
+  command = apply
+
+  assert {
+    condition     = length(google_service_account_iam_member.inspector_wif_token_creator) == 0
+    error_message = "clearing inspector_wif_principal_set did not remove the inspector WIF grant"
+  }
+}
+
+# Any other member form (a service account, a user, a principal://) fails
+# validation.
+run "inspector_wif_rejects_other_members" {
+  command = plan
+
+  variables {
+    inspector_wif_principal_set = "serviceAccount:someone@cust-proj.iam.gserviceaccount.com"
+  }
+
+  expect_failures = [var.inspector_wif_principal_set]
+}
+
+# A principalSet:// URI that does not name a workload identity pool.
+run "inspector_wif_rejects_non_pool_principal_set" {
+  command = plan
+
+  variables {
+    inspector_wif_principal_set = "principalSet://iam.googleapis.com/projects/123/locations/global/workforcePools/x/*"
+  }
+
+  expect_failures = [var.inspector_wif_principal_set]
+}

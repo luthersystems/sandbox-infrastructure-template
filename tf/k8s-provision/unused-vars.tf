@@ -105,3 +105,8 @@ variable "repo_org" {
   type    = string
   default = ""
 }
+
+variable "inspector_wif_principal_set" {
+  type    = string
+  default = ""
+}

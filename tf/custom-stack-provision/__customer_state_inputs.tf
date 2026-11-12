@@ -64,6 +64,15 @@ variable "gcp_impersonate_service_account" {
   default     = ""
 }
 
+# Used by cloud-provision only (the inspector's Workload Identity Federation
+# grant, ui-core#157). Declared here because ui-core writes it into
+# common.auto.tfvars.json, which this stage loads too.
+variable "inspector_wif_principal_set" {
+  description = "Not used in this stage; see tf/cloud-provision/vars.tf"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # Custom Stack Variables (passed by workflow, used by prepare-custom-stack)
 # ============================================================================

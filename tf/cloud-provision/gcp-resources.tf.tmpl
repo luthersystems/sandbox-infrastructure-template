@@ -122,6 +122,19 @@ resource "google_service_account_iam_member" "inspector_token_creator" {
   }
 }
 
+# The InsideOut oracle's federated identity (a principal set in the platform
+# workload identity pool, var.inspector_wif_principal_set) may mint tokens for
+# the inspector, so the oracle reaches it with no stored key (ui-core#157).
+# The deployment SA binding above stays: ui-core keeps the stored-key path as
+# a fallback. No prevent_destroy: setting the variable back to "" must remove
+# this grant, and removing an IAM member leaves the service account alone.
+resource "google_service_account_iam_member" "inspector_wif_token_creator" {
+  count              = var.inspector_wif_principal_set == "" ? 0 : 1
+  service_account_id = google_service_account.insideout_inspector.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.inspector_wif_principal_set
+}
+
 resource "google_service_account" "insideout_management" {
   account_id   = local.gcp_management_sa_id
   display_name = "InsideOut Management - ${var.project_id}"

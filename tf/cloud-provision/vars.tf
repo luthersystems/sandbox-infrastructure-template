@@ -163,3 +163,25 @@ variable "gcp_impersonate_service_account" {
   type        = string
   default     = ""
 }
+
+# Set by ui-core in tf/auto-vars/common.auto.tfvars.json (ui-core#157): the
+# InsideOut oracle's federated identity in the platform workload identity pool
+# (insideout-oracle-test or insideout-oracle-prod), for example
+# principalSet://iam.googleapis.com/projects/<pool project number>/locations/global/workloadIdentityPools/insideout-oracle-test/attribute.aws_role/<oracle role ARN>.
+# When set, it may mint tokens for the GCP inspector service account, so the
+# oracle reaches the inspector through Workload Identity Federation with no
+# stored key. Empty grants nothing.
+variable "inspector_wif_principal_set" {
+  description = "Workload identity principal set that may impersonate the GCP inspector service account (empty: none)"
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    # A principal set of a workload identity pool: the pool's resource path,
+    # then the attribute selector (for the platform pools,
+    # attribute.aws_role/<assumed-role ARN>).
+    condition     = var.inspector_wif_principal_set == "" || can(regex("^principalSet://iam\\.googleapis\\.com/projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]{4,32}/[^[:space:]]+$", var.inspector_wif_principal_set))
+    error_message = "inspector_wif_principal_set must be empty or a workload identity pool principal set: principalSet://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/<attribute>."
+  }
+}
