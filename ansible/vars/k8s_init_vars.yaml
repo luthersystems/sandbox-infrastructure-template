@@ -1,5 +1,5 @@
 ---
-k8s_coredns_config_host_rewrites: # TODO: autogenerate
+k8s_coredns_config_host_rewrites: # TODO(luthersystems/sandbox-infrastructure-template#183): autogenerate
   - query: orderer0.luther.systems
     target: fabric-orderer0.fabric-orderer.svc.cluster.local
   - query: orderer1.luther.systems

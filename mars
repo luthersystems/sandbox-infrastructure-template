@@ -58,7 +58,7 @@ DOCKER_WORK_DIR="$DOCKER_PROJECT_PATH$WORK_REL_PATH"
 
 AZ_MOUNTS=''
 if [[ "$MARS_AZ" == "true" ]]; then
-  # TODO: clean up these mount paths to re-use existing helm and ansible mounts
+  # TODO(luthersystems/sandbox-infrastructure-template#185): clean up these mount paths to re-use existing helm and ansible mounts
   AZ_MOUNTS="-v ${PROJECT_PATH}/az-helm-charts:/opt/helm-charts:ro \
   -v /home/ubuntu/.kube:/root/.kube:ro \
   -v ${PROJECT_PATH}/az-fabric-scripts:/opt/fabric-scripts:ro"

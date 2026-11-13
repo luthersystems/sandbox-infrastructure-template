@@ -17,7 +17,7 @@ fi
 
 workspace=$1
 
-tf_workspace=default # TODO make variable
+tf_workspace=default # TODO(luthersystems/sandbox-infrastructure-template#185): make variable
 
 export TF_PLUGIN_CACHE_DIR="$HOME/.tf-plugin-cache"
 mkdir -p "$TF_PLUGIN_CACHE_DIR"
