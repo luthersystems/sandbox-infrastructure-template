@@ -16,7 +16,7 @@ variable "luther_namespaces" {
     "shiroclient-cli",
     "fabric-orderer",
     "fabric-org1",
-    # TODO: dynamically populate org list
+    # TODO(#183): dynamically populate org list
     "fabric-org2",
     "fabric-org3",
     "fabric-org4",
