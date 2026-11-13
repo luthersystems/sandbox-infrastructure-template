@@ -3,9 +3,9 @@ umbrella_release_name: umbrella
 
 umbrella_org_name: luther
 umbrella_fabric_domain: "{{ k8s_fabric_network_domain_root }}"
-umbrella_oracle_app_name: "sandbox" # TODO(#184): replace?
+umbrella_oracle_app_name: "sandbox" # TODO(luthersystems/sandbox-infrastructure-template#184): replace?
 
-umbrella_connectorhub_separate_pvc: true # TODO(#184)
+umbrella_connectorhub_separate_pvc: true # TODO(luthersystems/sandbox-infrastructure-template#184)
 
 umbrella_charts:
   - ingress
@@ -73,5 +73,5 @@ umbrella_values:
       annotations:
         eks.amazonaws.com/role-arn: "{{oracle_service_account_iam_role_arn}}"
     env:
-      # TODO(#184): this will be a different prefix for customer
+      # TODO(luthersystems/sandbox-infrastructure-template#184): this will be a different prefix for customer
       SANDBOX_ORACLE_GATEWAY_ENDPOINT: http://{{umbrella_release_name}}-shiroclient

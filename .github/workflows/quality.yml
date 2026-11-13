@@ -22,6 +22,10 @@ concurrency:
 jobs:
   # The job id must stay "quality": the ruleset requires "quality / result".
   quality:
+    # Every deploy merges this template into the project's <id>-infra repo
+    # and pushes it, workflows included. The guard keeps the gate in the
+    # template repo, so the -infra repos do not run it on every deploy push.
+    if: github.repository == 'luthersystems/sandbox-infrastructure-template'
     permissions:
       contents: read
       issues: read # the work marker gate reads each named issue's state
