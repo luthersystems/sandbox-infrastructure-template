@@ -91,3 +91,11 @@ if ! grep -q "$mock_mars_root/mars-entrypoint:/opt/mars/mars-entrypoint:ro" "$do
   echo "expected MARS_DEV_ENTRYPOINT to mount the Go Mars entrypoint helper" >&2
   exit 1
 fi
+
+# The wrapper starts the container as root (#187): from luthersystems/mars#362
+# on, the image's default user is not root and the entrypoint refuses
+# USER_ID=0 without it.
+if ! grep -qx -- "--user" "$docker_log" || ! grep -A1 -x -- "--user" "$docker_log" | grep -qx "0:0"; then
+  echo "expected the mars wrapper to pass --user 0:0" >&2
+  exit 1
+fi
