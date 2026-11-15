@@ -92,8 +92,12 @@ mkdir -p "$TF_PLUGIN_CACHE_DIR"
 mkdir -p "$ANSIBLE_HYPERLEDGER_DIR"
 mkdir -p "$ANSIBLE_CHARTS_DIR"
 
+# Start the container as root. The mars image's default user is not root
+# from luthersystems/mars#362 on, and its entrypoint refuses USER_ID=0 when
+# the container did not start as root (#187).
 docker run --rm $DOCKER_TERM_VARS \
   --network host \
+  --user 0:0 \
   -e USER_ID=0 \
   -e GROUP_ID=0 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
