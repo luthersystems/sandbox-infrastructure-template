@@ -570,14 +570,41 @@ _selectCloudFiles() {
 
 # GCP credential file path (set by setupGCPCredentials)
 _GCP_CREDENTIALS_FILE=""
+# 1 when setupGCPCredentials exported the scoped AWS session as AWS_* env vars
+# for a keyless deploy, so cleanupGCPCredentials unsets them again.
+_GCP_EXPORTED_AWS_SESSION=0
+# The AWS_* env vars (declare -p) that the export replaced, restored on cleanup.
+_GCP_SAVED_AWS_ENV=""
 
-# setupGCPCredentials decodes the base64-encoded service account key
-# and writes it to a temporary file with secure permissions.
-# Sets GOOGLE_APPLICATION_CREDENTIALS environment variable.
+# _gcpDeployServiceAccount prints gcp_deploy_service_account, empty for a key
+# deploy. A non-empty value makes the deploy keyless (ui-core#153).
+_gcpDeployServiceAccount() {
+  local sa
+  sa=$(getTfVar "gcp_deploy_service_account")
+  [[ "$sa" == "null" ]] && sa=""
+  printf '%s' "$sa"
+}
+
+# setupGCPCredentials decodes gcp_credentials_b64 and writes it to a
+# temporary file with secure permissions. Sets GOOGLE_APPLICATION_CREDENTIALS.
+#
+# Two kinds of credential (ui-core#153):
+#   - A key deploy: a service_account key. gcp_deploy_service_account is empty.
+#   - A keyless deploy: gcp_deploy_service_account names the customer's
+#     deploy service account, and the credential is an external_account
+#     credential that impersonates it through the platform's deploy workload
+#     identity pool. It holds no key: Google's client libraries sign an AWS
+#     GetCallerIdentity request with the pod's scoped AWS session and trade it
+#     at Google STS. They read that session only from AWS_ACCESS_KEY_ID,
+#     AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN and AWS_REGION (or
+#     AWS_DEFAULT_REGION), so the session is exported here from the shared
+#     credentials file ui-core's scope-aws init container wrote
+#     (AWS_SHARED_CREDENTIALS_FILE).
 # Returns: 0 on success, 1 on failure
 setupGCPCredentials() {
-  local creds_b64
+  local creds_b64 deploy_sa cred_type
   creds_b64=$(getTfVar "gcp_credentials_b64")
+  deploy_sa=$(_gcpDeployServiceAccount)
 
   if [[ -z "$creds_b64" || "$creds_b64" == "null" ]]; then
     echo_error "ERROR: gcp_credentials_b64 not found in tfvars"
@@ -595,11 +622,20 @@ setupGCPCredentials() {
     return 1
   fi
 
-  # Validate it's valid JSON with required fields
-  if ! jq -e '.type == "service_account"' "$_GCP_CREDENTIALS_FILE" >/dev/null 2>&1; then
-    echo_error "ERROR: Invalid service account key format"
-    rm -f "$_GCP_CREDENTIALS_FILE"
-    return 1
+  cred_type=$(jq -r '.type // ""' "$_GCP_CREDENTIALS_FILE" 2>/dev/null || echo "")
+  if [[ -z "$deploy_sa" ]]; then
+    if [[ "$cred_type" != "service_account" ]]; then
+      echo_error "ERROR: Invalid service account key format"
+      rm -f "$_GCP_CREDENTIALS_FILE"
+      return 1
+    fi
+  else
+    if ! _checkGCPExternalAccount "$_GCP_CREDENTIALS_FILE" "$deploy_sa" || ! _exportScopedAWSSession; then
+      rm -f "$_GCP_CREDENTIALS_FILE"
+      _GCP_CREDENTIALS_FILE=""
+      return 1
+    fi
+    echo "GCP keyless deploy: impersonating $deploy_sa through workload identity federation"
   fi
 
   export GOOGLE_APPLICATION_CREDENTIALS="$_GCP_CREDENTIALS_FILE"
@@ -607,7 +643,77 @@ setupGCPCredentials() {
   return 0
 }
 
-# cleanupGCPCredentials removes the temporary credential file
+# _checkGCPExternalAccount checks that the credential file is the AWS
+# external_account credential ui-core writes for a keyless deploy, and that it
+# impersonates deploy_sa. A mismatch would make cloud-provision grant token
+# creator to an account the deploy does not run as.
+_checkGCPExternalAccount() {
+  local file="$1" deploy_sa="$2" want_url
+  want_url="https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${deploy_sa}:generateAccessToken"
+  if ! jq -e --arg url "$want_url" '
+      .type == "external_account"
+      and .subject_token_type == "urn:ietf:params:aws:token-type:aws4_request"
+      and (.credential_source.environment_id // "" | startswith("aws"))
+      and .service_account_impersonation_url == $url' "$file" >/dev/null 2>&1; then
+    echo_error "ERROR: gcp_deploy_service_account is set, but gcp_credentials_b64 is not an AWS external_account credential that impersonates ${deploy_sa} [ui-core#153]"
+    return 1
+  fi
+  return 0
+}
+
+# _exportScopedAWSSession exports the pod's scoped AWS session as AWS_* env
+# vars, for the external_account credential of a keyless GCP deploy. It reads
+# the session from the shared credentials file the scope-aws init container
+# wrote (AWS_SHARED_CREDENTIALS_FILE, profile AWS_PROFILE or default), ahead of
+# any key pair already in the env: a nested run can inherit an unrelated one,
+# and Google STS would refuse it with a 403 far from the cause. Only without
+# that file is an env session used. The region comes from AWS_REGION or
+# AWS_DEFAULT_REGION, which Google's AWS source both read.
+_exportScopedAWSSession() {
+  if [[ -z "${AWS_REGION:-}" && -z "${AWS_DEFAULT_REGION:-}" ]]; then
+    echo_error "ERROR: a keyless GCP deploy needs AWS_REGION (the region of the AWS session it signs with) [ui-core#153]"
+    return 1
+  fi
+  if [[ -n "${JUMP_ROLE_ARN:-}" ]]; then
+    echo_error "ERROR: a keyless GCP deploy signs with the scoped AWS session, which JUMP_ROLE_ARN would replace; unset it [ui-core#153]"
+    return 1
+  fi
+  local file="${AWS_SHARED_CREDENTIALS_FILE:-}" profile="${AWS_PROFILE:-default}"
+  if [[ -z "$file" ]]; then
+    if [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+      echo "GCP keyless deploy: signing with the AWS session in the environment"
+      return 0
+    fi
+    echo_error "ERROR: a keyless GCP deploy needs the pod's scoped AWS session, but AWS_SHARED_CREDENTIALS_FILE is unset; it needs scoped terraform credentials [ui-core#153]"
+    return 1
+  fi
+  local session key secret token
+  if [[ ! -r "$file" ]] || ! session=$(env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+      aws configure export-credentials --profile "$profile" --format process 2>/dev/null); then
+    echo_error "ERROR: cannot read the AWS session of profile ${profile} from ${file} [ui-core#153]"
+    return 1
+  fi
+  key=$(jq -r '.AccessKeyId // ""' <<<"$session")
+  secret=$(jq -r '.SecretAccessKey // ""' <<<"$session")
+  token=$(jq -r '.SessionToken // ""' <<<"$session")
+  if [[ -z "$key" || -z "$secret" ]]; then
+    echo_error "ERROR: profile ${profile} in ${file} has no AWS access key [ui-core#153]"
+    return 1
+  fi
+  _GCP_SAVED_AWS_ENV=$(declare -p AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN 2>/dev/null || true)
+  export AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret"
+  if [[ -n "$token" ]]; then
+    export AWS_SESSION_TOKEN="$token"
+  else
+    unset AWS_SESSION_TOKEN
+  fi
+  _GCP_EXPORTED_AWS_SESSION=1
+  echo "GCP keyless deploy: signing with the AWS session of profile ${profile}"
+  return 0
+}
+
+# cleanupGCPCredentials removes the temporary credential file, and the AWS
+# session env vars setupGCPCredentials exported for a keyless deploy.
 cleanupGCPCredentials() {
   if [[ -n "$_GCP_CREDENTIALS_FILE" ]] && [[ -f "$_GCP_CREDENTIALS_FILE" ]]; then
     rm -f "$_GCP_CREDENTIALS_FILE"
@@ -615,6 +721,15 @@ cleanupGCPCredentials() {
   fi
   _GCP_CREDENTIALS_FILE=""
   unset GOOGLE_APPLICATION_CREDENTIALS 2>/dev/null || true
+  if [[ "$_GCP_EXPORTED_AWS_SESSION" == "1" ]]; then
+    # Put back whatever AWS_* the env held before the export.
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN 2>/dev/null || true
+    if [[ -n "$_GCP_SAVED_AWS_ENV" ]]; then
+      eval "${_GCP_SAVED_AWS_ENV//declare /declare -g }"
+    fi
+    _GCP_SAVED_AWS_ENV=""
+    _GCP_EXPORTED_AWS_SESSION=0
+  fi
 }
 
 # ============================================================================
@@ -699,7 +814,15 @@ setupCloudEnv() {
       # creates the orphaned partial state #2243 was about. gcp-preflight.sh
       # fails OPEN on its own infra/transport errors and only fails CLOSED
       # (exit 1) on a definitive verdict.
-      if [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
+      # A keyless deploy (gcp_deploy_service_account, ui-core#153) skips it:
+      # the preflight can mint a token only from a service_account key, and
+      # the oracle already ran the same permission checks as the federated
+      # identity before it started the job.
+      local gcp_deploy_sa
+      gcp_deploy_sa=$(_gcpDeployServiceAccount)
+      if [[ "$(basename "$PWD")" == "cloud-provision" && -n "$gcp_deploy_sa" ]]; then
+        echo "GCP bootstrap preflight: skipped for a keyless deploy (the oracle checked ${gcp_deploy_sa})"
+      elif [[ "$(basename "$PWD")" == "cloud-provision" ]]; then
         if ! bash "$MARS_PROJECT_ROOT/tf/gcp-preflight.sh" "$GOOGLE_PROJECT"; then
           echo_error "ERROR: GCP bootstrap permission preflight failed — aborting before terraform runs. [reliable#2243]"
           return 1

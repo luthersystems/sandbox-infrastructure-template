@@ -73,6 +73,14 @@ variable "inspector_wif_principal_set" {
   default     = ""
 }
 
+# Used by cloud-provision and shell_utils.sh only (keyless GCP deploys,
+# ui-core#153). Declared here for the same reason.
+variable "gcp_deploy_service_account" {
+  description = "Not used in this stage; see tf/cloud-provision/vars.tf"
+  type        = string
+  default     = ""
+}
+
 # ============================================================================
 # Custom Stack Variables (passed by workflow, used by prepare-custom-stack)
 # ============================================================================
