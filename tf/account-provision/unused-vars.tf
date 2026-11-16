@@ -93,3 +93,8 @@ variable "inspector_wif_principal_set" {
   type    = string
   default = ""
 }
+
+variable "gcp_deploy_service_account" {
+  type    = string
+  default = ""
+}

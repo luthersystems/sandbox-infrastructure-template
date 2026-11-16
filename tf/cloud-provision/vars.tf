@@ -158,6 +158,26 @@ variable "gcp_credentials_b64" {
   sensitive   = true
 }
 
+# Set by ui-core for a keyless GCP deploy (ui-core#153): the customer's
+# deploy service account. gcp_credentials_b64 is then an external_account
+# credential that impersonates it through the platform's deploy workload
+# identity pool, and has no client_email to read. Empty for a key deploy.
+variable "gcp_deploy_service_account" {
+  # A project first deployed with a key keeps its token-creator grants only
+  # if this names the same account as that key's client_email: the grants
+  # carry prevent_destroy, so a different account fails the plan rather than
+  # replace them.
+  description = "GCP service account a keyless (workload identity) deploy impersonates; empty for a key deploy"
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = var.gcp_deploy_service_account == "" || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", var.gcp_deploy_service_account))
+    error_message = "gcp_deploy_service_account must be a user-managed service account email (<name>@<project>.iam.gserviceaccount.com), or empty."
+  }
+}
+
 variable "gcp_impersonate_service_account" {
   description = "Optional GCP service account email to impersonate for steady-state Terraform operations"
   type        = string

@@ -212,3 +212,50 @@ run "inspector_wif_rejects_non_pool_principal_set" {
 
   expect_failures = [var.inspector_wif_principal_set]
 }
+
+# Keyless deploy (ui-core#153): the uploaded credential is an external_account
+# with no client_email, and gcp_deploy_service_account names the account it
+# impersonates. The grants go to that account.
+run "keyless_deploy" {
+  command = apply
+
+  variables {
+    gcp_credentials_b64        = base64encode(jsonencode({ type = "external_account", service_account_impersonation_url = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/keyless-deployer@cust-proj.iam.gserviceaccount.com:generateAccessToken" }))
+    gcp_deploy_service_account = "keyless-deployer@cust-proj.iam.gserviceaccount.com"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.management_token_creator.member == "serviceAccount:keyless-deployer@cust-proj.iam.gserviceaccount.com"
+    error_message = "on a keyless deploy, the management token-creator grant does not go to gcp_deploy_service_account"
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.inspector_token_creator.member == "serviceAccount:keyless-deployer@cust-proj.iam.gserviceaccount.com"
+    error_message = "on a keyless deploy, the inspector token-creator grant does not go to gcp_deploy_service_account"
+  }
+}
+
+# A value that is not a user-managed service account email fails validation.
+run "keyless_rejects_bad_account" {
+  command = plan
+
+  variables {
+    gcp_deploy_service_account = "principalSet://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/*"
+  }
+
+  expect_failures = [var.gcp_deploy_service_account]
+}
+
+# A JSON null in the tfvars is a key deploy, as the shell reads it.
+run "keyless_null_is_key_deploy" {
+  command = apply
+
+  variables {
+    gcp_deploy_service_account = null
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.management_token_creator.member == "serviceAccount:deployer@cust-proj.iam.gserviceaccount.com"
+    error_message = "a null gcp_deploy_service_account is not treated as a key deploy"
+  }
+}

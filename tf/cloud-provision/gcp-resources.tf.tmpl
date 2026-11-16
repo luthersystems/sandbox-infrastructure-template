@@ -44,8 +44,17 @@ locals {
   gcp_inspector_sa_id  = "insideout-inspector-${var.short_project_id}"
   gcp_management_sa_id = "insideout-mgmt-${var.short_project_id}"
 
-  # Extract deployment SA email from credentials for token creator binding
-  gcp_deployment_sa_email = jsondecode(base64decode(var.gcp_credentials_b64)).client_email
+  # The deployment identity, for the token creator bindings: the service
+  # account a keyless deploy impersonates (ui-core#153), or else the
+  # client_email of the uploaded key. try, not a bare .client_email: HCL
+  # evaluates both results of a conditional, and an external_account
+  # credential has no client_email. A key without one gives null, which
+  # still fails the plan where a binding interpolates it.
+  gcp_deployment_sa_email = (
+    var.gcp_deploy_service_account != ""
+    ? var.gcp_deploy_service_account
+    : try(jsondecode(base64decode(var.gcp_credentials_b64)).client_email, null)
+  )
 
   gcp_inspector_sa_email   = google_service_account.insideout_inspector.email
   gcp_inspector_sa_id_out  = google_service_account.insideout_inspector.account_id

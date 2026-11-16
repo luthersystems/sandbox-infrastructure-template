@@ -31,7 +31,10 @@ set -euo pipefail
 #   6. inspector_wif_principal_set (ui-core#157): empty grants nothing; a
 #      principal set gets roles/iam.serviceAccountTokenCreator on the
 #      inspector, and the deployment identity keeps its grant (the stored-key
-#      fallback); a value that is not a principalSet:// URI fails validation.
+#      fallback); a value that is not a principalSet:// URI fails validation;
+#   7. a keyless deploy (ui-core#153): with gcp_deploy_service_account set and
+#      an external_account credential, both token-creator grants go to that
+#      account; a value that is not a service account email fails validation.
 # A static check also confirms prevent_destroy stays on each service account
 # and IAM resource in the file: GCP soft-deletes service accounts for 30 days,
 # so a delete-then-create would fail and leave the project without its durable
