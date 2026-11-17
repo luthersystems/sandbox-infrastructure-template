@@ -1420,15 +1420,16 @@ git -C "$PROJ" add -A
 git -C "$PROJ" update-index --chmod=+x tf/apply.sh data.json
 git -C "$PROJ" commit -q -m "project: apply.sh 100755"
 git -C "$PROJ" remote add infra "file://$BARE"
-/bin/chmod 0777 "$PROJ/tf/apply.sh" "$PROJ/data.tf"
+echo '{}' > "$PROJ/new.json"
+/bin/chmod 0777 "$PROJ/tf/apply.sh" "$PROJ/data.tf" "$PROJ/new.json"
 outT4="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
 modeT4() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
 if [[ "$(modeT4 tf/apply.sh)" == "100755" && "$(modeT4 data.tf)" == "100644" &&
-  "$(modeT4 data.json)" == "100644" ]] &&
+  "$(modeT4 data.json)" == "100755" && "$(modeT4 new.json)" == "100644" ]] &&
   [[ "$(git -C "$PROJ" rev-parse HEAD^)" == "$(git -C "$BARE" rev-parse main)" ]]; then
-  pass "T: the snapshot carries the project's 100755 over infra/main's 100644; a 0777 .tf stays 100644"
+  pass "T: the snapshot carries the project index's 100755 (script or data); 0777 data from disk stays 100644"
 else
-  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf) data.json=$(modeT4 data.json). Output: $outT4"
+  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf) data.json=$(modeT4 data.json) new.json=$(modeT4 new.json). Output: $outT4"
 fi
 
 # A stopped rebase (no unmerged entries) also blocks the snapshot.
@@ -1446,11 +1447,48 @@ git -C "$PROJ" remote add infra "file://$BARE"
 GIT_SEQUENCE_EDITOR="sed -i 1s/^pick/edit/" git -C "$PROJ" rebase -q -i HEAD~1 >/dev/null 2>&1 || true
 headT5="$(git -C "$PROJ" rev-parse HEAD)"
 outT5="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ -d "$PROJ/.git/rebase-merge" ]] && [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] &&
+if [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] &&
   [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]] && [[ -d "$PROJ/.git/rebase-merge" ]]; then
   pass "T: gitSnapshotCommit refuses during a rebase"
 else
   fail "T: snapshot during a rebase: $outT5"
+fi
+echo "edit" > "$PROJ/edit.txt"
+outT5c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
+if [[ "$(tail -1 <<<"$outT5c")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]]; then
+  pass "T: gitCommit refuses during a rebase"
+else
+  fail "T: gitCommit during a rebase: $outT5c"
+fi
+
+# A paused multi-pick whose current pick was dropped leaves only sequencer/;
+# both commit paths refuse it.
+PROJ="$(make_project projT8)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+echo base > "$PROJ/pick.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+git -C "$PROJ" push -q "file://$BARE" main
+git -C "$PROJ" remote add infra "file://$BARE"
+git -C "$PROJ" checkout -q -b side
+echo side1 > "$PROJ/pick.txt"; git -C "$PROJ" commit -q -am side1
+echo side2 > "$PROJ/side2.txt"; git -C "$PROJ" add -A; git -C "$PROJ" commit -q -m side2
+git -C "$PROJ" checkout -q main
+echo main1 > "$PROJ/pick.txt"; git -C "$PROJ" commit -q -am main1
+git -C "$PROJ" cherry-pick side~1 side >/dev/null 2>&1 || true
+rm -f "$PROJ/.git/CHERRY_PICK_HEAD"
+git -C "$PROJ" reset -q --hard
+headT8="$(git -C "$PROJ" rev-parse HEAD)"
+echo "edit" > "$PROJ/edit.txt"
+outT8c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
+outT8s="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+if [[ -d "$PROJ/.git/sequencer" ]] && [[ "$(tail -1 <<<"$outT8c")" == "rc=1" ]] &&
+  [[ "$(tail -1 <<<"$outT8s")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT8" ]]; then
+  pass "T: a paused multi-pick (sequencer/) blocks gitCommit and the snapshot"
+else
+  fail "T: paused multi-pick: commit: $outT8c / snapshot: $outT8s"
 fi
 
 # destroy.sh: the destroy worked but the commit did not -> exit 3 and say so.
@@ -1461,11 +1499,85 @@ set +e
 outT6="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
 rcT6=$?
 set -e
-if [[ "$rcT6" -eq 3 ]] && grep -q "destroy --approve" "$CMD_LOG" &&
+if [[ "$rcT6" -eq 75 ]] && grep -q "destroy --approve" "$CMD_LOG" &&
   grep -qi "destroyed" <<<"$outT6" && grep -q "commit.sh" <<<"$outT6"; then
-  pass "T: destroy.sh exits 3 with a clear message when the commit fails after the destroy"
+  pass "T: destroy.sh exits 75 with a clear message when the commit is refused after the destroy"
 else
   fail "T: destroy.sh after a failed commit: rc=$rcT6. Output: $outT6"
+fi
+
+# A failing pre-commit hook: gitCommit reports the failed commit itself.
+PROJ="$(make_project projT7)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
+/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
+headT7="$(git -C "$PROJ" rev-parse HEAD)"
+set +e
+outT7="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT7=$?
+set -e
+if [[ "$rcT7" -eq 75 ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT7" ]]; then
+  pass "T: a failing pre-commit hook makes destroy.sh exit 75"
+else
+  fail "T: destroy.sh with a failing hook: rc=$rcT7. Output: $outT7"
+fi
+
+# The snapshot clears the mark only after its commit succeeded, also when
+# infra/main does not exist yet.
+PROJ="$(make_project projT9)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+git -C "$PROJ" config luther.infraSnapshotTree true
+printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
+/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
+outT9a="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+if [[ "$(tail -1 <<<"$outT9a")" == "rc=1" ]] &&
+  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "T: a failed snapshot commit returns 1 and keeps the mark"
+else
+  fail "T: failed snapshot commit: $outT9a"
+fi
+rm -f "$PROJ/.git/hooks/pre-commit"
+outT9b="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+if [[ "$(tail -1 <<<"$outT9b")" == "rc=0" ]] && git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null &&
+  [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
+  pass "T: the first snapshot (no infra/main yet) clears the mark"
+else
+  fail "T: first snapshot: $outT9b"
+fi
+
+# A staging failure stops the snapshot before it commits.
+BARE="$(fresh_bare)"
+baseT10="$(seed_infra "$BARE")"
+PROJ="$(make_project projT10)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+git -C "$PROJ" config luther.infraSnapshotTree true
+shim10="$WORKDIR/git-shim-add"
+mkdir -p "$shim10"
+cat > "$shim10/git" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == add ]]; then exit 1; fi
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim10/git"
+outT10="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim10:$PATH" bash -c '
+  . ./shell_utils.sh
+  rc=0; gitSnapshotCommit "snapshot" || rc=$?; echo "rc=$rc"' 2>&1)"
+if [[ "$(tail -1 <<<"$outT10")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$baseT10" ]] &&
+  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "T: a staging failure returns 1 without a snapshot commit"
+else
+  fail "T: staging failure: $outT10"
 fi
 
 # =============================================================================

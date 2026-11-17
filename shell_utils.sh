@@ -376,15 +376,33 @@ unresolvedMerge() {
   [[ -n "$(git ls-files -u)" ]]
 }
 
+# gitStateExists <name...> succeeds when any of the named entries of the git
+# directory (MERGE_HEAD, rebase-merge, ...) exists. One rev-parse call.
+gitStateExists() {
+  local name
+  local -a args=() paths=()
+  for name in "$@"; do args+=(--git-path "$name"); done
+  mapfile -t paths < <(git rev-parse "${args[@]}")
+  for name in "${paths[@]}"; do
+    [[ -e "$name" ]] && return 0
+  done
+  return 1
+}
+
+# The git-directory entries of a rebase, cherry-pick or revert in progress
+# (sequencer/ holds a paused multi-commit pick or revert).
+GIT_NON_MERGE_STATE=(REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer)
+
+# nonMergeOperationInProgress succeeds during a rebase, cherry-pick or
+# revert. gitCommit refuses those; it concludes only a resolved merge.
+nonMergeOperationInProgress() {
+  gitStateExists "${GIT_NON_MERGE_STATE[@]}"
+}
+
 # operationInProgress succeeds when git is in the middle of a merge, rebase,
 # cherry-pick or revert, resolved or not. Run it in the project root.
 operationInProgress() {
-  local p
-  unresolvedMerge && return 0
-  for p in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do
-    [[ -e "$(git rev-parse --git-path "$p")" ]] && return 0
-  done
-  return 1
+  unresolvedMerge || gitStateExists MERGE_HEAD "${GIT_NON_MERGE_STATE[@]}"
 }
 
 # indexPathsWithMode <mode> prints, NUL-separated, the index paths staged
@@ -407,40 +425,41 @@ isScriptFile() {
 }
 
 # markScriptsExecutable <base> [path...] sets the exec bit in the index on
-# each path staged as 100644 that is a script (isScriptFile) and is either
-#   - new against <base> (every staged path when <base> is empty) and
-#     executable on disk; core.fileMode is off (configure_git), so
-#     `git add` would record a new 0755 script as 100644; or
-#   - one of the given paths: the snapshot passes the paths the project
-#     tree had at 100755 before it reset onto infra/main, so its own script
-#     modes win over infra/main's. The script test keeps a 100755 data file
-#     from being forced onto the snapshot.
+# each path staged as 100644 that is either
+#   - one of the given paths and a regular file (not a symlink): the
+#     snapshot passes the paths the project's own index had at 100755
+#     before it reset onto infra/main, so the project's modes win over
+#     infra/main's (this repairs -infra repos that hold scripts as 100644);
+#     no script test, since those modes were the project's choice; or
+#   - new against <base> (every staged path when <base> is empty),
+#     executable on disk and a script (isScriptFile): core.fileMode is off
+#     (configure_git), so `git add` would record a new 0755 script as
+#     100644, and the script test keeps a new data file at 100644 on a
+#     filesystem where everything reads as 0777.
 # Other existing paths keep their index mode, and the bit is never removed:
 # an archive or a mount can extract every file as 0777 (or drop the bit),
 # and that must not churn modes. The cost: a 644->755 change of an existing
 # script on disk alone is not carried (set it with `git update-index
-# --chmod=+x`). One batched update-index call, not a process per file. Run
-# it in the project root.
+# --chmod=+x`). One batched update-index call, not a process per file.
+# Returns non-zero when update-index fails. Run it in the project root.
 markScriptsExecutable() {
   local base="$1" path
   shift
-  local -a paths=()
+  local -a paths=() staged=() added=()
   local -A staged_644=()
-  while IFS= read -r -d '' path; do
-    staged_644["$path"]=1
-  done < <(indexPathsWithMode 100644)
+  mapfile -d '' -t staged < <(indexPathsWithMode 100644)
+  for path in "${staged[@]+"${staged[@]}"}"; do staged_644["$path"]=1; done
   for path in "$@"; do
-    [[ -n "${staged_644[$path]:-}" ]] && isScriptFile "$path" && paths+=("$path")
+    [[ -n "${staged_644[$path]:-}" && -f "$path" && ! -L "$path" ]] && paths+=("$path")
   done
-  while IFS= read -r -d '' path; do
+  if [[ -n "$base" ]]; then
+    mapfile -d '' -t added < <(git diff --cached --name-only -z --no-renames --diff-filter=A "$base")
+  else
+    mapfile -d '' -t added < <(git ls-files -z)
+  fi
+  for path in "${added[@]+"${added[@]}"}"; do
     [[ -n "${staged_644[$path]:-}" && -x "$path" ]] && isScriptFile "$path" && paths+=("$path")
-  done < <(
-    if [[ -n "$base" ]]; then
-      git diff --cached --name-only -z --no-renames --diff-filter=A "$base"
-    else
-      git ls-files -z
-    fi
-  )
+  done
   if ((${#paths[@]})); then
     printf '%s\0' "${paths[@]}" | xargs -0 git update-index --chmod=+x --
   fi
@@ -451,27 +470,28 @@ markScriptsExecutable() {
 # gitCommit (commit.sh, destroy.sh) and gitSnapshotCommit (persistInfraRepo,
 # apply.sh) both use it, so the rules live in one place. <base> is the commit
 # the index starts from (infra/main for a snapshot); empty means HEAD, or
-# none on an unborn branch. Each caller checks for an unfinished merge
-# first (gitCommit: unresolved entries; gitSnapshotCommit: any operation in
-# progress, before its reset).
+# none on an unborn branch. Each caller checks for an unfinished operation
+# first (gitCommit: unresolved entries or a rebase/cherry-pick/revert;
+# gitSnapshotCommit: any operation in progress, before its reset).
 #   1. untrackIgnoredFiles, before `git add -A`: add -A commits new versions
 #      of TRACKED files even when .gitignore matches them (#160).
 #   2. `git add -A` with core.fileMode as configure_git set it (off), then
 #      markScriptsExecutable with <base> and the exec paths.
 #   3. With <drop_template_only>=1 (only gitSnapshotCommit), drop
 #      SNAPSHOT_TEMPLATE_ONLY_PATHS from the index.
-# Run it in the project root.
+# Returns 1 when a step fails. Every step is checked here, because callers
+# run it under `if` or `||`, where errexit is off. Run it in the project root.
 gitStageTree() {
   local base="$1" drop_template_only="$2"
   shift 2
   if [[ -z "$base" ]]; then
     base="$(git rev-parse -q --verify HEAD || true)"
   fi
-  untrackIgnoredFiles
-  git add -A
-  markScriptsExecutable "$base" "$@"
+  untrackIgnoredFiles || return 1
+  git add -A || return 1
+  markScriptsExecutable "$base" "$@" || return 1
   if [[ "$drop_template_only" == 1 ]]; then
-    git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}"
+    git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}" || return 1
   fi
 }
 
@@ -485,21 +505,44 @@ gitCommit() {
   fi
 
   msg="${1:-auto-commit: infrastructure changes [ci skip]}"
-  # Unresolved conflicts would commit their markers. A resolved merge goes
-  # on: the commit below concludes it.
+  # Unresolved conflicts would commit their markers, and a commit in the
+  # middle of a rebase, cherry-pick or revert lands in the wrong place. A
+  # resolved merge goes on: the commit below concludes it.
   if unresolvedMerge; then
     echo_error "⚠️  Unresolved merge conflicts; resolve them (git add) first. Nothing committed."
     popd >/dev/null
     return 1
   fi
+  if nonMergeOperationInProgress; then
+    echo_error "⚠️  A rebase, cherry-pick or revert is in progress; finish or abort it first. Nothing committed."
+    popd >/dev/null
+    return 1
+  fi
   # gitCommit keeps the template-only paths; only the snapshot drops them.
-  gitStageTree "" 0
+  # Each step's result is checked: destroy.sh runs this under `if`, where
+  # errexit is off.
+  if ! gitStageTree "" 0; then
+    echo_error "⚠️  Staging failed. Nothing committed."
+    popd >/dev/null
+    return 1
+  fi
 
-  if git diff --cached --quiet; then
+  local diff_rc=0
+  git diff --cached --quiet || diff_rc=$?
+  if [[ "$diff_rc" -gt 1 ]]; then
+    echo_error "⚠️  git diff --cached failed. Nothing committed."
+    popd >/dev/null
+    return 1
+  fi
+  # A resolved merge whose result equals HEAD still needs its commit.
+  if [[ "$diff_rc" -eq 0 ]] && ! gitStateExists MERGE_HEAD; then
     echo "No changes to commit."
-  else
-    git commit -m "$msg"
+  elif git commit -m "$msg"; then
     echo "✅ Git commit created."
+  else
+    echo_error "⚠️  git commit failed. Nothing committed."
+    popd >/dev/null
+    return 1
   fi
 
   popd >/dev/null
@@ -669,7 +712,7 @@ gitMergeInfraMain() {
   # Refuse a merge (or rebase, ...) someone else started, and never abort it
   # below.
   if operationInProgress; then
-    echo_error "⚠️  A merge is in progress; finish or abort the merge in progress first."
+    echo_error "⚠️  A merge, rebase, cherry-pick or revert is in progress; finish or abort the merge in progress first."
     popd >/dev/null
     return 1
   fi
@@ -800,7 +843,7 @@ gitSnapshotCommit() {
     return 1
   fi
 
-  local base="" line
+  local base=""
   local -a exec_paths=()
   if git remote get-url infra >/dev/null 2>&1; then
     echo "🔄 Fetching infra/main…"
@@ -809,9 +852,7 @@ gitSnapshotCommit() {
         base="$(git rev-parse FETCH_HEAD)"
         # The project tree's own 100755 paths, before the reset replaces
         # the index with infra/main's modes; gitStageTree sets them again.
-        while IFS= read -r -d '' line; do
-          exec_paths+=("$line")
-        done < <(indexPathsWithMode 100755)
+        mapfile -d '' -t exec_paths < <(indexPathsWithMode 100755)
         echo "📸 Re-parenting the deployed tree on infra/main (snapshot commit)…"
         if ! git reset --quiet --mixed "$base"; then
           echo_error "⚠️  [git-infra] WARNING: git reset --mixed onto infra/main failed. [sandbox-infrastructure-template#160]"
@@ -829,20 +870,30 @@ gitSnapshotCommit() {
         ;;
     esac
   fi
-  gitStageTree "$base" 1 "${exec_paths[@]+"${exec_paths[@]}"}"
+  # Each step's result is checked: callers run this under `||`, where
+  # errexit is off.
+  if ! gitStageTree "$base" 1 "${exec_paths[@]+"${exec_paths[@]}"}"; then
+    echo_error "⚠️  [git-infra] WARNING: staging the snapshot failed; no snapshot commit. [sandbox-infrastructure-template#160]"
+    popd >/dev/null
+    return 1
+  fi
 
-  if git diff --cached --quiet; then
+  local diff_rc=0
+  git diff --cached --quiet || diff_rc=$?
+  if [[ "$diff_rc" -eq 0 ]]; then
     echo "No changes to commit."
-  else
-    git commit -q -m "$msg"
+  elif [[ "$diff_rc" -eq 1 ]] && git commit -q -m "$msg"; then
     echo "✅ Snapshot commit created."
+  else
+    echo_error "⚠️  [git-infra] WARNING: the snapshot commit failed. [sandbox-infrastructure-template#160]"
+    popd >/dev/null
+    return 1
   fi
-  # HEAD now sits on infra/main, so the histories are related: later
-  # apply.sh and pull.sh runs in this checkout merge teammates' commits
-  # normally. Drop cloneInfraRepo's mark.
-  if [[ -n "$base" ]]; then
-    git config --unset luther.infraSnapshotTree || true
-  fi
+  # HEAD now sits on infra/main (or, with no infra/main yet, is the commit
+  # the push creates it from), so the histories are related: later apply.sh
+  # and pull.sh runs in this checkout merge teammates' commits normally.
+  # Drop cloneInfraRepo's mark, only now that the snapshot succeeded.
+  git config --unset luther.infraSnapshotTree || true
 
   popd >/dev/null
 }

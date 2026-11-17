@@ -17,9 +17,13 @@
 # the apply path: reliable API ?ignore_drift=true → workflow args → argv).
 # See tfDestroy in utils.sh for the exact semantics matrix.
 #
-# Exit codes: 0 destroyed and committed; 3 destroyed, but the git commit
-# failed (for example unresolved merge conflicts): the resources are gone,
-# so resolve the merge and run commit.sh; anything else: the destroy failed.
+# Exit codes:
+#   0   destroyed and committed.
+#   75  destroyed, but the git commit was not made (unresolved conflicts, a
+#       rebase in progress, a failing hook): the resources are gone, so fix
+#       the git state and run commit.sh. Only this case returns 75; a destroy
+#       that fails with 75 itself exits 1, so callers can rely on it.
+#   other  the destroy failed (tfDestroy's exit code).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,12 +74,26 @@ export SKIP_AWS_BOOTSTRAP_PREFLIGHT=1
 export SKIP_GCP_BOOTSTRAP_PREFLIGHT=1
 
 tfInit
-if [[ "$ignore_drift" == "true" ]]; then
-  tfDestroy --ignore-drift
-else
-  tfDestroy
+# A subshell keeps errexit on inside tfDestroy (it would be off under `||`)
+# while this script captures its status explicitly.
+destroy_rc=0
+set +e
+(
+  set -e
+  if [[ "$ignore_drift" == "true" ]]; then
+    tfDestroy --ignore-drift
+  else
+    tfDestroy
+  fi
+)
+destroy_rc=$?
+set -e
+if [[ "$destroy_rc" -ne 0 ]]; then
+  [[ "$destroy_rc" -eq 75 ]] && destroy_rc=1
+  exit "$destroy_rc"
 fi
+# gitCommit checks each of its steps, so running it under `if` is safe.
 if ! gitCommit; then
-  echo "⚠️  The resources are destroyed, but the git commit was not made. Resolve the merge, then run commit.sh." >&2
-  exit 3
+  echo "⚠️  The resources are destroyed, but the git commit was not made. Fix the git state (resolve the merge, finish the rebase), then run commit.sh." >&2
+  exit 75
 fi
