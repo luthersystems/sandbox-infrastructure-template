@@ -6,7 +6,7 @@
 #
 # Two modes:
 #   Simple (no flags):
-#     Delegates to apply.sh (which includes git merge/commit/push),
+#     Delegates to apply.sh (merge infra/main, apply, snapshot push),
 #     then captures terraform output -json.
 #
 #   Drift-check (--check-drift):
@@ -101,7 +101,9 @@ if [[ "$check_drift" == "true" ]]; then
       echo "⚠️  [git-infra] WARNING: persistInfraRepo returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
   fi
 else
-  # Simple mode: delegate to apply.sh (includes git merge/commit/push)
+  # Simple mode: delegate to apply.sh, which merges infra/main before the
+  # apply (a stale checkout picks up teammates' edits) and pushes a snapshot
+  # of the deployed tree after it (#160).
   bash "$SCRIPT_DIR/apply.sh" "$lifecycle"
 
   # After apply.sh completes, we're in the lifecycle workspace dir.
