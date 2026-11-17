@@ -1,16 +1,36 @@
 ---
-k8s_coredns_config_host_rewrites: # TODO(luthersystems/sandbox-infrastructure-template#183): autogenerate
-  - query: orderer0.luther.systems
-    target: fabric-orderer0.fabric-orderer.svc.cluster.local
-  - query: orderer1.luther.systems
-    target: fabric-orderer1.fabric-orderer.svc.cluster.local
-  - query: orderer2.luther.systems
-    target: fabric-orderer2.fabric-orderer.svc.cluster.local
-  - query: peer0.org1.luther.systems
-    target: fabric-peer0-org1.fabric-org1.svc.cluster.local
-  - query: peer1.org1.luther.systems
-    target: fabric-peer1-org1.fabric-org1.svc.cluster.local
-  - query: peer2.org1.luther.systems
-    target: fabric-peer2-org1.fabric-org1.svc.cluster.local
-  - query: ca.org1.luther.systems
+# CoreDNS rewrites each Fabric node's network name (the name in its TLS
+# certificate) to its in-cluster service, one per orderer, per peer and per
+# CA. The list is generated from the network config, so a network with
+# another number of orderers, orgs or peers needs no edit here (#183). The
+# source is what ui-core writes to the inventory (group_vars/all/env.yaml)
+# for create-network, the same vars the Fabric plays read
+# (vars/fabric_network_vars.yaml): num_orderers, org_names, num_peers and
+# k8s_fabric_network_domain_root. The names follow mars's k8s_fabric_orderer,
+# k8s_fabric_peer and k8s_fabric_ca charts. There is one CA rewrite, for
+# org1: fabric_ca.yaml deploys a CA for org1 only, so a rewrite for another
+# org would point at a service that does not exist.
+#
+# Each default is the network the file held by hand before #183 (3
+# orderers, org1 with 3 peers, luther.systems), so an inventory that lacks
+# a var renders the same list as before. tests/test-fabric-host-rewrites.sh
+# renders it with ansible and pins that list.
+#
+# The loop writes YAML text that from_yaml turns into the list: plain
+# templating, with no list mutation inside the template.
+k8s_coredns_config_host_rewrites: "{{ _k8s_fabric_host_rewrites_yaml | from_yaml }}"
+
+_k8s_fabric_host_rewrites_domain: "{{ k8s_fabric_network_domain_root | default('luther.systems', true) }}"
+_k8s_fabric_host_rewrites_yaml: |
+  {% for i in range(num_orderers | default(3, true) | int) %}
+  - query: orderer{{ i }}.{{ _k8s_fabric_host_rewrites_domain }}
+    target: fabric-orderer{{ i }}.fabric-orderer.svc.cluster.local
+  {% endfor %}
+  {% for org in org_names | default(['org1'], true) %}
+  {% for i in range(num_peers | default(3, true) | int) %}
+  - query: peer{{ i }}.{{ org }}.{{ _k8s_fabric_host_rewrites_domain }}
+    target: fabric-peer{{ i }}-{{ org }}.fabric-{{ org }}.svc.cluster.local
+  {% endfor %}
+  {% endfor %}
+  - query: ca.org1.{{ _k8s_fabric_host_rewrites_domain }}
     target: fabric-ca.fabric-org1.svc.cluster.local
