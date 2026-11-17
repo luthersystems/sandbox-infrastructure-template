@@ -1,0 +1,20 @@
+version: 2
+
+# Every dependency manifest in the repository needs an entry here: Dependabot
+# looks only where it is told, so a manifest with no entry gets no security
+# updates and nothing reports it. Same style as luthersystems/elps.
+#
+# The one manifest today is the GitHub Actions in .github/workflows: the
+# actions are pinned to commit SHAs, so without this entry the pins (and the
+# shared quality and security workflows) would never move. There is no Go
+# module yet; a gomod entry comes with the Go module (#114).
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
