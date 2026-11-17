@@ -23,8 +23,13 @@
 #       rebase in progress, a failing hook): the resources are gone, so fix
 #       the git state and run commit.sh. Only this case returns 75; a destroy
 #       that fails with 75 itself exits 1, so callers can rely on it.
-#   other  the destroy failed (tfDestroy's exit code).
+#   other  the destroy failed (the failing step's exit code).
 set -euo pipefail
+
+# 75 is reserved for "destroyed, commit failed". Any other step that exits
+# 75 (sourcing utils.sh, tfInit, tfDestroy) exits 1 instead.
+commit_failed=false
+trap 'rc=$?; if [[ "$rc" -eq 75 && "$commit_failed" != true ]]; then exit 1; fi' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -74,26 +79,14 @@ export SKIP_AWS_BOOTSTRAP_PREFLIGHT=1
 export SKIP_GCP_BOOTSTRAP_PREFLIGHT=1
 
 tfInit
-# A subshell keeps errexit on inside tfDestroy (it would be off under `||`)
-# while this script captures its status explicitly.
-destroy_rc=0
-set +e
-(
-  set -e
-  if [[ "$ignore_drift" == "true" ]]; then
-    tfDestroy --ignore-drift
-  else
-    tfDestroy
-  fi
-)
-destroy_rc=$?
-set -e
-if [[ "$destroy_rc" -ne 0 ]]; then
-  [[ "$destroy_rc" -eq 75 ]] && destroy_rc=1
-  exit "$destroy_rc"
+if [[ "$ignore_drift" == "true" ]]; then
+  tfDestroy --ignore-drift
+else
+  tfDestroy
 fi
 # gitCommit checks each of its steps, so running it under `if` is safe.
 if ! gitCommit; then
-  echo "⚠️  The resources are destroyed, but the git commit was not made. Fix the git state (resolve the merge, finish the rebase), then run commit.sh." >&2
+  echo "⚠️  The resources are destroyed, but the git commit was not made. Fix the git state (see above), then run commit.sh." >&2
+  commit_failed=true
   exit 75
 fi

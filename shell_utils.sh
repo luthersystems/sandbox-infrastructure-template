@@ -351,7 +351,10 @@ untrackIgnoredFiles() {
   # pathspecs, so a name with * or [ ] untracks only itself.
   if ! git ls-files -z --cached --ignored --exclude-per-directory=.gitignore |
     xargs -0 -r git --literal-pathspecs rm --cached --quiet --ignore-unmatch --; then
-    echo "⚠️  [git-infra] WARNING: git rm --cached failed; ignored files may still be committed. [sandbox-infrastructure-template#160]" >&2
+    # Fail: going on would commit the ignored files again (#160: the
+    # deploy-time credentials file).
+    echo "⚠️  [git-infra] WARNING: git rm --cached failed; not staging, so the ignored files are not committed. [sandbox-infrastructure-template#160]" >&2
+    return 1
   fi
   return 0
 }
@@ -371,38 +374,82 @@ SNAPSHOT_TEMPLATE_ONLY_PATHS=(
 
 # unresolvedMerge succeeds when the index has unmerged (conflicted) entries.
 # A resolved merge (MERGE_HEAD, no unmerged entries) is not one: gitCommit
-# concludes it. Run it in the project root.
+# concludes it. A failing ls-files counts as unresolved (fail closed). Run it
+# in the project root.
 unresolvedMerge() {
-  [[ -n "$(git ls-files -u)" ]]
+  local out
+  out="$(git ls-files -u)" || return 0
+  [[ -n "$out" ]]
 }
 
 # gitStateExists <name...> succeeds when any of the named entries of the git
-# directory (MERGE_HEAD, rebase-merge, ...) exists. One rev-parse call.
+# directory (MERGE_HEAD, rebase-merge, ...) exists. One rev-parse call. If
+# rev-parse fails, it reports an error and succeeds (fail closed): an
+# unknown state is treated as an operation in progress.
 gitStateExists() {
-  local name
+  local name out
   local -a args=() paths=()
   for name in "$@"; do args+=(--git-path "$name"); done
-  mapfile -t paths < <(git rev-parse "${args[@]}")
+  if ! out="$(git rev-parse "${args[@]}")"; then
+    echo_error "⚠️  Could not read the git state (git rev-parse --git-path failed); treating it as an operation in progress."
+    return 0
+  fi
+  mapfile -t paths <<<"$out"
   for name in "${paths[@]}"; do
     [[ -e "$name" ]] && return 0
   done
   return 1
 }
 
-# The git-directory entries of a rebase, cherry-pick or revert in progress
-# (sequencer/ holds a paused multi-commit pick or revert).
-GIT_NON_MERGE_STATE=(REBASE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply sequencer)
+# gitOperationInProgress <commit|all> succeeds when git is in the middle of
+# an operation that a commit (or a reset) must not run over, and prints, for
+# each, how to end it. <commit> is gitCommit's view: a resolved merge is
+# allowed (the commit concludes it), and a sequencer/ directory counts only
+# with CHERRY_PICK_HEAD or REVERT_HEAD, because `git reset --hard` of a
+# multi-pick leaves sequencer/ behind. <all> (the snapshot, which resets the
+# index, and gitMergeInfraMain) counts every state, sequencer/ alone too.
+# Reads every state path with one rev-parse call, and fails closed when it
+# or ls-files fails. Run it in the project root.
+gitOperationInProgress() {
+  local scope="$1" out i
+  local -a names=(MERGE_HEAD REBASE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD sequencer)
+  local -a args=() paths=() found=()
+  local -A has=()
+  for i in "${names[@]}"; do args+=(--git-path "$i"); done
+  if ! out="$(git rev-parse "${args[@]}")"; then
+    echo_error "⚠️  Could not read the git state (git rev-parse --git-path failed); treating it as an operation in progress."
+    return 0
+  fi
+  mapfile -t paths <<<"$out"
+  if ((${#paths[@]} != ${#names[@]})); then
+    echo_error "⚠️  Could not read the git state (unexpected git rev-parse output); treating it as an operation in progress."
+    return 0
+  fi
+  for i in "${!names[@]}"; do
+    [[ -e "${paths[$i]}" ]] && has["${names[$i]}"]=1
+  done
 
-# nonMergeOperationInProgress succeeds during a rebase, cherry-pick or
-# revert. gitCommit refuses those; it concludes only a resolved merge.
-nonMergeOperationInProgress() {
-  gitStateExists "${GIT_NON_MERGE_STATE[@]}"
-}
-
-# operationInProgress succeeds when git is in the middle of a merge, rebase,
-# cherry-pick or revert, resolved or not. Run it in the project root.
-operationInProgress() {
-  unresolvedMerge || gitStateExists MERGE_HEAD "${GIT_NON_MERGE_STATE[@]}"
+  if unresolvedMerge; then
+    found+=("unresolved merge conflicts: resolve them (git add) and commit, or run git merge --abort")
+  elif [[ -n "${has[MERGE_HEAD]:-}" && "$scope" == all ]]; then
+    found+=("a merge: commit it (commit.sh), or run git merge --abort")
+  fi
+  if [[ -n "${has[REBASE_HEAD]:-}${has[rebase-merge]:-}${has[rebase-apply]:-}" ]]; then
+    found+=("a rebase: git rebase --continue, or git rebase --abort")
+  fi
+  if [[ -n "${has[CHERRY_PICK_HEAD]:-}" ]]; then
+    found+=("a cherry-pick: git cherry-pick --continue, or git cherry-pick --quit")
+  fi
+  if [[ -n "${has[REVERT_HEAD]:-}" ]]; then
+    found+=("a revert: git revert --continue, or git revert --quit")
+  fi
+  if [[ -n "${has[sequencer]:-}" && "$scope" == all &&
+    -z "${has[CHERRY_PICK_HEAD]:-}${has[REVERT_HEAD]:-}" ]]; then
+    found+=("a paused multi-commit cherry-pick or revert (sequencer/): git cherry-pick --quit or git revert --quit")
+  fi
+  ((${#found[@]})) || return 1
+  for i in "${found[@]}"; do echo_error "   In progress: $i."; done
+  return 0
 }
 
 # indexPathsWithMode <mode> prints, NUL-separated, the index paths staged
@@ -508,13 +555,8 @@ gitCommit() {
   # Unresolved conflicts would commit their markers, and a commit in the
   # middle of a rebase, cherry-pick or revert lands in the wrong place. A
   # resolved merge goes on: the commit below concludes it.
-  if unresolvedMerge; then
-    echo_error "⚠️  Unresolved merge conflicts; resolve them (git add) first. Nothing committed."
-    popd >/dev/null
-    return 1
-  fi
-  if nonMergeOperationInProgress; then
-    echo_error "⚠️  A rebase, cherry-pick or revert is in progress; finish or abort it first. Nothing committed."
+  if gitOperationInProgress commit; then
+    echo_error "⚠️  Nothing committed; finish or end the operation above first."
     popd >/dev/null
     return 1
   fi
@@ -599,6 +641,9 @@ gitPushInfra() {
   echo "🚀 [git-infra] Pushing HEAD to infra remote…"
   if git push infra HEAD; then
     echo "✅ [git-infra] Pushed to infra remote — per-project -infra repo populated."
+    # HEAD is now infra/main, so this checkout is related to it: drop
+    # cloneInfraRepo's mark (the first snapshot of a new repo leaves it).
+    git config --unset luther.infraSnapshotTree || true
   else
     echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the GitHub token or deploy key and the remote URL. [sandbox-infrastructure-template#143]" >&2
   fi
@@ -711,8 +756,8 @@ gitMergeInfraMain() {
 
   # Refuse a merge (or rebase, ...) someone else started, and never abort it
   # below.
-  if operationInProgress; then
-    echo_error "⚠️  A merge, rebase, cherry-pick or revert is in progress; finish or abort the merge in progress first."
+  if gitOperationInProgress all; then
+    echo_error "⚠️  Not merging infra/main; finish or end the operation above first."
     popd >/dev/null
     return 1
   fi
@@ -837,8 +882,8 @@ gitSnapshotCommit() {
   # entries, and the markers on disk would then be committed; a rebase,
   # cherry-pick or revert in progress would be left pointing at a moved
   # HEAD.
-  if operationInProgress; then
-    echo_error "⚠️  [git-infra] WARNING: a merge, rebase, cherry-pick or revert is in progress; finish or abort it first. No snapshot. [sandbox-infrastructure-template#160]"
+  if gitOperationInProgress all; then
+    echo_error "⚠️  [git-infra] WARNING: no snapshot; finish or end the operation above first. [sandbox-infrastructure-template#160]"
     popd >/dev/null
     return 1
   fi
@@ -889,11 +934,14 @@ gitSnapshotCommit() {
     popd >/dev/null
     return 1
   fi
-  # HEAD now sits on infra/main (or, with no infra/main yet, is the commit
-  # the push creates it from), so the histories are related: later apply.sh
-  # and pull.sh runs in this checkout merge teammates' commits normally.
-  # Drop cloneInfraRepo's mark, only now that the snapshot succeeded.
-  git config --unset luther.infraSnapshotTree || true
+  # HEAD now sits on infra/main, so the histories are related: later
+  # apply.sh and pull.sh runs in this checkout merge teammates' commits
+  # normally. Drop cloneInfraRepo's mark, only now that the snapshot
+  # succeeded. With no infra/main yet, gitPushInfra drops it once its push
+  # creates main; with no infra remote, nothing is related, so it stays.
+  if [[ -n "$base" ]]; then
+    git config --unset luther.infraSnapshotTree || true
+  fi
 
   popd >/dev/null
 }

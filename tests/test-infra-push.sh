@@ -1371,7 +1371,7 @@ conflicted_proj() {
 
 PROJ="$(conflicted_proj projT1)"
 outT1="$(in_proj "$PROJ" 'gitMergeInfraMain --abort-on-conflict')"
-if [[ "$(tail -1 <<<"$outT1")" == "rc=1" ]] && grep -q "finish or abort the merge in progress first" <<<"$outT1" &&
+if [[ "$(tail -1 <<<"$outT1")" == "rc=1" ]] && grep -q "git merge --abort" <<<"$outT1" &&
   [[ -e "$PROJ/.git/MERGE_HEAD" ]]; then
   pass "T: gitMergeInfraMain refuses a merge in progress and does not abort it"
 else
@@ -1447,7 +1447,7 @@ git -C "$PROJ" remote add infra "file://$BARE"
 GIT_SEQUENCE_EDITOR="sed -i 1s/^pick/edit/" git -C "$PROJ" rebase -q -i HEAD~1 >/dev/null 2>&1 || true
 headT5="$(git -C "$PROJ" rev-parse HEAD)"
 outT5="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] &&
+if [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] && grep -q "git rebase --abort" <<<"$outT5" &&
   [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]] && [[ -d "$PROJ/.git/rebase-merge" ]]; then
   pass "T: gitSnapshotCommit refuses during a rebase"
 else
@@ -1461,8 +1461,9 @@ else
   fail "T: gitCommit during a rebase: $outT5c"
 fi
 
-# A paused multi-pick whose current pick was dropped leaves only sequencer/;
-# both commit paths refuse it.
+# `git reset --hard` of a multi-pick leaves only sequencer/ behind. The
+# snapshot still refuses it and names the fix; gitCommit counts it only with
+# CHERRY_PICK_HEAD or REVERT_HEAD, so it commits.
 PROJ="$(make_project projT8)"
 BARE="$(fresh_bare)"
 set_repo_clone_url "$PROJ" "file://$BARE"
@@ -1482,13 +1483,18 @@ rm -f "$PROJ/.git/CHERRY_PICK_HEAD"
 git -C "$PROJ" reset -q --hard
 headT8="$(git -C "$PROJ" rev-parse HEAD)"
 echo "edit" > "$PROJ/edit.txt"
-outT8c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
 outT8s="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ -d "$PROJ/.git/sequencer" ]] && [[ "$(tail -1 <<<"$outT8c")" == "rc=1" ]] &&
-  [[ "$(tail -1 <<<"$outT8s")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT8" ]]; then
-  pass "T: a paused multi-pick (sequencer/) blocks gitCommit and the snapshot"
+if [[ -d "$PROJ/.git/sequencer" ]] && [[ "$(tail -1 <<<"$outT8s")" == "rc=1" ]] &&
+  grep -q "git cherry-pick --quit" <<<"$outT8s" && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT8" ]]; then
+  pass "T: a leftover sequencer/ blocks the snapshot, naming git cherry-pick --quit"
 else
-  fail "T: paused multi-pick: commit: $outT8c / snapshot: $outT8s"
+  fail "T: leftover sequencer/, snapshot: $outT8s"
+fi
+outT8c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
+if [[ "$(tail -1 <<<"$outT8c")" == "rc=0" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" != "$headT8" ]]; then
+  pass "T: gitCommit ignores a leftover sequencer/ without CHERRY_PICK_HEAD or REVERT_HEAD"
+else
+  fail "T: leftover sequencer/, gitCommit: $outT8c"
 fi
 
 # destroy.sh: the destroy worked but the commit did not -> exit 3 and say so.
@@ -1548,10 +1554,27 @@ fi
 rm -f "$PROJ/.git/hooks/pre-commit"
 outT9b="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
 if [[ "$(tail -1 <<<"$outT9b")" == "rc=0" ]] && git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null &&
-  [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
-  pass "T: the first snapshot (no infra/main yet) clears the mark"
+  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "T: the first snapshot (no infra/main yet) keeps the mark until the push"
 else
   fail "T: first snapshot: $outT9b"
+fi
+outT9c="$(in_proj "$PROJ" 'gitPushInfra')"
+if git -C "$BARE" rev-parse -q --verify refs/heads/main >/dev/null &&
+  [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
+  pass "T: the push that creates infra/main clears the mark"
+else
+  fail "T: first push: $outT9c"
+fi
+# No infra remote: nothing is re-parented or pushed, so the mark stays.
+PROJ="$(make_project projT9n)"
+init_project_git "$PROJ"
+git -C "$PROJ" config luther.infraSnapshotTree true
+outT9n="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"; gitPushInfra')"
+if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "T: without an infra remote the mark stays"
+else
+  fail "T: no infra remote cleared the mark: $outT9n"
 fi
 
 # A staging failure stops the snapshot before it commits.
@@ -1578,6 +1601,82 @@ if [[ "$(tail -1 <<<"$outT10")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse H
   pass "T: a staging failure returns 1 without a snapshot commit"
 else
   fail "T: staging failure: $outT10"
+fi
+
+# A failing `git rev-parse --git-path` fails closed: the snapshot refuses.
+PROJ="$(make_project projT11)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+shim11="$WORKDIR/git-shim-gitpath"
+mkdir -p "$shim11"
+cat > "$shim11/git" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == rev-parse && " \$* " == *" --git-path "* ]]; then exit 1; fi
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim11/git"
+outT11="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim11:$PATH" bash -c '
+  . ./shell_utils.sh
+  rc=0; gitSnapshotCommit "snapshot" || rc=$?; echo "rc=$rc"' 2>&1)"
+if [[ "$(tail -1 <<<"$outT11")" == "rc=1" ]] && grep -qi "could not read the git state" <<<"$outT11" &&
+  ! git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null; then
+  pass "T: a failing rev-parse --git-path fails closed"
+else
+  fail "T: failing rev-parse: $outT11"
+fi
+
+# A failing `git rm --cached` in untrackIgnoredFiles stops the commit, so a
+# tracked ignored file (#160: credentials) is not committed again.
+PROJ="$(make_project projT12)"
+init_project_git "$PROJ"
+echo "secret.txt" > "$PROJ/.gitignore"
+echo "old" > "$PROJ/secret.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" add -f secret.txt
+git -C "$PROJ" commit -q -m base
+echo "deploy-time-secret" > "$PROJ/secret.txt"
+headT12="$(git -C "$PROJ" rev-parse HEAD)"
+shim12="$WORKDIR/git-shim-rm"
+mkdir -p "$shim12"
+cat > "$shim12/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == rm ]] && exit 1; done
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim12/git"
+outT12="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim12:$PATH" bash -c '
+  . ./shell_utils.sh
+  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
+if [[ "$(tail -1 <<<"$outT12")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT12" ]] &&
+  ! git -C "$PROJ" log -p | grep -q "deploy-time-secret"; then
+  pass "T: a failed untrack stops gitCommit; the ignored file is not committed"
+else
+  fail "T: failed untrack: $outT12"
+fi
+
+# destroy.sh: a pre-destroy step that exits 75 does not look like "destroyed,
+# commit failed".
+PROJ="$(make_project projT13)"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cat > "$PROJ/tf/run-with-creds.sh" <<OUTER
+#!/usr/bin/env bash
+echo "mars \$*" >> "$CMD_LOG"
+if [[ " \$* " == *" init "* ]]; then exit 75; fi
+OUTER
+/bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+set +e
+outT13="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT13=$?
+set -e
+if [[ "$rcT13" -ne 0 && "$rcT13" -ne 75 ]] && ! grep -q "destroy --approve" "$CMD_LOG"; then
+  pass "T: a pre-destroy step exiting 75 makes destroy.sh exit $rcT13, not 75"
+else
+  fail "T: pre-destroy 75: rc=$rcT13. Output: $outT13"
 fi
 
 # =============================================================================
