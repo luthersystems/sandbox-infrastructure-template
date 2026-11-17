@@ -698,12 +698,14 @@ first_rcM=$?
 set -e
 first_headM="$(git -C "$BARE" rev-parse --verify -q main || echo "")"
 
-# Someone (or an older deploy) put a file on infra/main that the deployed tree
-# does not have. The snapshot is the deployed state, so it must go.
+# The customer adds their own file on infra/main, which the deploy tree does
+# not have: the snapshot must keep it. They also edit a template-managed file
+# that the deploy has: the snapshot takes the deployed version.
 stale_clone="$WORKDIR/projM-stale"
 git clone -q -b main "file://$BARE" "$stale_clone"
-echo "not deployed" > "$stale_clone/stale-infra-only.txt"
-git -C "$stale_clone" add stale-infra-only.txt
+echo "customer file" > "$stale_clone/stale-infra-only.txt"
+echo "# customer edit" >> "$stale_clone/shell_utils.sh"
+git -C "$stale_clone" add stale-infra-only.txt shell_utils.sh
 git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q -m "infra-only edit"
 git -C "$stale_clone" push -q origin main
 stale_headM="$(git -C "$BARE" rev-parse main)"
@@ -720,6 +722,10 @@ jq -n --arg url "file://$BARE" \
   '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-M"}' \
   > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
 echo "third-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
+# A new executable script: configure_git sets core.fileMode=false, and the
+# snapshot must still record it as 100755. /bin/chmod: chmod is mocked.
+printf '#!/bin/sh\necho hi\n' > "$PROJ/tf/custom-stack-provision/new-hook.sh"
+/bin/chmod 0755 "$PROJ/tf/custom-stack-provision/new-hook.sh"
 git -C "$PROJ" fetch -q "file://$BARE" main
 if git -C "$PROJ" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
   fail "M: fixture error — the squashed history shares a commit with infra/main"
@@ -748,10 +754,20 @@ if [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)
 else
   fail "M: the pushed main.tf is not the deployed one"
 fi
-if git -C "$BARE" cat-file -e main:stale-infra-only.txt 2>/dev/null; then
-  fail "M: a file only on infra/main survived — the snapshot is not the deployed tree"
+if [[ "$(git -C "$BARE" show main:stale-infra-only.txt 2>/dev/null)" == "customer file" ]]; then
+  pass "M: a file only on infra/main (the customer's own) is kept"
 else
-  pass "M: the snapshot is the deployed tree (the infra-only file is gone)"
+  fail "M: the customer's infra-only file was deleted by the snapshot"
+fi
+if git -C "$BARE" show main:shell_utils.sh | grep -qF "# customer edit"; then
+  fail "M: a file in both places kept the infra/main version, not the deployed one"
+else
+  pass "M: a file in both places takes the deployed version"
+fi
+if [[ "$(git -C "$BARE" ls-tree main tf/custom-stack-provision/new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
+  pass "M: a new 0755 script is pushed as 100755"
+else
+  fail "M: the new script lost its exec bit: $(git -C "$BARE" ls-tree main tf/custom-stack-provision/new-hook.sh)"
 fi
 if [[ "$(git -C "$BARE" rev-list --count "$stale_headM..main")" -eq 1 ]]; then
   pass "M: the snapshot is one commit on top of infra/main"
@@ -776,6 +792,100 @@ if grep -qF "FAKE-SECRET-M" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
 else
   fail "M: the credentials file was removed from disk"
 fi
+
+# =============================================================================
+echo ""
+echo "=== Case N: simple-mode apply (apply.sh) after a history squash ==="
+# =============================================================================
+# apply-with-outputs.sh without --check-drift runs apply.sh. apply.sh merged
+# infra/main under set -e before Terraform ran, and the merge always fails on
+# ui-core's squashed history, so the apply aborted before it applied. Now it
+# applies first and pushes a snapshot, like persistInfraRepo.
+PROJ="$(make_project projN)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+# utils.sh points MARS at tf/run-with-creds.sh, so that is the mock here.
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+# infra/main with a history of its own.
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "first deploy"
+git -C "$PROJ" push -q "file://$BARE" main
+base_headN="$(git -C "$BARE" rev-parse main)"
+# The ui-core squash.
+rm -rf "$PROJ/.git"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "ui-core: squashed project history"
+mkdir -p "$PROJ/tf/custom-stack-provision"
+echo "simple-mode-change" > "$PROJ/tf/custom-stack-provision/main.tf"
+
+set +e
+outN="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcN=$?
+set -e
+
+if [[ "$rcN" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG"; then
+  pass "N: the simple-mode apply ran Terraform and exits 0"
+else
+  fail "N: simple-mode apply rc=$rcN, or no mars apply ran. Output: $outN"
+fi
+if git -C "$BARE" merge-base --is-ancestor "$base_headN" main &&
+  [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "simple-mode-change" ]]; then
+  pass "N: apply.sh pushed the deployed tree as a fast-forward"
+else
+  fail "N: apply.sh did not fast-forward infra/main with the deployed tree. Output: $outN"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case O: template-only files never reach the -infra repo ==="
+# =============================================================================
+# .github/dependabot.yml configures Dependabot for the template repo. In an
+# -infra repo it would open weekly PRs that the next deploy reverts, so the
+# snapshot leaves it out, and removes it if an older push added it.
+PROJ="$(make_project projO)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+mkdir -p "$PROJ/.github/workflows"
+cp "$REPO_ROOT/.github/dependabot.yml" "$PROJ/.github/dependabot.yml"
+cp "$REPO_ROOT/.github/workflows/security.yml" "$PROJ/.github/workflows/security.yml"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "older push, with dependabot.yml"
+git -C "$PROJ" push -q "file://$BARE" main
+
+set +e
+outO="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcO=$?
+set -e
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+if [[ "$rcO" -eq 0 ]] && echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
+  pass "O: the deploy pushed the stack"
+else
+  fail "O: rc=$rcO, or nothing pushed. Output: $outO"
+fi
+if echo "$pushed_tree" | grep -qx ".github/dependabot.yml"; then
+  fail "O: .github/dependabot.yml reached the -infra repo"
+else
+  pass "O: .github/dependabot.yml is not in the -infra repo"
+fi
+if [[ -f "$PROJ/.github/dependabot.yml" ]]; then
+  pass "O: dependabot.yml stays on disk"
+else
+  fail "O: dependabot.yml was removed from disk"
+fi
+# security.yml does ride along (it is a workflow file of the tree), so it
+# must not run in an -infra repo: the same repository guard as quality.yml.
+for wf in quality security; do
+  if grep -qF "if: github.repository == 'luthersystems/sandbox-infrastructure-template'" \
+    "$REPO_ROOT/.github/workflows/$wf.yml"; then
+    pass "O: $wf.yml runs only in the template repo"
+  else
+    fail "O: $wf.yml has no repository guard, so every -infra repo runs it"
+  fi
+done
 
 # --- Summary -----------------------------------------------------------------
 echo ""

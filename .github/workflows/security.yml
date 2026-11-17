@@ -29,6 +29,11 @@ concurrency:
 jobs:
   # The job id must stay "security": the ruleset requires "security / result".
   security:
+    # Every deploy pushes this template's tree to the project's <id>-infra
+    # repo, workflows included. The guard keeps the checks (and the nightly
+    # run and its security-drift issue) in the template repo, as quality.yml
+    # does, so the -infra repos do not run them.
+    if: github.repository == 'luthersystems/sandbox-infrastructure-template'
     permissions:
       contents: read
       issues: write # the security-drift issue on scheduled runs

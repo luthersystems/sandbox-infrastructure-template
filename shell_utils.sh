@@ -464,18 +464,43 @@ persistInfraRepo() {
   # Each helper is individually guarded with `|| echo` so persistInfraRepo
   # honors its "Always returns 0" contract in EVERY caller context — not only
   # when the call site adds its own `|| …` (which suspends `set -e` across the
-  # whole body). Without these guards a hard git failure (gitMergeInfraMain's
-  # merge-conflict `return 1`, or a gitCommit/gitPushInfra that aborts mid-body
+  # whole body). Without these guards a hard git failure (gitSnapshotCommit's
+  # fetch or reset `return 1`, or a commit/gitPushInfra that aborts mid-body
   # under an active `set -e`, e.g. a rejecting pre-commit hook) could brick an
   # already-applied deploy if a future caller ever invoked persistInfraRepo bare.
   # Belt-and-suspenders on the exact #143 brick path.
-  gitReparentOnInfraMain || echo "⚠️  [git-infra] WARNING: gitReparentOnInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
-  gitCommit "auto-commit: deployed infrastructure [ci skip]" || echo "⚠️  [git-infra] WARNING: gitCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
+  gitSnapshotCommit "auto-commit: deployed infrastructure [ci skip]" || echo "⚠️  [git-infra] WARNING: gitSnapshotCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
   gitPushInfra || echo "⚠️  [git-infra] WARNING: gitPushInfra returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
 
   return 0
 }
 
+# fetchInfraMain fetches infra/main into FETCH_HEAD (and infra/main). It
+# prints one word: "fetched", "absent" (the remote has no main yet: a new,
+# empty -infra repo) or "error" (the remote could not be listed or fetched).
+# It asks for refs/heads/main exactly: `git ls-remote --heads infra main`
+# also matches a branch such as feature/main, and then a repo with no main
+# looked like it had one. Run it in the project root, with an infra remote.
+fetchInfraMain() {
+  local rc=0
+  git ls-remote --exit-code infra refs/heads/main >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0)
+      if git fetch infra main >&2; then
+        echo fetched
+      else
+        echo error
+      fi
+      ;;
+    2) echo absent ;; # --exit-code: no matching ref
+    *) echo error ;;
+  esac
+}
+
+# gitMergeInfraMain merges infra/main into the project tree. Only pull.sh uses
+# it: a developer pulling infra/main wants its changes in their tree. The
+# deploy paths (persistInfraRepo, apply.sh) use gitSnapshotCommit, because
+# ui-core's squashed history makes this merge fail (#160).
 gitMergeInfraMain() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
@@ -492,14 +517,18 @@ gitMergeInfraMain() {
   fi
 
   echo "🔄 Fetching infra/main…"
-  # Check if main branch exists on remote before fetching
-  if ! git ls-remote --heads infra main | grep -q main; then
-    echo "ℹ️  infra/main does not exist yet (new repo) - skipping merge"
-    popd >/dev/null
-    return 0
-  fi
-
-  git fetch infra main
+  case "$(fetchInfraMain)" in
+    absent)
+      echo "ℹ️  infra/main does not exist yet (new repo) - skipping merge"
+      popd >/dev/null
+      return 0
+      ;;
+    error)
+      echo_error "⚠️  Could not fetch infra/main."
+      popd >/dev/null
+      return 1
+      ;;
+  esac
 
   echo "🔀 Merging (no-ff, auto-edit) infra/main…"
   if git merge infra/main --no-ff --no-edit; then
@@ -513,83 +542,107 @@ gitMergeInfraMain() {
   popd >/dev/null
 }
 
-# gitReparentOnInfraMain moves HEAD and the index onto infra/main without
-# touching the worktree, so the gitCommit that follows records the deployed
-# tree as one snapshot commit on top of infra/main, and gitPushInfra
-# fast-forwards (sandbox-infrastructure-template#160, Phase 5).
+# Paths that belong to the template repo only and never go into an -infra
+# repo snapshot. .github/dependabot.yml configures Dependabot for the
+# template; in an -infra repo it would open weekly PRs that the next deploy
+# reverts. (The workflows ride along but guard themselves with
+# `if: github.repository == ...`.) The files stay on disk.
+SNAPSHOT_TEMPLATE_ONLY_PATHS=(
+  .github/dependabot.yml
+)
+
+# gitSnapshotCommit commits the deployed project tree as one snapshot commit
+# on top of infra/main, so gitPushInfra fast-forwards
+# (sandbox-infrastructure-template#160, Phase 5). persistInfraRepo and
+# apply.sh call it after the apply.
 #
-# Why not gitMergeInfraMain: ui-core squashes the project tree's git history on
-# every dispatch, so from a project's second deploy on, the local history and
+# Why not a merge: ui-core squashes the project tree's git history on every
+# dispatch, so from a project's second deploy on the local history and
 # infra/main share no commit. `git merge` refuses unrelated histories, the push
-# was then rejected non-fast-forward, and every push after the first was lost
-# (warn-only). A merge would also be wrong when it works: it brings infra/main
-# edits into the tree after the apply, so the pushed tree is not what was
-# deployed.
+# was rejected non-fast-forward, and every push after the first was lost
+# (warn-only). A merge would also bring infra/main edits into the tree after
+# the apply, so the pushed tree would not be what was deployed.
 #
-# Why the worktree is the snapshot: persistInfraRepo runs after a successful
-# apply, in the project tree the apply used (ui-core's restored archive, the
-# template, and what the stages wrote). gitCommit's `git add -A` stages exactly
-# that tree, deletions included, so a file only infra/main has is removed in
-# the snapshot. .gitignore and untrackIgnoredFiles still decide what is
-# committed, so no tfvars, outputs or secrets ride along.
+# Steps:
+#   1. `git reset --mixed FETCH_HEAD`: HEAD and the index become infra/main;
+#      the worktree (the tree the apply just deployed) is not touched.
+#      Not the --soft of the issue's design: --soft keeps a local index that
+#      can track an ignored file (the squashed tree of a project built from
+#      the old template tracks tf/auto-vars/common.auto.tfvars.json). That
+#      entry then differs from HEAD and from disk, untrackIgnoredFiles'
+#      `git rm --cached` refuses it, and `git add -A` commits the deploy-time
+#      credentials in it (tests/test-infra-push.sh Case M).
+#   2. Stage the worktree: untrackIgnoredFiles, then `git add -A` with
+#      core.fileMode=true. configure_git turns fileMode off for the project
+#      tree, and with it off a file infra/main lacks is staged as 100644, so
+#      a new script lost its exec bit. The snapshot records the deployed
+#      modes.
+#   3. Keep what only infra/main has: a path on infra/main that is not in the
+#      deployed tree and not ignored goes back into the index. It is the
+#      customer's own (their workflows, a README); the deploy never had it,
+#      so dropping it would delete their work on every deploy. A path in both
+#      places takes the deployed version, so a customer edit to a
+#      template-managed file is still replaced by the deploy. A file the
+#      template stops shipping also stays in the -infra repo.
+#   4. Drop SNAPSHOT_TEMPLATE_ONLY_PATHS from the index.
 #
-# Why --mixed and not the --soft of the issue's design: --soft keeps the local
-# index, which can track an ignored file (the squashed history of a project
-# built from the old template tracks tf/auto-vars/common.auto.tfvars.json).
-# That entry then differs from both the new HEAD and the file on disk, so
-# untrackIgnoredFiles' `git rm --cached` refuses it, and `git add -A` commits
-# the deploy-time credentials in it (tests/test-infra-push.sh Case M caught
-# this). --mixed makes the index infra/main's tree: untracking works, and
-# `git add -A` adds only what .gitignore lets through. The worktree is not
-# touched either way.
-#
-# pull.sh and apply.sh keep gitMergeInfraMain: a developer pulling infra/main
-# wants its changes in their tree, not a snapshot that deletes them.
-#
-# Non-fatal: a fetch failure returns 1 (persistInfraRepo warns and continues),
-# and a missing infra/main (a new, empty repo) is a no-op, so the first push
-# creates main.
-gitReparentOnInfraMain() {
+# A missing infra/main (a new repo) skips steps 1 and 3, and the first push
+# creates main. Returns 1 when infra/main cannot be fetched or the reset
+# fails; callers treat that as non-fatal.
+gitSnapshotCommit() {
+  local msg="${1:-auto-commit: infrastructure changes [ci skip]}"
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
   if ! configure_git; then
-    echo "⚠️  configure_git failed, skipping the re-parent on infra/main."
+    echo "⚠️  configure_git failed, skipping the snapshot commit."
     popd >/dev/null
     return 0
   fi
 
-  if ! git remote get-url infra >/dev/null 2>&1; then
-    echo "Skipping gitReparentOnInfraMain: no infra remote configured"
-    popd >/dev/null
-    return 0
+  local base=""
+  if git remote get-url infra >/dev/null 2>&1; then
+    echo "🔄 Fetching infra/main…"
+    case "$(fetchInfraMain)" in
+      fetched)
+        base="$(git rev-parse FETCH_HEAD)"
+        echo "📸 Re-parenting the deployed tree on infra/main (snapshot commit)…"
+        if ! git reset --quiet --mixed "$base"; then
+          echo_error "⚠️  [git-infra] WARNING: git reset --mixed onto infra/main failed. [sandbox-infrastructure-template#160]"
+          popd >/dev/null
+          return 1
+        fi
+        ;;
+      absent)
+        echo "ℹ️  infra/main does not exist yet (new repo) - the first push creates it"
+        ;;
+      *)
+        echo_error "⚠️  [git-infra] WARNING: could not fetch infra/main. [sandbox-infrastructure-template#160]"
+        popd >/dev/null
+        return 1
+        ;;
+    esac
   fi
 
-  local heads
-  heads="$(git ls-remote --heads infra main)" || {
-    echo_error "⚠️  [git-infra] WARNING: could not list infra/main. [sandbox-infrastructure-template#160]"
-    popd >/dev/null
-    return 1
-  }
-  if [[ -z "$heads" ]]; then
-    echo "ℹ️  infra/main does not exist yet (new repo) - the first push creates it"
-    popd >/dev/null
-    return 0
+  untrackIgnoredFiles
+  git -c core.fileMode=true add -A
+
+  if [[ -n "$base" ]]; then
+    local path
+    while IFS= read -r -d '' path; do
+      if [[ ! -e "$path" && ! -L "$path" ]] &&
+        ! git check-ignore -q --no-index -- "$path"; then
+        git --literal-pathspecs reset -q "$base" -- "$path"
+      fi
+    done < <(git diff --cached --name-only -z --diff-filter=D "$base")
   fi
 
-  echo "🔄 Fetching infra/main…"
-  if ! git fetch infra main; then
-    echo_error "⚠️  [git-infra] WARNING: git fetch infra main failed. [sandbox-infrastructure-template#160]"
-    popd >/dev/null
-    return 1
-  fi
+  git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}"
 
-  # --mixed (see above): HEAD and the index move to infra/main, the worktree
-  # (the deployed tree) stays, and gitCommit commits it on top of infra/main.
-  echo "📸 Re-parenting the deployed tree on infra/main (snapshot commit)…"
-  if ! git reset --quiet --mixed FETCH_HEAD; then
-    echo_error "⚠️  [git-infra] WARNING: git reset --mixed FETCH_HEAD failed. [sandbox-infrastructure-template#160]"
-    popd >/dev/null
-    return 1
+  if git diff --cached --quiet; then
+    echo "No changes to commit."
+  else
+    git commit -q -m "$msg"
+    echo "✅ Snapshot commit created."
   fi
 
   popd >/dev/null
