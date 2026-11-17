@@ -469,7 +469,7 @@ persistInfraRepo() {
   # under an active `set -e`, e.g. a rejecting pre-commit hook) could brick an
   # already-applied deploy if a future caller ever invoked persistInfraRepo bare.
   # Belt-and-suspenders on the exact #143 brick path.
-  gitMergeInfraMain || echo "⚠️  [git-infra] WARNING: gitMergeInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
+  gitReparentOnInfraMain || echo "⚠️  [git-infra] WARNING: gitReparentOnInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
   gitCommit "auto-commit: deployed infrastructure [ci skip]" || echo "⚠️  [git-infra] WARNING: gitCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
   gitPushInfra || echo "⚠️  [git-infra] WARNING: gitPushInfra returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
 
@@ -506,6 +506,88 @@ gitMergeInfraMain() {
     echo "✅ Merge commit created."
   else
     echo_error "⚠️  Merge failed or conflicts detected."
+    popd >/dev/null
+    return 1
+  fi
+
+  popd >/dev/null
+}
+
+# gitReparentOnInfraMain moves HEAD and the index onto infra/main without
+# touching the worktree, so the gitCommit that follows records the deployed
+# tree as one snapshot commit on top of infra/main, and gitPushInfra
+# fast-forwards (sandbox-infrastructure-template#160, Phase 5).
+#
+# Why not gitMergeInfraMain: ui-core squashes the project tree's git history on
+# every dispatch, so from a project's second deploy on, the local history and
+# infra/main share no commit. `git merge` refuses unrelated histories, the push
+# was then rejected non-fast-forward, and every push after the first was lost
+# (warn-only). A merge would also be wrong when it works: it brings infra/main
+# edits into the tree after the apply, so the pushed tree is not what was
+# deployed.
+#
+# Why the worktree is the snapshot: persistInfraRepo runs after a successful
+# apply, in the project tree the apply used (ui-core's restored archive, the
+# template, and what the stages wrote). gitCommit's `git add -A` stages exactly
+# that tree, deletions included, so a file only infra/main has is removed in
+# the snapshot. .gitignore and untrackIgnoredFiles still decide what is
+# committed, so no tfvars, outputs or secrets ride along.
+#
+# Why --mixed and not the --soft of the issue's design: --soft keeps the local
+# index, which can track an ignored file (the squashed history of a project
+# built from the old template tracks tf/auto-vars/common.auto.tfvars.json).
+# That entry then differs from both the new HEAD and the file on disk, so
+# untrackIgnoredFiles' `git rm --cached` refuses it, and `git add -A` commits
+# the deploy-time credentials in it (tests/test-infra-push.sh Case M caught
+# this). --mixed makes the index infra/main's tree: untracking works, and
+# `git add -A` adds only what .gitignore lets through. The worktree is not
+# touched either way.
+#
+# pull.sh and apply.sh keep gitMergeInfraMain: a developer pulling infra/main
+# wants its changes in their tree, not a snapshot that deletes them.
+#
+# Non-fatal: a fetch failure returns 1 (persistInfraRepo warns and continues),
+# and a missing infra/main (a new, empty repo) is a no-op, so the first push
+# creates main.
+gitReparentOnInfraMain() {
+  pushd "$MARS_PROJECT_ROOT" >/dev/null
+
+  if ! configure_git; then
+    echo "⚠️  configure_git failed, skipping the re-parent on infra/main."
+    popd >/dev/null
+    return 0
+  fi
+
+  if ! git remote get-url infra >/dev/null 2>&1; then
+    echo "Skipping gitReparentOnInfraMain: no infra remote configured"
+    popd >/dev/null
+    return 0
+  fi
+
+  local heads
+  heads="$(git ls-remote --heads infra main)" || {
+    echo_error "⚠️  [git-infra] WARNING: could not list infra/main. [sandbox-infrastructure-template#160]"
+    popd >/dev/null
+    return 1
+  }
+  if [[ -z "$heads" ]]; then
+    echo "ℹ️  infra/main does not exist yet (new repo) - the first push creates it"
+    popd >/dev/null
+    return 0
+  fi
+
+  echo "🔄 Fetching infra/main…"
+  if ! git fetch infra main; then
+    echo_error "⚠️  [git-infra] WARNING: git fetch infra main failed. [sandbox-infrastructure-template#160]"
+    popd >/dev/null
+    return 1
+  fi
+
+  # --mixed (see above): HEAD and the index move to infra/main, the worktree
+  # (the deployed tree) stays, and gitCommit commits it on top of infra/main.
+  echo "📸 Re-parenting the deployed tree on infra/main (snapshot commit)…"
+  if ! git reset --quiet --mixed FETCH_HEAD; then
+    echo_error "⚠️  [git-infra] WARNING: git reset --mixed FETCH_HEAD failed. [sandbox-infrastructure-template#160]"
     popd >/dev/null
     return 1
   fi

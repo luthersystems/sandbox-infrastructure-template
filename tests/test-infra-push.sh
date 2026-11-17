@@ -677,6 +677,106 @@ else
   echo "  SKIP: L: $REPO_ROOT is not a git checkout"
 fi
 
+# =============================================================================
+echo ""
+echo "=== Case M: #160 Phase 5 — a re-deploy after a history squash still pushes ==="
+# =============================================================================
+# ui-core squashes the project tree's git history on every dispatch, so on the
+# second deploy the local history and infra/main share no commit. The old
+# `git merge infra/main` failed with "refusing to merge unrelated histories",
+# the push was rejected non-fast-forward, and every push after a project's
+# first was lost (warn-only). The snapshot re-parent fixes it: the deployed
+# worktree is committed on top of infra/main and pushed fast-forward.
+PROJ="$(make_project projM)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+
+set +e
+run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift >/dev/null
+first_rcM=$?
+set -e
+first_headM="$(git -C "$BARE" rev-parse --verify -q main || echo "")"
+
+# Someone (or an older deploy) put a file on infra/main that the deployed tree
+# does not have. The snapshot is the deployed state, so it must go.
+stale_clone="$WORKDIR/projM-stale"
+git clone -q -b main "file://$BARE" "$stale_clone"
+echo "not deployed" > "$stale_clone/stale-infra-only.txt"
+git -C "$stale_clone" add stale-infra-only.txt
+git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q -m "infra-only edit"
+git -C "$stale_clone" push -q origin main
+stale_headM="$(git -C "$BARE" rev-parse main)"
+
+# The ui-core squash: a new root commit with no shared history. Like the
+# trees of projects built from the old template, it tracks the credentials
+# file, so the snapshot must still untrack what .gitignore ignores.
+rm -rf "$PROJ/.git"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" add -f tf/auto-vars/common.auto.tfvars.json
+git -C "$PROJ" commit -q -m "ui-core: squashed project history"
+jq -n --arg url "file://$BARE" \
+  '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-M"}' \
+  > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
+echo "third-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
+git -C "$PROJ" fetch -q "file://$BARE" main
+if git -C "$PROJ" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
+  fail "M: fixture error — the squashed history shares a commit with infra/main"
+else
+  pass "M: fixture — the squashed history and infra/main are unrelated"
+fi
+
+set +e
+outM="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcM=$?
+set -e
+headM="$(git -C "$BARE" rev-parse main)"
+
+if [[ "$first_rcM" -eq 0 && "$rcM" -eq 0 && -n "$first_headM" ]]; then
+  pass "M: both applies exit 0 and the first one pushed"
+else
+  fail "M: first=$first_rcM second=$rcM first_head=$first_headM. Output: $outM"
+fi
+if [[ "$headM" != "$stale_headM" ]] && git -C "$BARE" merge-base --is-ancestor "$stale_headM" "$headM"; then
+  pass "M: the second push landed as a fast-forward of infra/main"
+else
+  fail "M: infra/main did not fast-forward ($stale_headM → $headM). Output: $outM"
+fi
+if [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "third-deploy-change" ]]; then
+  pass "M: the pushed snapshot carries the deployed change"
+else
+  fail "M: the pushed main.tf is not the deployed one"
+fi
+if git -C "$BARE" cat-file -e main:stale-infra-only.txt 2>/dev/null; then
+  fail "M: a file only on infra/main survived — the snapshot is not the deployed tree"
+else
+  pass "M: the snapshot is the deployed tree (the infra-only file is gone)"
+fi
+if [[ "$(git -C "$BARE" rev-list --count "$stale_headM..main")" -eq 1 ]]; then
+  pass "M: the snapshot is one commit on top of infra/main"
+else
+  fail "M: expected exactly one new commit on infra/main"
+fi
+# The #160 canary on the snapshot push.
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+if echo "$pushed_tree" | grep -qE '\.auto\.tfvars\.json$|^outputs/|^secrets/|\.tfplan$'; then
+  fail "M: a tfvars, outputs, secrets or plan file rode the snapshot push (#160). Tree: $pushed_tree. Output: $outM"
+else
+  pass "M: no tfvars, outputs, secrets or plan file in the snapshot"
+fi
+pushed_history="$(git -C "$BARE" log -p --all)"
+if grep -qF "FAKE-SECRET-M" <<<"$pushed_history"; then
+  fail "M: the deploy-time secret reached the -infra repo history (#160 leak)"
+else
+  pass "M: the deploy-time secret is in no pushed commit"
+fi
+if grep -qF "FAKE-SECRET-M" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
+  pass "M: the credentials file stays on disk"
+else
+  fail "M: the credentials file was removed from disk"
+fi
+
 # --- Summary -----------------------------------------------------------------
 echo ""
 echo "================================"
