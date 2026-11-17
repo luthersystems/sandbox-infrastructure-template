@@ -8,11 +8,13 @@ umbrella_fabric_domain: "{{ k8s_fabric_network_domain_root }}"
 # use that fixed path (#184).
 umbrella_oracle_app_name: "sandbox"
 
-# The mars umbrella role creates ConnectorHub's storage PVC
-# (storage-umbrella-connectorhub) outside the Helm chart, so a chart uninstall
+# The mars umbrella role creates ConnectorHub's storage PVC outside the Helm
+# chart, so a chart uninstall
 # or reinstall keeps the hub's data. The chart then creates no PVC of its own
 # (persistentVolume.create below). The same pattern as the Fabric nodes'
-# *_separate_pvc settings (#184).
+# *_separate_pvc settings (#184). mars names that PVC
+# storage-umbrella-connectorhub whatever umbrella_release_name is, so keep the
+# release name "umbrella".
 umbrella_connectorhub_separate_pvc: true
 
 umbrella_charts:
@@ -81,6 +83,6 @@ umbrella_values:
       annotations:
         eks.amazonaws.com/role-arn: "{{oracle_service_account_iam_role_arn}}"
     env:
-      # In-cluster address of the shiroclient gateway. It follows the release
-      # name, so a deploy with another release name gets the right address.
+      # In-cluster address of the shiroclient gateway: the chart names its
+      # Service <release name>-shiroclient.
       SANDBOX_ORACLE_GATEWAY_ENDPOINT: http://{{umbrella_release_name}}-shiroclient

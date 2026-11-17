@@ -165,6 +165,14 @@ resource "github_repository_collaborator" "user" {
   repository = github_repository.infra.name
   username   = var.github_username
   permission = var.collaborator_permission
+
+  # The provider replaces this resource when permission changes (ForceNew):
+  # it removes the collaborator and sends a new invite, so the user loses
+  # access until they accept it, and the invite expires after 7 days. Keep an
+  # existing project's permission; the default (#160) applies to new projects.
+  lifecycle {
+    ignore_changes = [permission]
+  }
 }
 
 # The deploy key resources took a count (create_infra_deploy_key). Keep an
