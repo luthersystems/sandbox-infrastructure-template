@@ -12,7 +12,7 @@ set -euo pipefail
 #   7. Repo: error when both archive and repo URL are empty
 #   8. Dotglob: dotfile preserve patterns restored correctly
 #   9. Re-deploy: .git/ created from infra repo when repo_clone_ssh_url is set
-#  10. Re-deploy: gitCommit succeeds after ensure_git_from_infra runs
+#  10. Re-deploy: mars infra-commit succeeds after infra-clone runs
 #  11. Re-deploy: no-op when .git/ already exists
 #  12. Re-deploy: no-op when repo_clone_ssh_url is empty
 #  13. Re-deploy: graceful degradation when clone fails (nonexistent repo)
@@ -33,6 +33,10 @@ trap cleanup EXIT
 WORKDIR="$(mktemp -d)"
 PROJECT="$WORKDIR/project"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# prepare-custom-stack.sh clones the -infra repo with mars infra-clone.
+# shellcheck source=tests/mars-infra.sh
+. "$SCRIPT_DIR/tests/mars-infra.sh"
+requireMarsInfra
 
 # --- macOS compat: wrap tar to strip --warning flag (BSD tar doesn't support it) ---
 if ! tar --warning=no-unknown-keyword --help &>/dev/null; then
@@ -444,22 +448,22 @@ else
   fail "re-deploy: infra remote URL is '$actual_infra_url' (expected '$expected_infra_url')"
 fi
 
-# 10. Re-deploy commit: gitCommit succeeds after ensure_git_from_infra runs
+# 10. Re-deploy commit: mars infra-commit succeeds after infra-clone runs
 echo ""
-echo "Test 10: Re-deploy gitCommit succeeds..."
+echo "Test 10: Re-deploy infra-commit succeeds..."
 
-# Source shell_utils and run gitCommit in the re-deploy project
+# Source shell_utils and run infra-commit in the re-deploy project
 (
   cd "$REDEPLOY_PROJECT"
   export MARS_PROJECT_ROOT="$REDEPLOY_PROJECT"
   . "$REDEPLOY_PROJECT/shell_utils.sh"
-  gitCommit "test: re-deploy commit"
+  marsInfra infra-commit "test: re-deploy commit"
 ) 2>&1 | sed 's/^/  | /'
 
 if (cd "$REDEPLOY_PROJECT" && git log --oneline -1 | grep -q "re-deploy commit"); then
-  pass "re-deploy: gitCommit created a commit with correct message"
+  pass "re-deploy: infra-commit created a commit with correct message"
 else
-  fail "re-deploy: gitCommit did not create expected commit"
+  fail "re-deploy: infra-commit did not create expected commit"
 fi
 
 # Verify committed tree contains custom stack files from the archive
@@ -469,11 +473,11 @@ else
   fail "re-deploy: commit does not include custom stack files"
 fi
 
-# Verify working tree is clean after gitCommit
+# Verify working tree is clean after infra-commit
 if (cd "$REDEPLOY_PROJECT" && git diff --quiet && git diff --cached --quiet); then
-  pass "re-deploy: working tree is clean after gitCommit"
+  pass "re-deploy: working tree is clean after infra-commit"
 else
-  fail "re-deploy: working tree still has uncommitted changes after gitCommit"
+  fail "re-deploy: working tree still has uncommitted changes after infra-commit"
 fi
 
 # 11. No-op when .git/ already exists

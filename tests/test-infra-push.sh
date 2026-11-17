@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Seam test for the per-project -infra repo push path (issue #143).
+# Integration checks: the template's scripts drive the mars infra-* commands.
 #
-# Root cause captured here: ui-core always runs a custom-stack apply through the
-# drift-check code path — `apply-with-outputs.sh <lc> --check-drift` or
-# `apply-plan.sh <lc> --plan-file <id> --check-drift`. Neither of those branches
-# used to reach gitMergeInfraMain/gitCommit/gitPushInfra (only apply.sh did, and
-# ui-core never invokes apply.sh for an apply), so 89/89 -infra repos were left
-# EMPTY despite a SUCCESS. The fix wires persistInfraRepo into both real apply
-# paths, scoped to the custom-stack-provision stage.
+# Every git step on a project tree and its per-project -infra repo is a mars
+# command (luthersystems/mars docs/infra-repo.md). The rules themselves (the
+# merge's exit codes and refusals, the snapshot on top of infra/main, the
+# staging, exec-bit and untrack rules, the snapshot-tree marks) are tested in
+# Go in mars, internal/infrarepo, on real temp repos: that is the port of
+# this file's 110 earlier checks.
 #
-# This test uses a MOCK terraform (no cloud) but REAL git, driving the actual
-# apply-with-outputs.sh / apply-plan.sh scripts against a local bare "infra"
-# repo. It asserts:
-#   (i)  the push path is reached and a ref lands on the infra repo when the
-#        repo_clone_ssh_url auto-var + a .git are present (custom-stack stage);
-#   (ii) the loud, greppable "[git-infra] WARNING:" fires (and the apply still
-#        exits 0) when either the .git or the auto-var is absent;
-#   (iii) the persist step is SCOPED to custom-stack-provision — a non-custom
-#        apply stage does not push.
+# What stays here is what only the template's scripts decide, run with a
+# MOCK terraform (no cloud) and REAL git and mars against a local bare
+# "infra" repo:
+#   - the custom-stack apply paths (apply-with-outputs.sh, apply-plan.sh)
+#     persist to the -infra repo, and only for custom-stack-provision (#143);
+#   - apply.sh merges infra/main before Terraform, stops on a failed merge
+#     with the conflict aborted, and pushes a snapshot after the apply;
+#   - destroy.sh exits 75 when the destroy worked but the commit did not, and
+#     never on a stray 75 from an earlier step;
+#   - pull.sh and commit.sh; the template tracks no ignored file; the
+#     template-only workflows carry their repository guard;
+#   - a mars without the infra-* commands stops the apply (fail closed).
 #
-# No rsync dependency (unlike test-prepare-custom-stack.sh) so it runs anywhere
-# git + jq + a POSIX terraform mock are available.
+# MARS_BIN must name a mars build with the infra-* commands, for example
+#   go build -o /tmp/mars ./cmd/mars   (in a luthersystems/mars checkout)
+#   MARS_BIN=/tmp/mars bash tests/test-infra-push.sh
 
 PASS=0
 FAIL=0
@@ -44,6 +47,9 @@ if ! command -v git &>/dev/null; then
   echo "SKIP: git is required for these tests" >&2
   exit 0
 fi
+# shellcheck source=tests/mars-infra.sh
+. "$REPO_ROOT/tests/mars-infra.sh"
+requireMarsInfra
 
 # --- Mock binaries (terraform / mars / chmod) ---------------------------------
 MOCK_BIN="$WORKDIR/bin"
@@ -109,9 +115,8 @@ EOF
   cp "$REPO_ROOT/tf/drift-check.sh" "$proj/tf/drift-check.sh"
   cp "$REPO_ROOT/tf/apply-with-outputs.sh" "$proj/tf/apply-with-outputs.sh"
   cp "$REPO_ROOT/tf/apply-plan.sh" "$proj/tf/apply-plan.sh"
-  # Copy the repo's REAL .gitignore into the fixture so `git add -A` in
-  # persistInfraRepo honors the #160 denylist — this is what makes the Case G
-  # canary below actually exercise the exclusions rather than pass vacuously.
+  # The repo's REAL .gitignore: the snapshot's `git add -A` honors the #160
+  # denylist (mars tests the denylist itself: TestPersistKeepsSecretsOut).
   cp "$REPO_ROOT/.gitignore" "$proj/.gitignore"
   # Mock apply.sh (only reached by simple mode, which these tests don't use).
   printf '#!/usr/bin/env bash\necho "apply.sh $*" >> "%s"\n' "$CMD_LOG" > "$proj/tf/apply.sh"
@@ -172,7 +177,7 @@ set -e
 [[ "$rcA" -eq 0 ]] && pass "A: apply exits 0" || fail "A: expected exit 0, got $rcA. Output: $outA"
 
 if echo "$outA" | grep -qF "[git-infra] Persisting applied stack"; then
-  pass "A: persistInfraRepo was reached (custom-stack scope)"
+  pass "A: mars infra-persist was reached (custom-stack scope)"
 else
   fail "A: persist step not reached. Output: $outA"
 fi
@@ -215,7 +220,7 @@ set -e
 [[ "$rcB" -eq 0 ]] && pass "B: apply-plan exits 0" || fail "B: expected exit 0, got $rcB. Output: $outB"
 
 if echo "$outB" | grep -qF "[git-infra] Persisting applied stack"; then
-  pass "B: persistInfraRepo was reached"
+  pass "B: mars infra-persist was reached"
 else
   fail "B: persist step not reached. Output: $outB"
 fi
@@ -232,7 +237,7 @@ echo "=== Case C: no .git → LOUD warning, no push, apply still succeeds ==="
 # =============================================================================
 PROJ="$(make_project projC)"
 BARE="$(fresh_bare)"
-# A remote the apply step cannot clone either (persistInfraRepo tries,
+# A remote the apply step cannot clone either (infra-persist tries,
 # since a step with the GitHub App token can clone what prepare could not).
 set_repo_clone_url "$PROJ" "file://$WORKDIR/no-such-repo.git"
 # NOTE: deliberately NOT initializing .git at the project root.
@@ -255,34 +260,6 @@ if [[ "$(bare_commit_count "$BARE")" -eq 0 ]]; then
   pass "C: nothing pushed when .git is absent"
 else
   fail "C: something was pushed despite missing .git"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case D: repo_clone_ssh_url empty → LOUD warning, no remote, exits 0 ==="
-# =============================================================================
-PROJ="$(make_project projD)"
-init_project_git "$PROJ"
-# auto-vars intentionally has NO repo_clone_ssh_url (default from make_project).
-
-set +e
-outD="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcD=$?
-set -e
-
-[[ "$rcD" -eq 0 ]] && pass "D: apply exits 0 even with empty repo_clone_ssh_url" \
-  || fail "D: expected exit 0, got $rcD. Output: $outD"
-
-if echo "$outD" | grep -qF "[git-infra] WARNING:" && echo "$outD" | grep -qF "repo_clone_ssh_url is empty"; then
-  pass "D: loud '[git-infra] WARNING: ... repo_clone_ssh_url is empty' fired"
-else
-  fail "D: expected a loud empty-URL warning. Output: $outD"
-fi
-
-if echo "$outD" | grep -qF "no 'infra' remote configured"; then
-  pass "D: gitPushInfra warned that no infra remote is configured"
-else
-  fail "D: expected 'no infra remote configured' warning. Output: $outD"
 fi
 
 # =============================================================================
@@ -315,379 +292,11 @@ fi
 
 # =============================================================================
 echo ""
-echo "=== Case F: re-deploy — second apply fast-forwards the -infra repo ==="
-# =============================================================================
-PROJ="$(make_project projF)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-
-set +e
-run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift >/dev/null
-first_rc=$?
-set -e
-first_count="$(bare_commit_count "$BARE")"
-
-# Mutate the working tree so the second apply has something new to commit.
-echo "second-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
-
-set +e
-outF="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcF=$?
-set -e
-second_count="$(bare_commit_count "$BARE")"
-
-if [[ "$first_rc" -eq 0 && "$rcF" -eq 0 ]]; then
-  pass "F: both applies exit 0"
-else
-  fail "F: apply exit codes first=$first_rc second=$rcF. Output: $outF"
-fi
-
-if [[ "$first_count" -ge 1 && "$second_count" -gt "$first_count" ]]; then
-  pass "F: re-deploy added a new commit to the -infra repo ($first_count → $second_count)"
-else
-  fail "F: re-deploy did not advance the -infra repo ($first_count → $second_count)"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case G: #160 canary — sensitive artifacts never reach the -infra repo ==="
-# =============================================================================
-# make_project copies the repo's real .gitignore into the fixture and drops
-# decoys (tf/auto-vars/common.auto.tfvars.json + outputs/dummy.json). Here we
-# additionally drop secrets/ credential files, a saved plan, a backend json, and
-# a per-stage tfvars copy, then run a real custom-stack apply and assert the
-# pushed tree carries NONE of them — the #143 push path must not leak the #160
-# artifacts. tfSetup also stages secrets/cloud-credentials.auto.tfvars.json into
-# tf/custom-stack-provision/zz-secret.auto.tfvars.json, so the *.auto.tfvars.json
-# assertion also covers the Phase-1 staged credential copy.
-PROJ="$(make_project projG)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"   # writes a decoy tf/auto-vars/common.auto.tfvars.json
-init_project_git "$PROJ"
-
-# Decoy sensitive artifacts that MUST NOT be pushed to the -infra repo (#160):
-mkdir -p "$PROJ/secrets"
-echo '{"bootstrap_role":"arn:aws:iam::1:role/x","aws_external_id":"topsecret"}' \
-  > "$PROJ/secrets/cloud-credentials.auto.tfvars.json"
-echo 'deploy-key-material' > "$PROJ/secrets/infra_deploy_key.pem"
-mkdir -p "$PROJ/tf/custom-stack-provision"
-echo '{"cloud_provider":"aws"}' > "$PROJ/tf/custom-stack-provision/common.auto.tfvars.json"
-echo 'plan-bytes'              > "$PROJ/tf/custom-stack-provision/apply.tfplan"
-echo '{}'                      > "$PROJ/tf/custom-stack-provision/backend.tf.json"
-
-set +e
-outG="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcG=$?
-set -e
-
-[[ "$rcG" -eq 0 ]] && pass "G: apply exits 0" || fail "G: expected exit 0, got $rcG. Output: $outG"
-
-# The push must have happened, else the tree-content assertions are vacuous.
-if [[ "$(bare_commit_count "$BARE")" -ge 1 ]]; then
-  pass "G: a ref landed on the -infra repo"
-else
-  fail "G: nothing pushed — canary would be vacuous. Output: $outG"
-fi
-
-# Enumerate the pushed tree once.
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-
-# Sanity: a known-good, non-secret file IS present — proves the denylist did not
-# nuke the whole tree (i.e. the canary can actually observe a leak).
-if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
-  pass "G: known-good file (shell_utils.sh) is present in the pushed tree"
-else
-  fail "G: expected shell_utils.sh in the pushed tree. Tree: $pushed_tree"
-fi
-
-# The #160 canary assertions:
-if echo "$pushed_tree" | grep -q '\.auto\.tfvars\.json$'; then
-  fail "G: a *.auto.tfvars.json rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO *.auto.tfvars.json in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q '^outputs/'; then
-  fail "G: outputs/ rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO outputs/ directory in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q '^secrets/'; then
-  fail "G: secrets/ rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO secrets/ directory in the pushed tree"
-fi
-
-# Bonus coverage for the rest of the #160 denylist exercised by the decoys above.
-if echo "$pushed_tree" | grep -q '\.tfplan$'; then
-  fail "G: a *.tfplan rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO *.tfplan in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q 'backend\.tf\.json$'; then
-  fail "G: backend.tf.json rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO backend.tf.json in the pushed tree"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case H: snapshot-fidelity — archive-owned provider siblings ARE pushed, ==="
-echo "===         deploy-generated providers-<cloud>.tf is NOT (bridge e2e gap) ==="
-# =============================================================================
-# The historic over-broad `tf/*/providers-*.tf` .gitignore glob was meant only
-# for the deploy-time-generated providers-aws.tf / providers-gcp.tf that
-# _selectCloudFiles() (shell_utils.sh) materializes from the .tf.tmpl templates.
-# But it ALSO matched the composer-archive-owned providers-imported.tf /
-# providers-aliases.tf (insideout-terraform-presets #677) that the InsideOut
-# composer emits into the custom-stack archive and rsyncs into
-# tf/custom-stack-provision/ — silently dropping those real stack files from the
-# persistInfraRepo() `git add -A` snapshot push. The deploy itself was unaffected
-# (it reads the rsync'd worktree on disk, not git), so this was a SNAPSHOT-
-# FIDELITY bug only, caught by the bridge team's e2e. make_project copies the
-# repo's REAL .gitignore into the fixture, so this canary exercises the actual
-# narrowed rule rather than passing vacuously.
-PROJ="$(make_project projH)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-
-mkdir -p "$PROJ/tf/custom-stack-provision"
-# Deploy-generated decoy — MUST stay excluded from the -infra snapshot:
-echo '# generated by _selectCloudFiles() from providers-aws.tf.tmpl' \
-  > "$PROJ/tf/custom-stack-provision/providers-aws.tf"
-# Composer-archive-owned siblings (presets #677) rsynced in — MUST land in the
-# snapshot. They reference var.bootstrap_role / var.aws_external_id only:
-echo 'provider "aws" { alias = "imported" }' \
-  > "$PROJ/tf/custom-stack-provision/providers-imported.tf"
-echo 'provider "aws" { alias = "us_east_1" }' \
-  > "$PROJ/tf/custom-stack-provision/providers-aliases.tf"
-
-set +e
-outH="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcH=$?
-set -e
-
-[[ "$rcH" -eq 0 ]] && pass "H: apply exits 0" || fail "H: expected exit 0, got $rcH. Output: $outH"
-
-# The push must have happened, else the tree-content assertions are vacuous.
-if [[ "$(bare_commit_count "$BARE")" -ge 1 ]]; then
-  pass "H: a ref landed on the -infra repo"
-else
-  fail "H: nothing pushed — canary would be vacuous. Output: $outH"
-fi
-
-pushed_tree_H="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-imported.tf"; then
-  pass "H: archive-owned providers-imported.tf IS in the pushed snapshot"
-else
-  fail "H: providers-imported.tf missing from snapshot (over-broad glob regressed). Tree: $pushed_tree_H"
-fi
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-aliases.tf"; then
-  pass "H: archive-owned providers-aliases.tf IS in the pushed snapshot"
-else
-  fail "H: providers-aliases.tf missing from snapshot (over-broad glob regressed). Tree: $pushed_tree_H"
-fi
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-aws.tf"; then
-  fail "H: deploy-generated providers-aws.tf leaked into the snapshot (glob too narrow). Tree: $pushed_tree_H"
-else
-  pass "H: deploy-generated providers-aws.tf correctly excluded from the snapshot"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case I: the custom-stack apply clones the -infra repo when prepare could not ==="
-# =============================================================================
-# With ui-core's GitHub App, prepare-custom-stack has no token and no deploy
-# key, so it leaves the tree without .git; the apply step has the token and
-# clones the repo itself (cloneInfraRepo in persistInfraRepo,
-# luthersystems/ui-infrastructure#442).
-PROJ="$(make_project projI)"
-BARE="$(fresh_bare)"
-SEED="$WORKDIR/seedI"
-git init -q -b main "$SEED"
-git -C "$SEED" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "earlier deploy"
-git -C "$SEED" push -q "$BARE" main
-git -C "$BARE" symbolic-ref HEAD refs/heads/main
-set_repo_clone_url "$PROJ" "file://$BARE"
-mkdir -p "$PROJ/tf/custom-stack-provision"
-echo 'resource "null_resource" "x" {}' > "$PROJ/tf/custom-stack-provision/main.tf"
-
-set +e
-outI="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcI=$?
-set -e
-
-[[ "$rcI" -eq 0 ]] && pass "I: apply exits 0" || fail "I: expected exit 0, got $rcI. Output: $outI"
-if [[ "$(bare_commit_count "$BARE")" -ge 2 ]]; then
-  pass "I: the apply cloned the repo and pushed on top of its history"
-else
-  fail "I: expected a new commit on the -infra repo. Output: $outI"
-fi
-if git -C "$BARE" ls-tree -r --name-only main | grep -qx "tf/custom-stack-provision/main.tf"; then
-  pass "I: the pushed tree has the custom stack"
-else
-  fail "I: custom stack missing from the pushed tree: $(git -C "$BARE" ls-tree -r --name-only main | tr "\n" " ") Output: $outI"
-fi
-# The snapshot committed onto infra/main, so HEAD is related again: the mark
-# is gone, and a later pull.sh in this checkout merges a teammate's push.
-if [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
-  pass "I: the snapshot clears luther.infraSnapshotTree"
-else
-  fail "I: luther.infraSnapshotTree is still set after the snapshot"
-fi
-mate="$WORKDIR/projI-mate"
-git clone -q -b main "file://$BARE" "$mate"
-echo "mate" > "$mate/mate.txt"
-git -C "$mate" add -A
-git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
-git -C "$mate" push -q origin main
-cp "$REPO_ROOT/pull.sh" "$PROJ/pull.sh"
-set +e
-outI2="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
-rcI2=$?
-set -e
-if [[ "$rcI2" -eq 0 ]] && [[ -f "$PROJ/mate.txt" ]]; then
-  pass "I: after the snapshot, pull.sh merges a teammate's push"
-else
-  fail "I: pull.sh after the snapshot: rc=$rcI2. Output: $outI2"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case J: git access with the GitHub App token ==="
-# =============================================================================
-PROJ="$(make_project projJ)"
-TOKEN_FILE="$WORKDIR/app-token"
-echo "ghs_testtoken" > "$TOKEN_FILE"
-set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
-init_project_git "$PROJ"
-git -C "$PROJ" config core.sshCommand "ssh -i old-key"
-
-outJ="$(
-  export MARS_PROJECT_ROOT="$PROJ" GITHUB_GIT_TOKEN_FILE="$TOKEN_FILE"
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  configure_git >/dev/null 2>&1
-  echo "remote=$(git -C "$PROJ" remote get-url infra)"
-  printf 'protocol=https\nhost=github.com\npath=luthersystems-infra-test/abcd1234-infra.git\n\n' |
-    GIT_TERMINAL_PROMPT=0 git -C "$PROJ" credential fill
-  echo "ssh=$(git -C "$PROJ" config --local core.sshCommand || true)"
-)"
-if echo "$outJ" | grep -qx "remote=https://github.com/luthersystems-infra-test/abcd1234-infra.git"; then
-  pass "J: with a token, the infra remote is the HTTPS URL"
-else
-  fail "J: infra remote is not HTTPS. Output: $outJ"
-fi
-if echo "$outJ" | grep -qx "password=ghs_testtoken" && echo "$outJ" | grep -qx "username=x-access-token"; then
-  pass "J: git gets the token from the credential helper"
-else
-  fail "J: credential helper did not give the token. Output: $outJ"
-fi
-if echo "$outJ" | grep -qx "ssh="; then
-  pass "J: an earlier deploy key's sshCommand is removed"
-else
-  fail "J: core.sshCommand still set. Output: $outJ"
-fi
-if grep -rqF "ghs_testtoken" "$PROJ/.git/config"; then
-  fail "J: the token is in .git/config, which travels in the project archive"
-else
-  pass "J: the token is not in .git/config"
-fi
-
-outJ2="$(
-  export MARS_PROJECT_ROOT="$PROJ"
-  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  echo "url=$(infra_remote_url)"
-)"
-if echo "$outJ2" | grep -qx "url=git@github.com:luthersystems-infra-test/abcd1234-infra.git"; then
-  pass "J: without a token, the SSH URL stays"
-else
-  fail "J: without a token, expected the SSH URL. Output: $outJ2"
-fi
-
-PROJ="$(make_project projJ3)"
-set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
-outJ3="$(
-  export MARS_PROJECT_ROOT="$PROJ"
-  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  cloneInfraRepo 2>&1; echo "rc=$?"
-)"
-if echo "$outJ3" | grep -qF "No GitHub token or deploy key" && echo "$outJ3" | grep -qx "rc=0" && [[ ! -e "$PROJ/.git" ]]; then
-  pass "J: with no token and no deploy key, the SSH clone is skipped (non-fatal)"
-else
-  fail "J: expected a skipped clone. Output: $outJ3"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case K: #160 — a TRACKED credentials file is untracked, not pushed ==="
-# =============================================================================
-# The real leak: the template tracked tf/auto-vars/common.auto.tfvars.json as a
-# `{}` seed. .gitignore does not stop git from committing a file it already
-# tracks, so after ui-core wrote cloud credentials into it, `git add -A`
-# committed them and the push sent them to the -infra repo. Case G passes even
-# with that bug, because its fixture never tracks the file. Here the -infra repo
-# already tracks the seed (as every repo built from the old template does), and
-# the deploy writes a fake key into it.
-PROJ="$(make_project projK)"
-BARE="$(fresh_bare)"
-init_project_git "$PROJ"
-echo '{}' > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
-git -C "$PROJ" add -f tf/auto-vars/common.auto.tfvars.json
-git -C "$PROJ" commit -q -m "old template: seed tracked"
-git -C "$PROJ" push -q "file://$BARE" main
-# Deploy time: credentials and the repo URL land in the tracked file.
-jq -n --arg url "file://$BARE" \
-  '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-K"}' \
-  > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
-
-set +e
-outK="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcK=$?
-set -e
-
-[[ "$rcK" -eq 0 ]] && pass "K: apply exits 0" || fail "K: expected exit 0, got $rcK. Output: $outK"
-
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
-  pass "K: the deploy pushed the stack (the next checks are not vacuous)"
-else
-  fail "K: expected shell_utils.sh in the pushed tree. Output: $outK"
-fi
-if echo "$pushed_tree" | grep -qx "tf/auto-vars/common.auto.tfvars.json"; then
-  fail "K: the tracked common.auto.tfvars.json is still in the pushed tree (#160 leak)"
-else
-  pass "K: common.auto.tfvars.json is no longer in the -infra repo tree"
-fi
-# Capture first: `git log | grep -q` under pipefail reads as "no match" when
-# grep exits early and git dies of SIGPIPE.
-pushed_history="$(git -C "$BARE" log -p --all)"
-if grep -qF "FAKE-SECRET-K" <<<"$pushed_history"; then
-  fail "K: the deploy-time secret reached the -infra repo history (#160 leak)"
-else
-  pass "K: the deploy-time secret is in no pushed commit"
-fi
-if grep -qF "FAKE-SECRET-K" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
-  pass "K: the file stays on disk for later steps (only the git tracking goes)"
-else
-  fail "K: the credentials file was removed from disk"
-fi
-
-# =============================================================================
-echo ""
 echo "=== Case L: the template tracks no file that its .gitignore ignores ==="
 # =============================================================================
-# Guards the whole class behind Case K: a tracked file that .gitignore ignores
-# is committed anyway by `git add -A` in every project tree cloned from this
-# repo. Fix a hit with `git rm --cached <path>`, or add a `!` carve-out to
+# Guards the class behind mars TestPersistUntracksTrackedCredentials: a
+# tracked file that .gitignore ignores is committed anyway by `git add -A` in
+# every project tree cloned from this repo. Fix a hit with `git rm --cached <path>`, or add a `!` carve-out to
 # .gitignore if the file is meant to be tracked.
 if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   tracked_ignored="$(git -C "$REPO_ROOT" ls-files --cached --ignored --exclude-per-directory=.gitignore)"
@@ -702,147 +311,12 @@ fi
 
 # =============================================================================
 echo ""
-echo "=== Case M: #160 Phase 5 — a re-deploy after a history squash still pushes ==="
-# =============================================================================
-# ui-core squashes the project tree's git history on every dispatch, so on the
-# second deploy the local history and infra/main share no commit. The old
-# `git merge infra/main` failed with "refusing to merge unrelated histories",
-# the push was rejected non-fast-forward, and every push after a project's
-# first was lost (warn-only). The snapshot re-parent fixes it: the deployed
-# worktree is committed on top of infra/main and pushed fast-forward.
-PROJ="$(make_project projM)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-
-set +e
-run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift >/dev/null
-first_rcM=$?
-set -e
-first_headM="$(git -C "$BARE" rev-parse --verify -q refs/heads/main || echo "")"
-
-# infra/main gets a file the deploy tree does not have, and an edit to a file
-# the deploy has. The -infra repo is an output copy of the deployed state, so
-# the snapshot drops the first and takes the deployed version of the second.
-# It also gets an executable script that the deploy tree holds as 0644 (an
-# archive or mount can lose the bit): the snapshot keeps infra/main's
-# 100755, because only a new file's mode is read from disk.
-stale_clone="$WORKDIR/projM-stale"
-git clone -q -b main "file://$BARE" "$stale_clone"
-echo "infra-only file" > "$stale_clone/stale-infra-only.txt"
-echo "# infra-only edit" >> "$stale_clone/shell_utils.sh"
-printf '#!/bin/sh\n' > "$stale_clone/existing-hook.sh"
-/bin/chmod 0755 "$stale_clone/existing-hook.sh"
-git -C "$stale_clone" add stale-infra-only.txt shell_utils.sh existing-hook.sh
-git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q -m "infra-only edit"
-git -C "$stale_clone" push -q origin main
-stale_headM="$(git -C "$BARE" rev-parse refs/heads/main)"
-# A tag named main on another commit: fetching "main" would resolve to the
-# tag (refs/tags wins over refs/heads), the snapshot would sit on the wrong
-# base, and the push would be rejected. fetchInfraMain asks for
-# refs/heads/main.
-git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "tagged, not on main"
-git -C "$stale_clone" tag main HEAD
-git -C "$stale_clone" push -q origin refs/tags/main
-
-# The ui-core squash: a new root commit with no shared history. Like the
-# trees of projects built from the old template, it tracks the credentials
-# file, so the snapshot must still untrack what .gitignore ignores.
-rm -rf "$PROJ/.git"
-init_project_git "$PROJ"
-git -C "$PROJ" add -A
-git -C "$PROJ" add -f tf/auto-vars/common.auto.tfvars.json
-git -C "$PROJ" commit -q -m "ui-core: squashed project history"
-jq -n --arg url "file://$BARE" \
-  '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-M"}' \
-  > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
-echo "third-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
-printf '#!/bin/sh\n' > "$PROJ/existing-hook.sh"
-/bin/chmod 0644 "$PROJ/existing-hook.sh"
-# A new executable script: configure_git sets core.fileMode=false, and the
-# snapshot must still record it as 100755. /bin/chmod: chmod is mocked.
-printf '#!/bin/sh\necho hi\n' > "$PROJ/tf/custom-stack-provision/new-hook.sh"
-/bin/chmod 0755 "$PROJ/tf/custom-stack-provision/new-hook.sh"
-git -C "$PROJ" fetch -q "file://$BARE" refs/heads/main
-if git -C "$PROJ" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
-  fail "M: fixture error — the squashed history shares a commit with infra/main"
-else
-  pass "M: fixture — the squashed history and infra/main are unrelated"
-fi
-
-set +e
-outM="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcM=$?
-set -e
-headM="$(git -C "$BARE" rev-parse refs/heads/main)"
-
-if [[ "$first_rcM" -eq 0 && "$rcM" -eq 0 && -n "$first_headM" ]]; then
-  pass "M: both applies exit 0 and the first one pushed"
-else
-  fail "M: first=$first_rcM second=$rcM first_head=$first_headM. Output: $outM"
-fi
-if [[ "$headM" != "$stale_headM" ]] && git -C "$BARE" merge-base --is-ancestor "$stale_headM" "$headM"; then
-  pass "M: the second push landed as a fast-forward of infra/main"
-else
-  fail "M: infra/main did not fast-forward ($stale_headM → $headM). Output: $outM"
-fi
-if [[ "$(git -C "$BARE" show refs/heads/main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "third-deploy-change" ]]; then
-  pass "M: the pushed snapshot carries the deployed change"
-else
-  fail "M: the pushed main.tf is not the deployed one"
-fi
-if git -C "$BARE" cat-file -e refs/heads/main:stale-infra-only.txt 2>/dev/null; then
-  fail "M: a file only on infra/main survived — the snapshot is not the deployed tree"
-else
-  pass "M: the snapshot is the deployed tree (the infra-only file is gone)"
-fi
-if git -C "$BARE" show refs/heads/main:shell_utils.sh | grep -qF "# infra-only edit"; then
-  fail "M: a file in both places kept the infra/main version, not the deployed one"
-else
-  pass "M: a file in both places takes the deployed version"
-fi
-if [[ "$(git -C "$BARE" ls-tree refs/heads/main tf/custom-stack-provision/new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
-  pass "M: a new 0755 script is pushed as 100755"
-else
-  fail "M: the new script lost its exec bit: $(git -C "$BARE" ls-tree refs/heads/main tf/custom-stack-provision/new-hook.sh)"
-fi
-if [[ "$(git -C "$BARE" ls-tree refs/heads/main existing-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
-  pass "M: an existing 100755 file that is 0644 on disk stays 100755"
-else
-  fail "M: the disk mode replaced infra/main's: $(git -C "$BARE" ls-tree refs/heads/main existing-hook.sh)"
-fi
-if [[ "$(git -C "$BARE" rev-list --count "$stale_headM..refs/heads/main")" -eq 1 ]]; then
-  pass "M: the snapshot is one commit on top of infra/main"
-else
-  fail "M: expected exactly one new commit on infra/main"
-fi
-# The #160 canary on the snapshot push.
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only refs/heads/main 2>/dev/null || echo "")"
-if echo "$pushed_tree" | grep -qE '\.auto\.tfvars\.json$|^outputs/|^secrets/|\.tfplan$'; then
-  fail "M: a tfvars, outputs, secrets or plan file rode the snapshot push (#160). Tree: $pushed_tree. Output: $outM"
-else
-  pass "M: no tfvars, outputs, secrets or plan file in the snapshot"
-fi
-pushed_history="$(git -C "$BARE" log -p --all)"
-if grep -qF "FAKE-SECRET-M" <<<"$pushed_history"; then
-  fail "M: the deploy-time secret reached the -infra repo history (#160 leak)"
-else
-  pass "M: the deploy-time secret is in no pushed commit"
-fi
-if grep -qF "FAKE-SECRET-M" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
-  pass "M: the credentials file stays on disk"
-else
-  fail "M: the credentials file was removed from disk"
-fi
-
-# =============================================================================
-echo ""
 echo "=== Case N: simple-mode apply (apply.sh) after a history squash ==="
 # =============================================================================
 # apply-with-outputs.sh without --check-drift runs apply.sh. apply.sh merged
 # infra/main under set -e before Terraform ran, and the merge always fails on
 # ui-core's squashed history, so the apply aborted before it applied. Now it
-# applies first and pushes a snapshot, like persistInfraRepo.
+# applies first and pushes a snapshot, like infra-persist.
 PROJ="$(make_project projN)"
 cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
 # utils.sh points MARS at tf/run-with-creds.sh, so that is the mock here.
@@ -1017,7 +491,7 @@ else
 fi
 
 # pull.sh leaves the conflict in place for the developer to resolve, as
-# gitMergeOriginMain does.
+# a plain git merge does.
 PROJ="$(make_project projQ2)"
 cp "$REPO_ROOT/pull.sh" "$PROJ/pull.sh"
 BARE="$(fresh_bare)"
@@ -1063,287 +537,10 @@ else
 fi
 
 # =============================================================================
-echo ""
-echo "=== Case R: gitCommit (commit.sh, destroy.sh) uses the same staging rules ==="
-# =============================================================================
-PROJ="$(make_project projR)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-mkdir -p "$PROJ/.github"
-echo "version: 2" > "$PROJ/.github/dependabot.yml"
-printf '#!/bin/sh\n' > "$PROJ/r-new-hook.sh"
-/bin/chmod 0755 "$PROJ/r-new-hook.sh"
-outR="$(
-  cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash -c '
-    . ./shell_utils.sh
-    gitCommit "commit.sh run"
-  ' 2>&1
-)"
-# Only the snapshot drops the template-only paths (Case O); gitCommit keeps
-# them, so a tree that tracks the template commits no deletion.
-if git -C "$PROJ" cat-file -e HEAD:.github/dependabot.yml 2>/dev/null; then
-  pass "R: gitCommit keeps .github/dependabot.yml"
-else
-  fail "R: gitCommit dropped .github/dependabot.yml. Output: $outR"
-fi
-if [[ "$(git -C "$PROJ" ls-tree HEAD r-new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
-  pass "R: gitCommit records a new 0755 script as 100755"
-else
-  fail "R: gitCommit lost the new script's exec bit: $(git -C "$PROJ" ls-tree HEAD r-new-hook.sh)"
-fi
-
-# Mode rule: +x only for NEW paths that are executable on disk and start
-# with "#!". Existing paths keep their index mode, so a 0777 extraction
-# churns no modes; the cost is that a 644->755 change of an existing script
-# is not recorded.
-PROJ="$(make_project projR2)"
-init_project_git "$PROJ"
-printf '#!/bin/sh\n' > "$PROJ/was-644.sh"
-printf '#!/bin/sh\n' > "$PROJ/was-755.sh"
-echo 'resource "x" "y" {}' > "$PROJ/data.tf"
-echo '{}' > "$PROJ/data.json"
-git -C "$PROJ" add was-644.sh was-755.sh data.tf data.json
-git -C "$PROJ" update-index --chmod=+x was-755.sh
-git -C "$PROJ" commit -q -m base
-/bin/chmod 0755 "$PROJ/was-644.sh"
-/bin/chmod 0644 "$PROJ/was-755.sh"
-/bin/chmod 0777 "$PROJ/data.tf" "$PROJ/data.json"
-echo "change" >> "$PROJ/data.json"
-printf '#!/bin/sh\n' > "$PROJ/new-script.sh"
-echo 'x = 1' > "$PROJ/new-data.tf"
-/bin/chmod 0755 "$PROJ/new-script.sh"
-/bin/chmod 0777 "$PROJ/new-data.tf"
-outR2="$(
-  cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash -c '
-    . ./shell_utils.sh
-    gitCommit "commit.sh run"
-  ' 2>&1
-)"
-modeR2() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
-if [[ "$(modeR2 new-script.sh)" == "100755" ]]; then
-  pass "R: a new 0755 script is recorded as 100755"
-else
-  fail "R: new-script.sh is $(modeR2 new-script.sh). Output: $outR2"
-fi
-if [[ "$(modeR2 was-644.sh)" == "100644" ]]; then
-  pass "R: an existing path keeps its index mode (100644) whatever the disk says"
-else
-  fail "R: was-644.sh changed to $(modeR2 was-644.sh)"
-fi
-if [[ "$(modeR2 data.tf)" == "100644" && "$(modeR2 data.json)" == "100644" &&
-  "$(modeR2 new-data.tf)" == "100644" ]]; then
-  pass "R: 0777 data files (.tf, .json; new and existing) stay 100644"
-else
-  fail "R: data files got the exec bit: data.tf=$(modeR2 data.tf) data.json=$(modeR2 data.json) new-data.tf=$(modeR2 new-data.tf)"
-fi
-if [[ "$(modeR2 was-755.sh)" == "100755" ]]; then
-  pass "R: an existing 100755 script that is 0644 on disk stays 100755"
-else
-  fail "R: was-755.sh lost its exec bit: $(modeR2 was-755.sh)"
-fi
-
 # =============================================================================
 echo ""
-echo "=== Case S: gitMergeInfraMain skips what it cannot or must not merge ==="
+echo "=== Case T: destroy.sh exit codes ==="
 # =============================================================================
-# merge_infra <proj> [PATH prefix] — run gitMergeInfraMain; prints output,
-# then "rc=<n>" on the last line.
-merge_infra() {
-  local proj="$1" pre="${2:-}"
-  (
-    cd "$proj" && MARS_PROJECT_ROOT="$proj" HOME="$WORKDIR" PATH="${pre:+$pre:}$PATH" bash -c '
-      . ./shell_utils.sh
-      rc=0; gitMergeInfraMain || rc=$?; echo "rc=$rc"
-    ' 2>&1
-  )
-}
-# seed_infra <bare> — push a one-commit main with infra.txt; prints its sha.
-seed_infra() {
-  local src="$WORKDIR/seed-$RANDOM$RANDOM"
-  git init -q -b main "$src"
-  echo "infra" > "$src/infra.txt"
-  git -C "$src" add -A
-  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "infra base"
-  git -C "$src" push -q "file://$1" main
-  git -C "$src" rev-parse HEAD
-}
-
-# 1. An unborn HEAD (cloned while infra was empty): nothing to merge.
-PROJ="$(make_project projS1)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-seed_infra "$BARE" >/dev/null
-outS1="$(merge_infra "$PROJ")"
-if [[ "$(tail -1 <<<"$outS1")" == "rc=2" ]] && ! git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null &&
-  [[ ! -e "$PROJ/.git/MERGE_HEAD" ]]; then
-  pass "S: an unborn HEAD skips the merge with rc 2"
-else
-  fail "S: unborn HEAD: $outS1"
-fi
-
-# 2. Uncommitted local changes that do not overlap infra/main's merge: git
-# merges as usual and keeps them (it refuses only overlapping changes, which
-# fails the merge, rc 1).
-BARE="$(fresh_bare)"
-seed_infra "$BARE" >/dev/null
-PROJ="$WORKDIR/projS2"
-git clone -q -b main "file://$BARE" "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
-mate="$WORKDIR/projS2-mate"
-git clone -q -b main "file://$BARE" "$mate"
-echo "mate" > "$mate/mate.txt"
-git -C "$mate" add -A
-git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
-git -C "$mate" push -q origin main
-echo "archive" > "$PROJ/infra.txt"
-headS2="$(git -C "$PROJ" rev-parse HEAD)"
-outS2="$(merge_infra "$PROJ")"
-if [[ "$(tail -1 <<<"$outS2")" == "rc=0" ]] && [[ -f "$PROJ/mate.txt" ]] &&
-  [[ "$(git -C "$PROJ" rev-parse HEAD)" != "$headS2" ]] && [[ "$(cat "$PROJ/infra.txt")" == "archive" ]]; then
-  pass "S: uncommitted non-overlapping changes merge as usual and stay on disk"
-else
-  fail "S: dirty worktree: $outS2"
-fi
-
-# 3. A shallow clone whose merge base is below the shallow cut: deepen, then
-# merge (rc 0), not "unrelated".
-BARE="$(fresh_bare)"
-src="$WORKDIR/projS3-src"
-git init -q -b main "$src"
-for c in c1 c2 c3; do
-  echo "$c" > "$src/$c.txt"; git -C "$src" add -A
-  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "$c"
-done
-git -C "$src" push -q "file://$BARE" main
-git -C "$src" push -q "file://$BARE" main:refs/heads/keep-c3
-PROJ="$WORKDIR/projS3"
-git clone -q --depth 1 -b main "file://$BARE" "$PROJ"
-git -C "$PROJ" config user.email t@l
-git -C "$PROJ" config user.name T
-git -C "$PROJ" remote add infra "file://$BARE"
-cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
-echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
-# infra/main moves to a branch off c2, so the merge base (c2) is below the cut.
-git -C "$src" checkout -q -b side HEAD~1
-echo "c5" > "$src/c5.txt"; git -C "$src" add -A
-git -C "$src" -c user.email=t@l -c user.name=T commit -q -m c5
-git -C "$src" push -q -f "file://$BARE" side:main
-outS3="$(merge_infra "$PROJ")"
-if [[ "$(tail -1 <<<"$outS3")" == "rc=0" ]] && [[ -f "$PROJ/c5.txt" ]] &&
-  [[ "$(git -C "$PROJ" rev-parse --is-shallow-repository)" == "false" ]]; then
-  pass "S: a shallow clone is deepened, then merged"
-else
-  fail "S: shallow clone: $outS3"
-fi
-
-# 4. merge-base failing for any reason other than "no common ancestor"
-# (exit 1) is an error (rc 1), not "unrelated".
-BARE="$(fresh_bare)"
-seed_infra "$BARE" >/dev/null
-PROJ="$WORKDIR/projS4"
-git clone -q -b main "file://$BARE" "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
-echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
-shim="$WORKDIR/git-shim"
-mkdir -p "$shim"
-cat > "$shim/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == merge-base ]]; then exit 128; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim/git"
-outS4="$(merge_infra "$PROJ" "$shim")"
-if [[ "$(tail -1 <<<"$outS4")" == "rc=1" ]]; then
-  pass "S: a merge-base error (not exit 1) returns rc 1"
-else
-  fail "S: merge-base error: $outS4"
-fi
-
-# 5. A failed deepen stops the apply (rc 1): merge-base would miss the
-# common ancestor below the cut and report rc 2, and the apply would deploy
-# a stale tree whose snapshot reverts a teammate's commit.
-BARE="$(fresh_bare)"
-src="$WORKDIR/projS5-src"
-git init -q -b main "$src"
-for c in c1 c2 c3; do
-  echo "$c" > "$src/$c.txt"; git -C "$src" add -A
-  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "$c"
-done
-git -C "$src" push -q "file://$BARE" main
-git -C "$src" push -q "file://$BARE" main:refs/heads/keep-c3
-PROJ="$WORKDIR/projS5"
-git clone -q --depth 1 -b main "file://$BARE" "$PROJ"
-git -C "$PROJ" config user.email t@l
-git -C "$PROJ" config user.name T
-git -C "$PROJ" remote add infra "file://$BARE"
-cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
-echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
-git -C "$src" checkout -q -b side HEAD~1
-echo "c5" > "$src/c5.txt"; git -C "$src" add -A
-git -C "$src" -c user.email=t@l -c user.name=T commit -q -m c5
-git -C "$src" push -q -f "file://$BARE" side:main
-shim5="$WORKDIR/git-shim-unshallow"
-mkdir -p "$shim5"
-cat > "$shim5/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == fetch && " \$* " == *" --unshallow "* ]]; then exit 1; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim5/git"
-outS5="$(merge_infra "$PROJ" "$shim5")"
-if [[ "$(tail -1 <<<"$outS5")" == "rc=1" ]] && grep -qi "deepen" <<<"$outS5"; then
-  pass "S: a failed deepen returns rc 1"
-else
-  fail "S: failed deepen: $outS5"
-fi
-
-# 6. A tree that cloneInfraRepo laid the deploy archive over is marked; it
-# never merges infra/main content and never fetches for the merge.
-BARE="$(fresh_bare)"
-seed_infra "$BARE" >/dev/null
-PROJ="$WORKDIR/projS6"
-git clone -q -b main "file://$BARE" "$PROJ"
-git -C "$PROJ" remote rename origin infra
-git -C "$PROJ" update-ref -d refs/remotes/infra/main
-git -C "$PROJ" config luther.infraSnapshotTree true
-cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
-echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
-mate="$WORKDIR/projS6-mate"
-git clone -q -b main "file://$BARE" "$mate"
-echo "mate" > "$mate/mate.txt"
-git -C "$mate" add -A
-git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
-git -C "$mate" push -q origin main
-headS6="$(git -C "$PROJ" rev-parse HEAD)"
-outS6="$(merge_infra "$PROJ")"
-if [[ "$(tail -1 <<<"$outS6")" == "rc=2" ]] && [[ ! -f "$PROJ/mate.txt" ]] &&
-  [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headS6" ]] &&
-  ! git -C "$PROJ" rev-parse -q --verify refs/remotes/infra/main >/dev/null; then
-  pass "S: a marked snapshot tree skips the merge (rc 2) before any fetch"
-else
-  fail "S: marked snapshot tree: $outS6"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case T: a merge in progress is never merged over, aborted or committed ==="
-# =============================================================================
-# in_proj <proj> <code> — run code with shell_utils.sh loaded; prints output,
-# then "rc=<n>" on the last line.
-in_proj() {
-  local proj="$1" code="$2"
-  (
-    cd "$proj" && MARS_PROJECT_ROOT="$proj" HOME="$WORKDIR" bash -c "
-      . ./shell_utils.sh
-      rc=0; $code || rc=\$?; echo \"rc=\$rc\"
-    " 2>&1
-  )
-}
 # conflicted_proj <name> — a project with an infra remote and a conflicted
 # `git merge infra/main` in progress; prints its path.
 conflicted_proj() {
@@ -1369,133 +566,6 @@ conflicted_proj() {
   echo "$proj"
 }
 
-PROJ="$(conflicted_proj projT1)"
-outT1="$(in_proj "$PROJ" 'gitMergeInfraMain --abort-on-conflict')"
-if [[ "$(tail -1 <<<"$outT1")" == "rc=1" ]] && grep -q "git merge --abort" <<<"$outT1" &&
-  [[ -e "$PROJ/.git/MERGE_HEAD" ]]; then
-  pass "T: gitMergeInfraMain refuses a merge in progress and does not abort it"
-else
-  fail "T: merge in progress: $outT1"
-fi
-
-PROJ="$(conflicted_proj projT2)"
-headT2="$(git -C "$PROJ" rev-parse HEAD)"
-outT2="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
-if [[ "$(tail -1 <<<"$outT2")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT2" ]]; then
-  pass "T: gitCommit refuses to commit a merge in progress"
-else
-  fail "T: gitCommit with a merge in progress: $outT2"
-fi
-
-PROJ="$(conflicted_proj projT3)"
-headT3="$(git -C "$PROJ" rev-parse HEAD)"
-outT3="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ "$(tail -1 <<<"$outT3")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT3" ]] &&
-  [[ -e "$PROJ/.git/MERGE_HEAD" ]]; then
-  pass "T: gitSnapshotCommit refuses a merge in progress before its reset"
-else
-  fail "T: gitSnapshotCommit with a merge in progress: $outT3"
-fi
-
-# The snapshot carries the project's own 100755 over infra/main's 100644
-# (repairing -infra repos that hold scripts as 100644), without trusting a
-# 0777 disk for data files.
-BARE="$(fresh_bare)"
-seedT4="$WORKDIR/projT4-seed"
-git init -q -b main "$seedT4"
-mkdir -p "$seedT4/tf"
-printf '#!/bin/sh\n' > "$seedT4/tf/apply.sh"
-echo 'x = 1' > "$seedT4/data.tf"
-echo '{}' > "$seedT4/data.json"
-git -C "$seedT4" add -A
-git -C "$seedT4" -c user.email=t@l -c user.name=T commit -q -m "infra: scripts as 100644"
-git -C "$seedT4" push -q "file://$BARE" main
-PROJ="$(make_project projT4)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-printf '#!/bin/sh\n' > "$PROJ/tf/apply.sh"
-echo 'x = 1' > "$PROJ/data.tf"
-echo '{}' > "$PROJ/data.json"
-git -C "$PROJ" add -A
-git -C "$PROJ" update-index --chmod=+x tf/apply.sh data.json
-git -C "$PROJ" commit -q -m "project: apply.sh 100755"
-git -C "$PROJ" remote add infra "file://$BARE"
-echo '{}' > "$PROJ/new.json"
-/bin/chmod 0777 "$PROJ/tf/apply.sh" "$PROJ/data.tf" "$PROJ/new.json"
-outT4="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-modeT4() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
-if [[ "$(modeT4 tf/apply.sh)" == "100755" && "$(modeT4 data.tf)" == "100644" &&
-  "$(modeT4 data.json)" == "100755" && "$(modeT4 new.json)" == "100644" ]] &&
-  [[ "$(git -C "$PROJ" rev-parse HEAD^)" == "$(git -C "$BARE" rev-parse main)" ]]; then
-  pass "T: the snapshot carries the project index's 100755 (script or data); 0777 data from disk stays 100644"
-else
-  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf) data.json=$(modeT4 data.json) new.json=$(modeT4 new.json). Output: $outT4"
-fi
-
-# A stopped rebase (no unmerged entries) also blocks the snapshot.
-PROJ="$(make_project projT5)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" add -A
-git -C "$PROJ" commit -q -m one
-echo two > "$PROJ/two.txt"
-git -C "$PROJ" add -A
-git -C "$PROJ" commit -q -m two
-git -C "$PROJ" push -q "file://$BARE" main
-git -C "$PROJ" remote add infra "file://$BARE"
-GIT_SEQUENCE_EDITOR="sed -i 1s/^pick/edit/" git -C "$PROJ" rebase -q -i HEAD~1 >/dev/null 2>&1 || true
-headT5="$(git -C "$PROJ" rev-parse HEAD)"
-outT5="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] && grep -q "git rebase --abort" <<<"$outT5" &&
-  [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]] && [[ -d "$PROJ/.git/rebase-merge" ]]; then
-  pass "T: gitSnapshotCommit refuses during a rebase"
-else
-  fail "T: snapshot during a rebase: $outT5"
-fi
-echo "edit" > "$PROJ/edit.txt"
-outT5c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
-if [[ "$(tail -1 <<<"$outT5c")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]]; then
-  pass "T: gitCommit refuses during a rebase"
-else
-  fail "T: gitCommit during a rebase: $outT5c"
-fi
-
-# `git reset --hard` of a multi-pick leaves only sequencer/ behind. The
-# snapshot still refuses it and names the fix; gitCommit counts it only with
-# CHERRY_PICK_HEAD or REVERT_HEAD, so it commits.
-PROJ="$(make_project projT8)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-echo base > "$PROJ/pick.txt"
-git -C "$PROJ" add -A
-git -C "$PROJ" commit -q -m base
-git -C "$PROJ" push -q "file://$BARE" main
-git -C "$PROJ" remote add infra "file://$BARE"
-git -C "$PROJ" checkout -q -b side
-echo side1 > "$PROJ/pick.txt"; git -C "$PROJ" commit -q -am side1
-echo side2 > "$PROJ/side2.txt"; git -C "$PROJ" add -A; git -C "$PROJ" commit -q -m side2
-git -C "$PROJ" checkout -q main
-echo main1 > "$PROJ/pick.txt"; git -C "$PROJ" commit -q -am main1
-git -C "$PROJ" cherry-pick side~1 side >/dev/null 2>&1 || true
-rm -f "$PROJ/.git/CHERRY_PICK_HEAD"
-git -C "$PROJ" reset -q --hard
-headT8="$(git -C "$PROJ" rev-parse HEAD)"
-echo "edit" > "$PROJ/edit.txt"
-outT8s="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ -d "$PROJ/.git/sequencer" ]] && [[ "$(tail -1 <<<"$outT8s")" == "rc=1" ]] &&
-  grep -q "git cherry-pick --quit" <<<"$outT8s" && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT8" ]]; then
-  pass "T: a leftover sequencer/ blocks the snapshot, naming git cherry-pick --quit"
-else
-  fail "T: leftover sequencer/, snapshot: $outT8s"
-fi
-outT8c="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
-if [[ "$(tail -1 <<<"$outT8c")" == "rc=0" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" != "$headT8" ]]; then
-  pass "T: gitCommit ignores a leftover sequencer/ without CHERRY_PICK_HEAD or REVERT_HEAD"
-else
-  fail "T: leftover sequencer/, gitCommit: $outT8c"
-fi
 
 # destroy.sh: the destroy worked but the commit did not -> exit 3 and say so.
 PROJ="$(conflicted_proj projT6)"
@@ -1512,7 +582,7 @@ else
   fail "T: destroy.sh after a failed commit: rc=$rcT6. Output: $outT6"
 fi
 
-# A failing pre-commit hook: gitCommit reports the failed commit itself.
+# A failing pre-commit hook: infra-commit reports the failed commit itself.
 PROJ="$(make_project projT7)"
 BARE="$(fresh_bare)"
 set_repo_clone_url "$PROJ" "file://$BARE"
@@ -1534,127 +604,7 @@ else
   fail "T: destroy.sh with a failing hook: rc=$rcT7. Output: $outT7"
 fi
 
-# The snapshot clears the mark only after its commit succeeded, also when
-# infra/main does not exist yet.
-PROJ="$(make_project projT9)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-git -C "$PROJ" config luther.infraSnapshotTree true
-printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
-/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
-outT9a="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ "$(tail -1 <<<"$outT9a")" == "rc=1" ]] &&
-  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "T: a failed snapshot commit returns 1 and keeps the mark"
-else
-  fail "T: failed snapshot commit: $outT9a"
-fi
-rm -f "$PROJ/.git/hooks/pre-commit"
-outT9b="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
-if [[ "$(tail -1 <<<"$outT9b")" == "rc=0" ]] && git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null &&
-  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "T: the first snapshot (no infra/main yet) keeps the mark until the push"
-else
-  fail "T: first snapshot: $outT9b"
-fi
-outT9c="$(in_proj "$PROJ" 'gitPushInfra')"
-if git -C "$BARE" rev-parse -q --verify refs/heads/main >/dev/null &&
-  [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
-  pass "T: the push that creates infra/main clears the mark"
-else
-  fail "T: first push: $outT9c"
-fi
-# No infra remote: nothing is re-parented or pushed, so the mark stays.
-PROJ="$(make_project projT9n)"
-init_project_git "$PROJ"
-git -C "$PROJ" config luther.infraSnapshotTree true
-outT9n="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"; gitPushInfra')"
-if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "T: without an infra remote the mark stays"
-else
-  fail "T: no infra remote cleared the mark: $outT9n"
-fi
 
-# A staging failure stops the snapshot before it commits.
-BARE="$(fresh_bare)"
-baseT10="$(seed_infra "$BARE")"
-PROJ="$(make_project projT10)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-git -C "$PROJ" config luther.infraSnapshotTree true
-shim10="$WORKDIR/git-shim-add"
-mkdir -p "$shim10"
-cat > "$shim10/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == add ]]; then exit 1; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim10/git"
-outT10="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim10:$PATH" bash -c '
-  . ./shell_utils.sh
-  rc=0; gitSnapshotCommit "snapshot" || rc=$?; echo "rc=$rc"' 2>&1)"
-if [[ "$(tail -1 <<<"$outT10")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$baseT10" ]] &&
-  [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "T: a staging failure returns 1 without a snapshot commit"
-else
-  fail "T: staging failure: $outT10"
-fi
-
-# A failing `git rev-parse --git-path` fails closed: the snapshot refuses.
-PROJ="$(make_project projT11)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" remote add infra "file://$BARE"
-shim11="$WORKDIR/git-shim-gitpath"
-mkdir -p "$shim11"
-cat > "$shim11/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == rev-parse && " \$* " == *" --git-path "* ]]; then exit 1; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim11/git"
-outT11="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim11:$PATH" bash -c '
-  . ./shell_utils.sh
-  rc=0; gitSnapshotCommit "snapshot" || rc=$?; echo "rc=$rc"' 2>&1)"
-if [[ "$(tail -1 <<<"$outT11")" == "rc=1" ]] && grep -qi "could not read the git state" <<<"$outT11" &&
-  ! git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null; then
-  pass "T: a failing rev-parse --git-path fails closed"
-else
-  fail "T: failing rev-parse: $outT11"
-fi
-
-# A failing `git rm --cached` in untrackIgnoredFiles stops the commit, so a
-# tracked ignored file (#160: credentials) is not committed again.
-PROJ="$(make_project projT12)"
-init_project_git "$PROJ"
-echo "secret.txt" > "$PROJ/.gitignore"
-echo "old" > "$PROJ/secret.txt"
-git -C "$PROJ" add -A
-git -C "$PROJ" add -f secret.txt
-git -C "$PROJ" commit -q -m base
-echo "deploy-time-secret" > "$PROJ/secret.txt"
-headT12="$(git -C "$PROJ" rev-parse HEAD)"
-shim12="$WORKDIR/git-shim-rm"
-mkdir -p "$shim12"
-cat > "$shim12/git" <<SHIM
-#!/usr/bin/env bash
-for a in "\$@"; do [[ "\$a" == rm ]] && exit 1; done
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim12/git"
-outT12="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim12:$PATH" bash -c '
-  . ./shell_utils.sh
-  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
-if [[ "$(tail -1 <<<"$outT12")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT12" ]] &&
-  ! git -C "$PROJ" log -p | grep -q "deploy-time-secret"; then
-  pass "T: a failed untrack stops gitCommit; the ignored file is not committed"
-else
-  fail "T: failed untrack: $outT12"
-fi
 
 # destroy.sh: a pre-destroy step that exits 75 does not look like "destroyed,
 # commit failed".
@@ -1679,90 +629,21 @@ else
   fail "T: pre-destroy 75: rc=$rcT13. Output: $outT13"
 fi
 
-# A failed snapshot followed by an up-to-date push keeps the mark: only a
-# push of this run's snapshot that created infra/main clears it.
-BARE="$(fresh_bare)"
-PROJ="$(make_project projT14)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-git -C "$PROJ" add -A
-git -C "$PROJ" commit -q -m base
-git -C "$PROJ" push -q "file://$BARE" main
-git -C "$PROJ" remote add infra "file://$BARE"
-git -C "$PROJ" config luther.infraSnapshotTree true
-echo "change" > "$PROJ/t14.txt"
-printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
-/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
-outT14="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot" || true; gitPushInfra')"
-if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "T: a failed snapshot and an up-to-date push keep the mark"
-else
-  fail "T: the mark was cleared after a failed snapshot: $outT14"
-fi
-
-# untrackIgnoredFiles fails closed when its ls-files capture fails.
-PROJ="$(make_project projT15)"
-init_project_git "$PROJ"
-git -C "$PROJ" add -A
-git -C "$PROJ" commit -q -m base
-echo "change" > "$PROJ/t15.txt"
-headT15="$(git -C "$PROJ" rev-parse HEAD)"
-shim15="$WORKDIR/git-shim-lsignored"
-mkdir -p "$shim15"
-cat > "$shim15/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == ls-files && " \$* " == *" --ignored "* ]]; then exit 1; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim15/git"
-outT15="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim15:$PATH" bash -c '
-  . ./shell_utils.sh
-  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
-if [[ "$(tail -1 <<<"$outT15")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT15" ]]; then
-  pass "T: a failed ls-files in untrackIgnoredFiles stops gitCommit"
-else
-  fail "T: failed ls-files --ignored: $outT15"
-fi
-
-# A failing `git ls-files -u` is reported as an unreadable index.
-shim16="$WORKDIR/git-shim-lsu"
-mkdir -p "$shim16"
-cat > "$shim16/git" <<SHIM
-#!/usr/bin/env bash
-if [[ "\${1:-}" == ls-files && " \$* " == *" -u "* ]]; then exit 1; fi
-exec "$(command -v git)" "\$@"
-SHIM
-/bin/chmod +x "$shim16/git"
-outT16="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim16:$PATH" bash -c '
-  . ./shell_utils.sh
-  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
-if [[ "$(tail -1 <<<"$outT16")" == "rc=1" ]] && grep -q "could not read the git index" <<<"$outT16" &&
-  ! grep -q "resolve them" <<<"$outT16"; then
-  pass "T: a failed ls-files -u says the index could not be read"
-else
-  fail "T: failed ls-files -u: $outT16"
-fi
 
 # =============================================================================
 echo ""
-echo "=== Case V: cloneInfraRepo marks the checkout as a snapshot tree ==="
+echo "=== Case U: pull.sh in an -infra clone ==="
 # =============================================================================
-BARE="$(fresh_bare)"
-seed_infra "$BARE" >/dev/null
-git -C "$BARE" symbolic-ref HEAD refs/heads/main
-PROJ="$(make_project projV)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-outV="$(in_proj "$PROJ" 'cloneInfraRepo')"
-if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "V: cloneInfraRepo sets luther.infraSnapshotTree"
-else
-  fail "V: cloneInfraRepo did not set the mark. Output: $outV"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case U: pull.sh ==="
-# =============================================================================
+# seed_infra <bare> — push a one-commit main to bare; prints the commit.
+seed_infra() {
+  local src="$WORKDIR/seed-$RANDOM$RANDOM"
+  git init -q -b main "$src"
+  echo "infra" > "$src/infra.txt"
+  git -C "$src" add -A
+  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "infra base"
+  git -C "$src" push -q "file://$1" main
+  git -C "$src" rev-parse HEAD
+}
 # An -infra clone has no origin remote: pull.sh skips the template merge and
 # still merges infra/main.
 BARE="$(fresh_bare)"
@@ -1794,39 +675,30 @@ else
   fail "U: -infra clone pull: rc=$rcU1. Output: $outU1"
 fi
 
-# gitMergeOriginMain merges the branch main, not a tag named main.
-TPL="$(fresh_bare)"
-tplsrc="$WORKDIR/projU2-tpl"
-git init -q -b main "$tplsrc"
-echo "base" > "$tplsrc/base.txt"
-git -C "$tplsrc" add -A
-git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m base
-git -C "$tplsrc" push -q "file://$TPL" main
-PROJ="$WORKDIR/projU2"
-git clone -q -b main "file://$TPL" "$PROJ"
-git -C "$PROJ" config user.email t@l
-git -C "$PROJ" config user.name T
-cp "$REPO_ROOT/shell_utils.sh" "$REPO_ROOT/pull.sh" "$PROJ/"
-printf 'shell_utils.sh\npull.sh\n' >> "$PROJ/.git/info/exclude"
-echo "origin" > "$tplsrc/origin.txt"
-git -C "$tplsrc" add -A
-git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m "template update"
-git -C "$tplsrc" push -q "file://$TPL" main
-git -C "$tplsrc" checkout -q -b side HEAD~1
-echo "tagged" > "$tplsrc/tagged.txt"
-git -C "$tplsrc" add -A
-git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m "tagged, not on main"
-git -C "$tplsrc" tag main
-git -C "$tplsrc" push -q "file://$TPL" refs/tags/main
-git -C "$PROJ" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "local"
+
+# =============================================================================
+echo ""
+echo "=== Case W: a mars without the infra-* commands stops the apply ==="
+# =============================================================================
+# ui-core's Argo jobs pin their own mars image. If it predates the infra-*
+# commands, marsInfra must fail closed: apply.sh stops before Terraform, as
+# for any failed merge, instead of applying with no -infra repo handling.
+PROJ="$(make_project projW)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+init_project_git "$PROJ"
+OLD_MARS="$WORKDIR/old-mars"
+printf '#!/usr/bin/env bash\necho "mars: error: unexpected argument $2" >&2\nexit 80\n' > "$OLD_MARS"
+/bin/chmod +x "$OLD_MARS"
 set +e
-outU2="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
-rcU2=$?
+outW="$(MARS_BIN="$OLD_MARS" run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcW=$?
 set -e
-if [[ "$rcU2" -eq 0 ]] && [[ -f "$PROJ/origin.txt" ]] && [[ ! -f "$PROJ/tagged.txt" ]]; then
-  pass "U: pull.sh merges origin's branch main, not a tag named main"
+if [[ "$rcW" -eq 1 ]] && ! grep -q "apply --approve" "$CMD_LOG" &&
+  grep -qF "has no 'mars infra-merge'" <<<"$outW"; then
+  pass "W: an old mars stops the apply before Terraform, with a loud warning"
 else
-  fail "U: origin tag main: rc=$rcU2 origin.txt=$([[ -f "$PROJ/origin.txt" ]] && echo y || echo n) tagged.txt=$([[ -f "$PROJ/tagged.txt" ]] && echo y || echo n). Output: $outU2"
+  fail "W: old mars: rc=$rcW. Output: $outW"
 fi
 
 # --- Summary -----------------------------------------------------------------
