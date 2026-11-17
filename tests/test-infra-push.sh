@@ -700,6 +700,20 @@ if [[ "$rcW" -eq 1 ]] && ! grep -q "apply --approve" "$CMD_LOG" &&
 else
   fail "W: old mars: rc=$rcW. Output: $outW"
 fi
+# With no .git there is no git work: an old mars must not turn a destroy of
+# a stage that never had git into 75 ("destroyed, not committed").
+PROJ="$(make_project projW2)"
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+set +e
+outW2="$(MARS_BIN="$OLD_MARS" run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcW2=$?
+set -e
+if [[ "$rcW2" -eq 0 ]] && grep -q "destroy --approve" "$CMD_LOG" && grep -qF "skipping infra-commit" <<<"$outW2"; then
+  pass "W: with no .git, an old mars skips the commit and the destroy exits 0"
+else
+  fail "W: old mars, no .git, destroy: rc=$rcW2. Output: $outW2"
+fi
 
 # --- Summary -----------------------------------------------------------------
 echo ""

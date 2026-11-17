@@ -33,10 +33,6 @@ trap cleanup EXIT
 WORKDIR="$(mktemp -d)"
 PROJECT="$WORKDIR/project"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# prepare-custom-stack.sh clones the -infra repo with mars infra-clone.
-# shellcheck source=tests/mars-infra.sh
-. "$SCRIPT_DIR/tests/mars-infra.sh"
-requireMarsInfra
 
 # --- macOS compat: wrap tar to strip --warning flag (BSD tar doesn't support it) ---
 if ! tar --warning=no-unknown-keyword --help &>/dev/null; then
@@ -387,6 +383,12 @@ echo "infra-readme" > "$INFRA_SRC/README.md"
   git commit -q -m "initial infra commit"
 )
 git clone -q --bare "$INFRA_SRC" "$INFRA_BARE"
+
+# Tests 9-13 run the -infra clone and commit, which are mars infra-*
+# commands: without a mars that has them they fail, and this says why.
+# shellcheck source=tests/mars-infra.sh
+. "$SCRIPT_DIR/tests/mars-infra.sh"
+hasMarsInfra || fail "re-deploy: tests 9-13 need MARS_BIN (a mars with the infra-* commands)"
 
 # 9. Re-deploy with archive: .git/ is created when repo_clone_ssh_url is set and no .git exists
 echo ""

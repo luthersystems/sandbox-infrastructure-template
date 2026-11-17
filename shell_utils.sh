@@ -116,8 +116,8 @@ mustGetTfVar() {
 #     `go install github.com/luthersystems/mars/cmd/mars@<release>`. Use it
 #     on a laptop for pull.sh and push.sh, which reach GitHub: the docker
 #     wrapper below has neither your SSH keys nor a token file;
-#   - the mars binary of the mars image ($MARS_CONTAINER_ROOT/mars), where
-#     the template's scripts run (ui-core's Argo jobs);
+#   - in a mars image (where ui-core's Argo jobs run the template), the
+#     image's own mars, as resolveMarsBinary finds it;
 #   - else the project's ./mars docker wrapper, at the pinned .mars-version.
 resolveMarsCLI() {
   if [[ -n "${MARS_BIN:-}" ]]; then
@@ -125,27 +125,44 @@ resolveMarsCLI() {
     return 0
   fi
   local mars_root="${MARS_CONTAINER_ROOT:-/opt/mars}"
-  if [[ -x "$mars_root/mars" ]]; then
-    echo "$mars_root/mars"
+  if [[ -x "$mars_root/mars" || -e "$mars_root/run.sh" ]]; then
+    resolveMarsBinary
     return 0
   fi
   echo "$MARS_PROJECT_ROOT/mars"
 }
 
+# MARS_INFRA_CHECKED caches, per process, the mars that answered for the
+# infra-* commands, so apply.sh's three calls start it once more, not three
+# times.
+MARS_INFRA_CHECKED=""
+
 # marsInfra <command> [args...] runs `mars default <command>` on the
 # project root and returns its exit code (docs/infra-repo.md lists them).
 # It runs in the project root with --root ., so the path is right both for
 # a native mars and inside the docker wrapper, which mounts the current
-# directory. A native mars older than the infra-* commands fails closed
-# (1) with a loud warning: the merge then stops the apply, and the
-# non-fatal steps (push, persist) warn as for any git problem.
+# directory.
+#
+# A mars older than the infra-* commands fails closed (1) with a loud
+# warning when there is git work to do: the merge then stops the apply, and
+# the non-fatal steps (push, persist) warn as for any git problem. With no
+# .git, merge, commit, snapshot and push have nothing to do and return 0, as
+# the mars commands themselves would; only infra-clone and infra-persist,
+# which make the .git, still need the command.
 marsInfra() {
   local cmd="$1" bin
   shift
   bin="$(resolveMarsCLI)"
-  if [[ "$bin" != "$MARS_PROJECT_ROOT/mars" ]] && ! "$bin" default "$cmd" --help >/dev/null 2>&1; then
-    echo "⚠️  [git-infra] WARNING: $bin has no 'mars $cmd'; it needs a mars release with the infra-* commands (luthersystems/mars#368). [sandbox-infrastructure-template#190]" >&2
-    return 1
+  if [[ "$MARS_INFRA_CHECKED" != "$bin" ]]; then
+    if ! "$bin" default infra-commit --help >/dev/null 2>&1; then
+      if [[ ! -e "$MARS_PROJECT_ROOT/.git" && "$cmd" != infra-clone && "$cmd" != infra-persist ]]; then
+        echo "ℹ️  [git-infra] no .git at $MARS_PROJECT_ROOT and $bin has no infra-* commands; skipping $cmd." >&2
+        return 0
+      fi
+      echo "⚠️  [git-infra] WARNING: $bin has no 'mars $cmd' (or does not run); it needs a mars release with the infra-* commands (luthersystems/mars#368). [sandbox-infrastructure-template#190]" >&2
+      return 1
+    fi
+    MARS_INFRA_CHECKED="$bin"
   fi
   (cd "$MARS_PROJECT_ROOT" && "$bin" default "$cmd" --root . "$@")
 }

@@ -9,4 +9,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # mars infra-commit [message]: commit the project tree. 0 committed or
 # nothing to commit; 1 refused (a conflict, rebase, cherry-pick or revert)
 # or failed, nothing committed.
-marsInfra infra-commit ${1+"$1"}
+# "--" ends the flags, so a message that starts with "-" is still the message.
+marsInfra infra-commit ${1+-- "$1"}
