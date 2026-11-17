@@ -16,6 +16,10 @@
 # --ignore-drift is that human decision (same end-to-end override channel as
 # the apply path: reliable API ?ignore_drift=true → workflow args → argv).
 # See tfDestroy in utils.sh for the exact semantics matrix.
+#
+# Exit codes: 0 destroyed and committed; 3 destroyed, but the git commit
+# failed (for example unresolved merge conflicts): the resources are gone,
+# so resolve the merge and run commit.sh; anything else: the destroy failed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,4 +75,7 @@ if [[ "$ignore_drift" == "true" ]]; then
 else
   tfDestroy
 fi
-gitCommit
+if ! gitCommit; then
+  echo "⚠️  The resources are destroyed, but the git commit was not made. Resolve the merge, then run commit.sh." >&2
+  exit 3
+fi

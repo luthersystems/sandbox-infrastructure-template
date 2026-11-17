@@ -535,10 +535,28 @@ if git -C "$BARE" ls-tree -r --name-only main | grep -qx "tf/custom-stack-provis
 else
   fail "I: custom stack missing from the pushed tree: $(git -C "$BARE" ls-tree -r --name-only main | tr "\n" " ") Output: $outI"
 fi
-if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
-  pass "I: cloneInfraRepo marks the checkout as a snapshot tree"
+# The snapshot committed onto infra/main, so HEAD is related again: the mark
+# is gone, and a later pull.sh in this checkout merges a teammate's push.
+if [[ -z "$(git -C "$PROJ" config luther.infraSnapshotTree || true)" ]]; then
+  pass "I: the snapshot clears luther.infraSnapshotTree"
 else
-  fail "I: cloneInfraRepo did not set luther.infraSnapshotTree"
+  fail "I: luther.infraSnapshotTree is still set after the snapshot"
+fi
+mate="$WORKDIR/projI-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "mate" > "$mate/mate.txt"
+git -C "$mate" add -A
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
+git -C "$mate" push -q origin main
+cp "$REPO_ROOT/pull.sh" "$PROJ/pull.sh"
+set +e
+outI2="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
+rcI2=$?
+set -e
+if [[ "$rcI2" -eq 0 ]] && [[ -f "$PROJ/mate.txt" ]]; then
+  pass "I: after the snapshot, pull.sh merges a teammate's push"
+else
+  fail "I: pull.sh after the snapshot: rc=$rcI2. Output: $outI2"
 fi
 
 # =============================================================================
@@ -1029,6 +1047,20 @@ if [[ "$rcQ2" -ne 0 ]] && [[ -e "$PROJ/.git/MERGE_HEAD" ]] && grep -q '<<<<<<<' 
 else
   fail "Q: pull.sh rc=$rcQ2, MERGE_HEAD=$([[ -e "$PROJ/.git/MERGE_HEAD" ]] && echo yes || echo no). Output: $outQ2"
 fi
+# The developer resolves the conflict; commit.sh concludes the merge.
+cp "$REPO_ROOT/commit.sh" "$PROJ/commit.sh"
+echo "resolved" > "$PROJ/conflict.txt"
+git -C "$PROJ" add conflict.txt
+set +e
+outQ3="$(cd "$PROJ" && HOME="$WORKDIR" bash ./commit.sh "resolve" 2>&1)"
+rcQ3=$?
+set -e
+if [[ "$rcQ3" -eq 0 ]] && [[ ! -e "$PROJ/.git/MERGE_HEAD" ]] &&
+  [[ "$(git -C "$PROJ" rev-list --parents -n1 HEAD | wc -w)" -eq 3 ]]; then
+  pass "Q: commit.sh concludes a resolved merge (a merge commit)"
+else
+  fail "Q: commit.sh after resolving: rc=$rcQ3. Output: $outQ3"
+fi
 
 # =============================================================================
 echo ""
@@ -1374,6 +1406,7 @@ git init -q -b main "$seedT4"
 mkdir -p "$seedT4/tf"
 printf '#!/bin/sh\n' > "$seedT4/tf/apply.sh"
 echo 'x = 1' > "$seedT4/data.tf"
+echo '{}' > "$seedT4/data.json"
 git -C "$seedT4" add -A
 git -C "$seedT4" -c user.email=t@l -c user.name=T commit -q -m "infra: scripts as 100644"
 git -C "$seedT4" push -q "file://$BARE" main
@@ -1382,18 +1415,73 @@ set_repo_clone_url "$PROJ" "file://$BARE"
 init_project_git "$PROJ"
 printf '#!/bin/sh\n' > "$PROJ/tf/apply.sh"
 echo 'x = 1' > "$PROJ/data.tf"
+echo '{}' > "$PROJ/data.json"
 git -C "$PROJ" add -A
-git -C "$PROJ" update-index --chmod=+x tf/apply.sh
+git -C "$PROJ" update-index --chmod=+x tf/apply.sh data.json
 git -C "$PROJ" commit -q -m "project: apply.sh 100755"
 git -C "$PROJ" remote add infra "file://$BARE"
 /bin/chmod 0777 "$PROJ/tf/apply.sh" "$PROJ/data.tf"
 outT4="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
 modeT4() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
-if [[ "$(modeT4 tf/apply.sh)" == "100755" && "$(modeT4 data.tf)" == "100644" ]] &&
+if [[ "$(modeT4 tf/apply.sh)" == "100755" && "$(modeT4 data.tf)" == "100644" &&
+  "$(modeT4 data.json)" == "100644" ]] &&
   [[ "$(git -C "$PROJ" rev-parse HEAD^)" == "$(git -C "$BARE" rev-parse main)" ]]; then
   pass "T: the snapshot carries the project's 100755 over infra/main's 100644; a 0777 .tf stays 100644"
 else
-  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf). Output: $outT4"
+  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf) data.json=$(modeT4 data.json). Output: $outT4"
+fi
+
+# A stopped rebase (no unmerged entries) also blocks the snapshot.
+PROJ="$(make_project projT5)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m one
+echo two > "$PROJ/two.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m two
+git -C "$PROJ" push -q "file://$BARE" main
+git -C "$PROJ" remote add infra "file://$BARE"
+GIT_SEQUENCE_EDITOR="sed -i 1s/^pick/edit/" git -C "$PROJ" rebase -q -i HEAD~1 >/dev/null 2>&1 || true
+headT5="$(git -C "$PROJ" rev-parse HEAD)"
+outT5="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+if [[ -d "$PROJ/.git/rebase-merge" ]] && [[ "$(tail -1 <<<"$outT5")" == "rc=1" ]] &&
+  [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT5" ]] && [[ -d "$PROJ/.git/rebase-merge" ]]; then
+  pass "T: gitSnapshotCommit refuses during a rebase"
+else
+  fail "T: snapshot during a rebase: $outT5"
+fi
+
+# destroy.sh: the destroy worked but the commit did not -> exit 3 and say so.
+PROJ="$(conflicted_proj projT6)"
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+set +e
+outT6="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT6=$?
+set -e
+if [[ "$rcT6" -eq 3 ]] && grep -q "destroy --approve" "$CMD_LOG" &&
+  grep -qi "destroyed" <<<"$outT6" && grep -q "commit.sh" <<<"$outT6"; then
+  pass "T: destroy.sh exits 3 with a clear message when the commit fails after the destroy"
+else
+  fail "T: destroy.sh after a failed commit: rc=$rcT6. Output: $outT6"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case V: cloneInfraRepo marks the checkout as a snapshot tree ==="
+# =============================================================================
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+git -C "$BARE" symbolic-ref HEAD refs/heads/main
+PROJ="$(make_project projV)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+outV="$(in_proj "$PROJ" 'cloneInfraRepo')"
+if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "V: cloneInfraRepo sets luther.infraSnapshotTree"
+else
+  fail "V: cloneInfraRepo did not set the mark. Output: $outV"
 fi
 
 # =============================================================================
