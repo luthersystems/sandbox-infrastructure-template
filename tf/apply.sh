@@ -10,13 +10,13 @@ logTemplateVersion
 logPresetsVersion
 
 # Merge infra/main before Terraform runs, so a developer's stale checkout
-# applies with teammates' edits. A real merge failure (conflicts) stops the
-# apply, as it always did. Unrelated histories (rc 2) do not: that is
-# ui-core's squashed project tree, which never shares a commit with
-# infra/main and is the deploy's source of truth; the snapshot after the
-# apply pushes it on top of infra/main (#160).
+# applies with teammates' edits. A failed merge stops the apply, as it always
+# did; --abort-on-conflict cleans it up first, so the snapshot of a later run
+# cannot push conflict markers. rc 2 (nothing to merge into: an unborn HEAD,
+# or ui-core's squashed tree, which shares no commit with infra/main) does
+# not: the snapshot after the apply lands on top of infra/main (#160).
 merge_rc=0
-gitMergeInfraMain || merge_rc=$?
+gitMergeInfraMain --abort-on-conflict || merge_rc=$?
 if [[ "$merge_rc" -ne 0 && "$merge_rc" -ne 2 ]]; then
   exit "$merge_rc"
 fi
