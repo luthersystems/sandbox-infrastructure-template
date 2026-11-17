@@ -92,10 +92,10 @@ RSYNC_EXCLUDES+=(--exclude '.git' --exclude '.terraform' --exclude '.terraform.l
 
 # --- Re-deploy: initialize git from infra repo if needed ----------------------------------------
 # On re-deploy the working directory is an extracted archive (no .git/).
-# Clone the infra repo so that apply.sh's gitCommit/gitPushInfra will work
-# (cloneInfraRepo, shell_utils.sh). Without a GitHub token or deploy key in
-# this step it skips, and the custom-stack apply clones it instead.
-cloneInfraRepo
+# Clone the infra repo so that the apply's snapshot and push work (mars
+# infra-clone). Without a GitHub token or deploy key in this step it skips,
+# and the custom-stack apply clones it instead. It never fails the step.
+marsInfra infra-clone || true
 
 # --- Archive-mode (preferred) --------------------------------------------------------------------
 if [[ -n "${CUSTOM_ARCHIVE_TGZ:-}" && "${CUSTOM_ARCHIVE_TGZ}" != "null" ]]; then

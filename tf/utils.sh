@@ -52,7 +52,7 @@ tfSetup() {
   # secrets/ dir into the stage working dir as a single auto-loaded tfvars file
   # (zz-secret.auto.tfvars.json — the zz- prefix sorts it last so it overrides).
   # Because secrets/ (and tf/*/zz-secret.auto.tfvars.json) are gitignored, this
-  # keeps credentials OFF the persistInfraRepo `git add -A` push — unlike
+  # keeps credentials OFF the -infra snapshot (mars infra-persist) — unlike
   # common.auto.tfvars.json under tf/auto-vars/. tfSetup's CWD is tf/ (not the
   # project root), so use the absolute $MARS_PROJECT_ROOT path. Multiple
   # *.auto.tfvars.json cannot be concatenated (invalid JSON), so copy only the

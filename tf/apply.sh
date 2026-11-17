@@ -13,12 +13,12 @@ logPresetsVersion
 # applies with teammates' edits. A failed merge stops the apply, as it always
 # did; --abort-on-conflict cleans it up first, so the snapshot of a later run
 # cannot push conflict markers (a merge it did not start is refused, not
-# aborted). rc 2 does not stop it: a checkout cloneInfraRepo laid the deploy
+# aborted). rc 2 does not stop it: a checkout infra-clone laid the deploy
 # archive over, an unborn HEAD, or ui-core's squashed tree, which shares no
 # commit with infra/main. The snapshot after the apply lands on top of
 # infra/main (#160).
 merge_rc=0
-gitMergeInfraMain --abort-on-conflict || merge_rc=$?
+marsInfra infra-merge --abort-on-conflict || merge_rc=$?
 if [[ "$merge_rc" -ne 0 && "$merge_rc" -ne 2 ]]; then
   exit "$merge_rc"
 fi
@@ -28,6 +28,7 @@ tfApply
 # After the apply: the snapshot is the deployed tree, and a git problem must
 # not fail a deploy that already applied. It fetches infra/main again: a
 # teammate may have pushed during the apply, and the push must fast-forward.
-gitSnapshotCommit "auto-commit: infrastructure changes [ci skip]" ||
-  echo "⚠️  [git-infra] WARNING: gitSnapshotCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
-gitPushInfra
+marsInfra infra-snapshot "auto-commit: infrastructure changes [ci skip]" ||
+  echo "⚠️  [git-infra] WARNING: mars infra-snapshot returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
+marsInfra infra-push ||
+  echo "⚠️  [git-infra] WARNING: mars infra-push returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2

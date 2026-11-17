@@ -110,13 +110,13 @@ captureOutputs
 #
 # The saved-plan apply path (ui-core makeApplyAllFromPlanWorkflow) runs this
 # script with checkDrift=true and, like the drift-check branch of
-# apply-with-outputs.sh, never reaches apply.sh's gitPushInfra. Scope to
+# apply-with-outputs.sh, never reaches apply.sh's push. Scope to
 # custom-stack-provision (the stage carrying the full generated stack, with the
 # infra .git + remote wired by prepare-custom-stack in the prior plan
 # workflow). Non-fatal by contract.
 if [[ "$lifecycle" == "custom-stack-provision" ]]; then
-  persistInfraRepo || \
-    echo "⚠️  [git-infra] WARNING: persistInfraRepo returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
+  marsInfra infra-persist || \
+    echo "⚠️  [git-infra] WARNING: mars infra-persist returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
 fi
 
 # Write drift.json stub if drift-check didn't produce one (not invoked, or

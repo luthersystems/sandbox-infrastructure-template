@@ -30,7 +30,7 @@ set -euo pipefail
 # 75 (sourcing utils.sh, tfInit, tfDestroy) exits 1 instead. A sourced file
 # that sets its own EXIT trap later would replace this one.
 commit_failed=false
-trap 'rc=$?; if [[ "$rc" -eq 75 && "$commit_failed" != true ]]; then exit 1; fi' EXIT
+trap 'if [[ $? -eq 75 && "$commit_failed" != true ]]; then exit 1; fi' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -85,8 +85,8 @@ if [[ "$ignore_drift" == "true" ]]; then
 else
   tfDestroy
 fi
-# gitCommit checks each of its steps, so running it under `if` is safe.
-if ! gitCommit; then
+# mars infra-commit returns 1 when it refused or failed, nothing committed.
+if ! marsInfra infra-commit; then
   echo "⚠️  The resources are destroyed, but the git commit was not made. Fix the git state (see above), then run commit.sh." >&2
   commit_failed=true
   exit 75
