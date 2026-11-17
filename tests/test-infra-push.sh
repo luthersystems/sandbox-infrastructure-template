@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Seam test for the per-project -infra repo push path (issue #143).
+# Integration checks: the template's scripts drive the mars infra-* commands.
 #
-# Root cause captured here: ui-core always runs a custom-stack apply through the
-# drift-check code path — `apply-with-outputs.sh <lc> --check-drift` or
-# `apply-plan.sh <lc> --plan-file <id> --check-drift`. Neither of those branches
-# used to reach gitMergeInfraMain/gitCommit/gitPushInfra (only apply.sh did, and
-# ui-core never invokes apply.sh for an apply), so 89/89 -infra repos were left
-# EMPTY despite a SUCCESS. The fix wires persistInfraRepo into both real apply
-# paths, scoped to the custom-stack-provision stage.
+# Every git step on a project tree and its per-project -infra repo is a mars
+# command (luthersystems/mars docs/infra-repo.md). The rules themselves (the
+# merge's exit codes and refusals, the snapshot on top of infra/main, the
+# staging, exec-bit and untrack rules, the snapshot-tree marks) are tested in
+# Go in mars, internal/infrarepo, on real temp repos: that is the port of
+# this file's 110 earlier checks.
 #
-# This test uses a MOCK terraform (no cloud) but REAL git, driving the actual
-# apply-with-outputs.sh / apply-plan.sh scripts against a local bare "infra"
-# repo. It asserts:
-#   (i)  the push path is reached and a ref lands on the infra repo when the
-#        repo_clone_ssh_url auto-var + a .git are present (custom-stack stage);
-#   (ii) the loud, greppable "[git-infra] WARNING:" fires (and the apply still
-#        exits 0) when either the .git or the auto-var is absent;
-#   (iii) the persist step is SCOPED to custom-stack-provision — a non-custom
-#        apply stage does not push.
+# What stays here is what only the template's scripts decide, run with a
+# MOCK terraform (no cloud) and REAL git and mars against a local bare
+# "infra" repo:
+#   - the custom-stack apply paths (apply-with-outputs.sh, apply-plan.sh)
+#     persist to the -infra repo, and only for custom-stack-provision (#143);
+#   - apply.sh merges infra/main before Terraform, stops on a failed merge
+#     with the conflict aborted, and pushes a snapshot after the apply;
+#   - destroy.sh exits 75 when the destroy worked but the commit did not, and
+#     never on a stray 75 from an earlier step;
+#   - pull.sh and commit.sh; the template tracks no ignored file; the
+#     template-only workflows carry their repository guard;
+#   - a mars without the infra-* commands stops the apply (fail closed).
 #
-# No rsync dependency (unlike test-prepare-custom-stack.sh) so it runs anywhere
-# git + jq + a POSIX terraform mock are available.
+# MARS_BIN must name a mars build with the infra-* commands, for example
+#   go build -o /tmp/mars ./cmd/mars   (in a luthersystems/mars checkout)
+#   MARS_BIN=/tmp/mars bash tests/test-infra-push.sh
 
 PASS=0
 FAIL=0
@@ -44,6 +47,9 @@ if ! command -v git &>/dev/null; then
   echo "SKIP: git is required for these tests" >&2
   exit 0
 fi
+# shellcheck source=tests/mars-infra.sh
+. "$REPO_ROOT/tests/mars-infra.sh"
+requireMarsInfra
 
 # --- Mock binaries (terraform / mars / chmod) ---------------------------------
 MOCK_BIN="$WORKDIR/bin"
@@ -109,9 +115,8 @@ EOF
   cp "$REPO_ROOT/tf/drift-check.sh" "$proj/tf/drift-check.sh"
   cp "$REPO_ROOT/tf/apply-with-outputs.sh" "$proj/tf/apply-with-outputs.sh"
   cp "$REPO_ROOT/tf/apply-plan.sh" "$proj/tf/apply-plan.sh"
-  # Copy the repo's REAL .gitignore into the fixture so `git add -A` in
-  # persistInfraRepo honors the #160 denylist — this is what makes the Case G
-  # canary below actually exercise the exclusions rather than pass vacuously.
+  # The repo's REAL .gitignore: the snapshot's `git add -A` honors the #160
+  # denylist (mars tests the denylist itself: TestPersistKeepsSecretsOut).
   cp "$REPO_ROOT/.gitignore" "$proj/.gitignore"
   # Mock apply.sh (only reached by simple mode, which these tests don't use).
   printf '#!/usr/bin/env bash\necho "apply.sh $*" >> "%s"\n' "$CMD_LOG" > "$proj/tf/apply.sh"
@@ -172,7 +177,7 @@ set -e
 [[ "$rcA" -eq 0 ]] && pass "A: apply exits 0" || fail "A: expected exit 0, got $rcA. Output: $outA"
 
 if echo "$outA" | grep -qF "[git-infra] Persisting applied stack"; then
-  pass "A: persistInfraRepo was reached (custom-stack scope)"
+  pass "A: mars infra-persist was reached (custom-stack scope)"
 else
   fail "A: persist step not reached. Output: $outA"
 fi
@@ -215,7 +220,7 @@ set -e
 [[ "$rcB" -eq 0 ]] && pass "B: apply-plan exits 0" || fail "B: expected exit 0, got $rcB. Output: $outB"
 
 if echo "$outB" | grep -qF "[git-infra] Persisting applied stack"; then
-  pass "B: persistInfraRepo was reached"
+  pass "B: mars infra-persist was reached"
 else
   fail "B: persist step not reached. Output: $outB"
 fi
@@ -232,7 +237,7 @@ echo "=== Case C: no .git → LOUD warning, no push, apply still succeeds ==="
 # =============================================================================
 PROJ="$(make_project projC)"
 BARE="$(fresh_bare)"
-# A remote the apply step cannot clone either (persistInfraRepo tries,
+# A remote the apply step cannot clone either (infra-persist tries,
 # since a step with the GitHub App token can clone what prepare could not).
 set_repo_clone_url "$PROJ" "file://$WORKDIR/no-such-repo.git"
 # NOTE: deliberately NOT initializing .git at the project root.
@@ -255,34 +260,6 @@ if [[ "$(bare_commit_count "$BARE")" -eq 0 ]]; then
   pass "C: nothing pushed when .git is absent"
 else
   fail "C: something was pushed despite missing .git"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case D: repo_clone_ssh_url empty → LOUD warning, no remote, exits 0 ==="
-# =============================================================================
-PROJ="$(make_project projD)"
-init_project_git "$PROJ"
-# auto-vars intentionally has NO repo_clone_ssh_url (default from make_project).
-
-set +e
-outD="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcD=$?
-set -e
-
-[[ "$rcD" -eq 0 ]] && pass "D: apply exits 0 even with empty repo_clone_ssh_url" \
-  || fail "D: expected exit 0, got $rcD. Output: $outD"
-
-if echo "$outD" | grep -qF "[git-infra] WARNING:" && echo "$outD" | grep -qF "repo_clone_ssh_url is empty"; then
-  pass "D: loud '[git-infra] WARNING: ... repo_clone_ssh_url is empty' fired"
-else
-  fail "D: expected a loud empty-URL warning. Output: $outD"
-fi
-
-if echo "$outD" | grep -qF "no 'infra' remote configured"; then
-  pass "D: gitPushInfra warned that no infra remote is configured"
-else
-  fail "D: expected 'no infra remote configured' warning. Output: $outD"
 fi
 
 # =============================================================================
@@ -315,356 +292,11 @@ fi
 
 # =============================================================================
 echo ""
-echo "=== Case F: re-deploy — second apply fast-forwards the -infra repo ==="
-# =============================================================================
-PROJ="$(make_project projF)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-
-set +e
-run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift >/dev/null
-first_rc=$?
-set -e
-first_count="$(bare_commit_count "$BARE")"
-
-# Mutate the working tree so the second apply has something new to commit.
-echo "second-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
-
-set +e
-outF="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcF=$?
-set -e
-second_count="$(bare_commit_count "$BARE")"
-
-if [[ "$first_rc" -eq 0 && "$rcF" -eq 0 ]]; then
-  pass "F: both applies exit 0"
-else
-  fail "F: apply exit codes first=$first_rc second=$rcF. Output: $outF"
-fi
-
-if [[ "$first_count" -ge 1 && "$second_count" -gt "$first_count" ]]; then
-  pass "F: re-deploy added a new commit to the -infra repo ($first_count → $second_count)"
-else
-  fail "F: re-deploy did not advance the -infra repo ($first_count → $second_count)"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case G: #160 canary — sensitive artifacts never reach the -infra repo ==="
-# =============================================================================
-# make_project copies the repo's real .gitignore into the fixture and drops
-# decoys (tf/auto-vars/common.auto.tfvars.json + outputs/dummy.json). Here we
-# additionally drop secrets/ credential files, a saved plan, a backend json, and
-# a per-stage tfvars copy, then run a real custom-stack apply and assert the
-# pushed tree carries NONE of them — the #143 push path must not leak the #160
-# artifacts. tfSetup also stages secrets/cloud-credentials.auto.tfvars.json into
-# tf/custom-stack-provision/zz-secret.auto.tfvars.json, so the *.auto.tfvars.json
-# assertion also covers the Phase-1 staged credential copy.
-PROJ="$(make_project projG)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"   # writes a decoy tf/auto-vars/common.auto.tfvars.json
-init_project_git "$PROJ"
-
-# Decoy sensitive artifacts that MUST NOT be pushed to the -infra repo (#160):
-mkdir -p "$PROJ/secrets"
-echo '{"bootstrap_role":"arn:aws:iam::1:role/x","aws_external_id":"topsecret"}' \
-  > "$PROJ/secrets/cloud-credentials.auto.tfvars.json"
-echo 'deploy-key-material' > "$PROJ/secrets/infra_deploy_key.pem"
-mkdir -p "$PROJ/tf/custom-stack-provision"
-echo '{"cloud_provider":"aws"}' > "$PROJ/tf/custom-stack-provision/common.auto.tfvars.json"
-echo 'plan-bytes'              > "$PROJ/tf/custom-stack-provision/apply.tfplan"
-echo '{}'                      > "$PROJ/tf/custom-stack-provision/backend.tf.json"
-
-set +e
-outG="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcG=$?
-set -e
-
-[[ "$rcG" -eq 0 ]] && pass "G: apply exits 0" || fail "G: expected exit 0, got $rcG. Output: $outG"
-
-# The push must have happened, else the tree-content assertions are vacuous.
-if [[ "$(bare_commit_count "$BARE")" -ge 1 ]]; then
-  pass "G: a ref landed on the -infra repo"
-else
-  fail "G: nothing pushed — canary would be vacuous. Output: $outG"
-fi
-
-# Enumerate the pushed tree once.
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-
-# Sanity: a known-good, non-secret file IS present — proves the denylist did not
-# nuke the whole tree (i.e. the canary can actually observe a leak).
-if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
-  pass "G: known-good file (shell_utils.sh) is present in the pushed tree"
-else
-  fail "G: expected shell_utils.sh in the pushed tree. Tree: $pushed_tree"
-fi
-
-# The #160 canary assertions:
-if echo "$pushed_tree" | grep -q '\.auto\.tfvars\.json$'; then
-  fail "G: a *.auto.tfvars.json rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO *.auto.tfvars.json in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q '^outputs/'; then
-  fail "G: outputs/ rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO outputs/ directory in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q '^secrets/'; then
-  fail "G: secrets/ rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO secrets/ directory in the pushed tree"
-fi
-
-# Bonus coverage for the rest of the #160 denylist exercised by the decoys above.
-if echo "$pushed_tree" | grep -q '\.tfplan$'; then
-  fail "G: a *.tfplan rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO *.tfplan in the pushed tree"
-fi
-
-if echo "$pushed_tree" | grep -q 'backend\.tf\.json$'; then
-  fail "G: backend.tf.json rode the -infra push (#160 leak). Tree: $pushed_tree"
-else
-  pass "G: NO backend.tf.json in the pushed tree"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case H: snapshot-fidelity — archive-owned provider siblings ARE pushed, ==="
-echo "===         deploy-generated providers-<cloud>.tf is NOT (bridge e2e gap) ==="
-# =============================================================================
-# The historic over-broad `tf/*/providers-*.tf` .gitignore glob was meant only
-# for the deploy-time-generated providers-aws.tf / providers-gcp.tf that
-# _selectCloudFiles() (shell_utils.sh) materializes from the .tf.tmpl templates.
-# But it ALSO matched the composer-archive-owned providers-imported.tf /
-# providers-aliases.tf (insideout-terraform-presets #677) that the InsideOut
-# composer emits into the custom-stack archive and rsyncs into
-# tf/custom-stack-provision/ — silently dropping those real stack files from the
-# persistInfraRepo() `git add -A` snapshot push. The deploy itself was unaffected
-# (it reads the rsync'd worktree on disk, not git), so this was a SNAPSHOT-
-# FIDELITY bug only, caught by the bridge team's e2e. make_project copies the
-# repo's REAL .gitignore into the fixture, so this canary exercises the actual
-# narrowed rule rather than passing vacuously.
-PROJ="$(make_project projH)"
-BARE="$(fresh_bare)"
-set_repo_clone_url "$PROJ" "file://$BARE"
-init_project_git "$PROJ"
-
-mkdir -p "$PROJ/tf/custom-stack-provision"
-# Deploy-generated decoy — MUST stay excluded from the -infra snapshot:
-echo '# generated by _selectCloudFiles() from providers-aws.tf.tmpl' \
-  > "$PROJ/tf/custom-stack-provision/providers-aws.tf"
-# Composer-archive-owned siblings (presets #677) rsynced in — MUST land in the
-# snapshot. They reference var.bootstrap_role / var.aws_external_id only:
-echo 'provider "aws" { alias = "imported" }' \
-  > "$PROJ/tf/custom-stack-provision/providers-imported.tf"
-echo 'provider "aws" { alias = "us_east_1" }' \
-  > "$PROJ/tf/custom-stack-provision/providers-aliases.tf"
-
-set +e
-outH="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcH=$?
-set -e
-
-[[ "$rcH" -eq 0 ]] && pass "H: apply exits 0" || fail "H: expected exit 0, got $rcH. Output: $outH"
-
-# The push must have happened, else the tree-content assertions are vacuous.
-if [[ "$(bare_commit_count "$BARE")" -ge 1 ]]; then
-  pass "H: a ref landed on the -infra repo"
-else
-  fail "H: nothing pushed — canary would be vacuous. Output: $outH"
-fi
-
-pushed_tree_H="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-imported.tf"; then
-  pass "H: archive-owned providers-imported.tf IS in the pushed snapshot"
-else
-  fail "H: providers-imported.tf missing from snapshot (over-broad glob regressed). Tree: $pushed_tree_H"
-fi
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-aliases.tf"; then
-  pass "H: archive-owned providers-aliases.tf IS in the pushed snapshot"
-else
-  fail "H: providers-aliases.tf missing from snapshot (over-broad glob regressed). Tree: $pushed_tree_H"
-fi
-
-if echo "$pushed_tree_H" | grep -qx "tf/custom-stack-provision/providers-aws.tf"; then
-  fail "H: deploy-generated providers-aws.tf leaked into the snapshot (glob too narrow). Tree: $pushed_tree_H"
-else
-  pass "H: deploy-generated providers-aws.tf correctly excluded from the snapshot"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case I: the custom-stack apply clones the -infra repo when prepare could not ==="
-# =============================================================================
-# With ui-core's GitHub App, prepare-custom-stack has no token and no deploy
-# key, so it leaves the tree without .git; the apply step has the token and
-# clones the repo itself (cloneInfraRepo in persistInfraRepo,
-# luthersystems/ui-infrastructure#442).
-PROJ="$(make_project projI)"
-BARE="$(fresh_bare)"
-SEED="$WORKDIR/seedI"
-git init -q -b main "$SEED"
-git -C "$SEED" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "earlier deploy"
-git -C "$SEED" push -q "$BARE" main
-git -C "$BARE" symbolic-ref HEAD refs/heads/main
-set_repo_clone_url "$PROJ" "file://$BARE"
-mkdir -p "$PROJ/tf/custom-stack-provision"
-echo 'resource "null_resource" "x" {}' > "$PROJ/tf/custom-stack-provision/main.tf"
-
-set +e
-outI="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcI=$?
-set -e
-
-[[ "$rcI" -eq 0 ]] && pass "I: apply exits 0" || fail "I: expected exit 0, got $rcI. Output: $outI"
-if [[ "$(bare_commit_count "$BARE")" -ge 2 ]]; then
-  pass "I: the apply cloned the repo and pushed on top of its history"
-else
-  fail "I: expected a new commit on the -infra repo. Output: $outI"
-fi
-if git -C "$BARE" ls-tree -r --name-only main | grep -qx "tf/custom-stack-provision/main.tf"; then
-  pass "I: the pushed tree has the custom stack"
-else
-  fail "I: custom stack missing from the pushed tree: $(git -C "$BARE" ls-tree -r --name-only main | tr "\n" " ") Output: $outI"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case J: git access with the GitHub App token ==="
-# =============================================================================
-PROJ="$(make_project projJ)"
-TOKEN_FILE="$WORKDIR/app-token"
-echo "ghs_testtoken" > "$TOKEN_FILE"
-set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
-init_project_git "$PROJ"
-git -C "$PROJ" config core.sshCommand "ssh -i old-key"
-
-outJ="$(
-  export MARS_PROJECT_ROOT="$PROJ" GITHUB_GIT_TOKEN_FILE="$TOKEN_FILE"
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  configure_git >/dev/null 2>&1
-  echo "remote=$(git -C "$PROJ" remote get-url infra)"
-  printf 'protocol=https\nhost=github.com\npath=luthersystems-infra-test/abcd1234-infra.git\n\n' |
-    GIT_TERMINAL_PROMPT=0 git -C "$PROJ" credential fill
-  echo "ssh=$(git -C "$PROJ" config --local core.sshCommand || true)"
-)"
-if echo "$outJ" | grep -qx "remote=https://github.com/luthersystems-infra-test/abcd1234-infra.git"; then
-  pass "J: with a token, the infra remote is the HTTPS URL"
-else
-  fail "J: infra remote is not HTTPS. Output: $outJ"
-fi
-if echo "$outJ" | grep -qx "password=ghs_testtoken" && echo "$outJ" | grep -qx "username=x-access-token"; then
-  pass "J: git gets the token from the credential helper"
-else
-  fail "J: credential helper did not give the token. Output: $outJ"
-fi
-if echo "$outJ" | grep -qx "ssh="; then
-  pass "J: an earlier deploy key's sshCommand is removed"
-else
-  fail "J: core.sshCommand still set. Output: $outJ"
-fi
-if grep -rqF "ghs_testtoken" "$PROJ/.git/config"; then
-  fail "J: the token is in .git/config, which travels in the project archive"
-else
-  pass "J: the token is not in .git/config"
-fi
-
-outJ2="$(
-  export MARS_PROJECT_ROOT="$PROJ"
-  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  echo "url=$(infra_remote_url)"
-)"
-if echo "$outJ2" | grep -qx "url=git@github.com:luthersystems-infra-test/abcd1234-infra.git"; then
-  pass "J: without a token, the SSH URL stays"
-else
-  fail "J: without a token, expected the SSH URL. Output: $outJ2"
-fi
-
-PROJ="$(make_project projJ3)"
-set_repo_clone_url "$PROJ" "git@github.com:luthersystems-infra-test/abcd1234-infra.git"
-outJ3="$(
-  export MARS_PROJECT_ROOT="$PROJ"
-  unset GITHUB_GIT_TOKEN_FILE GITHUB_TOKEN_FILE
-  . "$PROJ/shell_utils.sh" >/dev/null 2>&1
-  cloneInfraRepo 2>&1; echo "rc=$?"
-)"
-if echo "$outJ3" | grep -qF "No GitHub token or deploy key" && echo "$outJ3" | grep -qx "rc=0" && [[ ! -e "$PROJ/.git" ]]; then
-  pass "J: with no token and no deploy key, the SSH clone is skipped (non-fatal)"
-else
-  fail "J: expected a skipped clone. Output: $outJ3"
-fi
-
-# =============================================================================
-echo ""
-echo "=== Case K: #160 — a TRACKED credentials file is untracked, not pushed ==="
-# =============================================================================
-# The real leak: the template tracked tf/auto-vars/common.auto.tfvars.json as a
-# `{}` seed. .gitignore does not stop git from committing a file it already
-# tracks, so after ui-core wrote cloud credentials into it, `git add -A`
-# committed them and the push sent them to the -infra repo. Case G passes even
-# with that bug, because its fixture never tracks the file. Here the -infra repo
-# already tracks the seed (as every repo built from the old template does), and
-# the deploy writes a fake key into it.
-PROJ="$(make_project projK)"
-BARE="$(fresh_bare)"
-init_project_git "$PROJ"
-echo '{}' > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
-git -C "$PROJ" add -f tf/auto-vars/common.auto.tfvars.json
-git -C "$PROJ" commit -q -m "old template: seed tracked"
-git -C "$PROJ" push -q "file://$BARE" main
-# Deploy time: credentials and the repo URL land in the tracked file.
-jq -n --arg url "file://$BARE" \
-  '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-K"}' \
-  > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
-
-set +e
-outK="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
-rcK=$?
-set -e
-
-[[ "$rcK" -eq 0 ]] && pass "K: apply exits 0" || fail "K: expected exit 0, got $rcK. Output: $outK"
-
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
-if echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
-  pass "K: the deploy pushed the stack (the next checks are not vacuous)"
-else
-  fail "K: expected shell_utils.sh in the pushed tree. Output: $outK"
-fi
-if echo "$pushed_tree" | grep -qx "tf/auto-vars/common.auto.tfvars.json"; then
-  fail "K: the tracked common.auto.tfvars.json is still in the pushed tree (#160 leak)"
-else
-  pass "K: common.auto.tfvars.json is no longer in the -infra repo tree"
-fi
-# Capture first: `git log | grep -q` under pipefail reads as "no match" when
-# grep exits early and git dies of SIGPIPE.
-pushed_history="$(git -C "$BARE" log -p --all)"
-if grep -qF "FAKE-SECRET-K" <<<"$pushed_history"; then
-  fail "K: the deploy-time secret reached the -infra repo history (#160 leak)"
-else
-  pass "K: the deploy-time secret is in no pushed commit"
-fi
-if grep -qF "FAKE-SECRET-K" "$PROJ/tf/auto-vars/common.auto.tfvars.json"; then
-  pass "K: the file stays on disk for later steps (only the git tracking goes)"
-else
-  fail "K: the credentials file was removed from disk"
-fi
-
-# =============================================================================
-echo ""
 echo "=== Case L: the template tracks no file that its .gitignore ignores ==="
 # =============================================================================
-# Guards the whole class behind Case K: a tracked file that .gitignore ignores
-# is committed anyway by `git add -A` in every project tree cloned from this
-# repo. Fix a hit with `git rm --cached <path>`, or add a `!` carve-out to
+# Guards the class behind mars TestPersistUntracksTrackedCredentials: a
+# tracked file that .gitignore ignores is committed anyway by `git add -A` in
+# every project tree cloned from this repo. Fix a hit with `git rm --cached <path>`, or add a `!` carve-out to
 # .gitignore if the file is meant to be tracked.
 if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   tracked_ignored="$(git -C "$REPO_ROOT" ls-files --cached --ignored --exclude-per-directory=.gitignore)"
@@ -675,6 +307,412 @@ if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   fi
 else
   echo "  SKIP: L: $REPO_ROOT is not a git checkout"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case N: simple-mode apply (apply.sh) after a history squash ==="
+# =============================================================================
+# apply-with-outputs.sh without --check-drift runs apply.sh. apply.sh merged
+# infra/main under set -e before Terraform ran, and the merge always fails on
+# ui-core's squashed history, so the apply aborted before it applied. Now it
+# applies first and pushes a snapshot, like infra-persist.
+PROJ="$(make_project projN)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+# utils.sh points MARS at tf/run-with-creds.sh, so that is the mock here.
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+# infra/main with a history of its own.
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "first deploy"
+git -C "$PROJ" push -q "file://$BARE" main
+base_headN="$(git -C "$BARE" rev-parse main)"
+# The ui-core squash.
+rm -rf "$PROJ/.git"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "ui-core: squashed project history"
+mkdir -p "$PROJ/tf/custom-stack-provision"
+echo "simple-mode-change" > "$PROJ/tf/custom-stack-provision/main.tf"
+
+set +e
+outN="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcN=$?
+set -e
+
+if [[ "$rcN" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG"; then
+  pass "N: the simple-mode apply ran Terraform and exits 0"
+else
+  fail "N: simple-mode apply rc=$rcN, or no mars apply ran. Output: $outN"
+fi
+if git -C "$BARE" merge-base --is-ancestor "$base_headN" main &&
+  [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "simple-mode-change" ]]; then
+  pass "N: apply.sh pushed the deployed tree as a fast-forward"
+else
+  fail "N: apply.sh did not fast-forward infra/main with the deployed tree. Output: $outN"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case O: template-only files never reach the -infra repo ==="
+# =============================================================================
+# .github/dependabot.yml configures Dependabot for the template repo. In an
+# -infra repo it would open weekly PRs that the next deploy reverts, so the
+# snapshot leaves it out, and removes it if an older push added it.
+PROJ="$(make_project projO)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+mkdir -p "$PROJ/.github/workflows"
+cp "$REPO_ROOT/.github/dependabot.yml" "$PROJ/.github/dependabot.yml"
+cp "$REPO_ROOT/.github/workflows/security.yml" "$PROJ/.github/workflows/security.yml"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "older push, with dependabot.yml"
+git -C "$PROJ" push -q "file://$BARE" main
+
+set +e
+outO="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
+rcO=$?
+set -e
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+if [[ "$rcO" -eq 0 ]] && echo "$pushed_tree" | grep -qx "shell_utils.sh"; then
+  pass "O: the deploy pushed the stack"
+else
+  fail "O: rc=$rcO, or nothing pushed. Output: $outO"
+fi
+if echo "$pushed_tree" | grep -qx ".github/dependabot.yml"; then
+  fail "O: .github/dependabot.yml reached the -infra repo"
+else
+  pass "O: .github/dependabot.yml is not in the -infra repo"
+fi
+if [[ -f "$PROJ/.github/dependabot.yml" ]]; then
+  pass "O: dependabot.yml stays on disk"
+else
+  fail "O: dependabot.yml was removed from disk"
+fi
+# security.yml does ride along (it is a workflow file of the tree), so it
+# must not run in an -infra repo: the same repository guard as quality.yml.
+for wf in quality security; do
+  if grep -qF "if: github.repository == 'luthersystems/sandbox-infrastructure-template'" \
+    "$REPO_ROOT/.github/workflows/$wf.yml"; then
+    pass "O: $wf.yml runs only in the template repo"
+  else
+    fail "O: $wf.yml has no repository guard, so every -infra repo runs it"
+  fi
+done
+
+# =============================================================================
+echo ""
+echo "=== Case P: apply.sh from a stale checkout merges teammates' edits first ==="
+# =============================================================================
+# A developer's checkout shares history with infra/main but is behind it.
+# apply.sh merges infra/main before Terraform runs, so the apply includes the
+# teammate's change, then pushes the snapshot.
+PROJ="$(make_project projP)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "shared base"
+git -C "$PROJ" push -q "file://$BARE" main
+mate="$WORKDIR/projP-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "teammate change" > "$mate/teammate.txt"
+git -C "$mate" add teammate.txt
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "teammate edit"
+git -C "$mate" push -q origin main
+mate_headP="$(git -C "$BARE" rev-parse main)"
+# Record whether the teammate's file is in the tree when Terraform runs.
+cat > "$PROJ/tf/run-with-creds.sh" <<OUTER
+#!/usr/bin/env bash
+echo "mars \$*" >> "$CMD_LOG"
+if [[ -f "$PROJ/teammate.txt" ]]; then echo "teammate-present" >> "$CMD_LOG"; fi
+OUTER
+/bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+
+set +e
+outP="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcP=$?
+set -e
+if [[ "$rcP" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG" && grep -q "teammate-present" "$CMD_LOG"; then
+  pass "P: the stale checkout merged infra/main before Terraform ran"
+else
+  fail "P: rc=$rcP, or Terraform ran without the teammate's edit. Output: $outP"
+fi
+if git -C "$BARE" merge-base --is-ancestor "$mate_headP" main &&
+  git -C "$BARE" cat-file -e main:teammate.txt 2>/dev/null; then
+  pass "P: the push fast-forwards and keeps the teammate's edit"
+else
+  fail "P: infra/main lost the teammate's edit or did not fast-forward"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case Q: apply.sh stops on a real merge conflict, before Terraform ==="
+# =============================================================================
+PROJ="$(make_project projQ)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+echo "base" > "$PROJ/conflict.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "shared base"
+git -C "$PROJ" push -q "file://$BARE" main
+mate="$WORKDIR/projQ-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "theirs" > "$mate/conflict.txt"
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -am "their edit"
+git -C "$mate" push -q origin main
+echo "ours" > "$PROJ/conflict.txt"
+git -C "$PROJ" commit -q -am "our edit"
+
+set +e
+outQ="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcQ=$?
+set -e
+if [[ "$rcQ" -ne 0 ]] && ! grep -q "apply --approve" "$CMD_LOG"; then
+  pass "Q: a merge conflict stops the apply before Terraform runs"
+else
+  fail "Q: rc=$rcQ; a conflicted checkout must not apply. Output: $outQ"
+fi
+# apply.sh aborts the failed merge: a MERGE_HEAD or conflict markers left on
+# disk would be pushed by a later snapshot.
+if [[ ! -e "$PROJ/.git/MERGE_HEAD" ]] && [[ "$(cat "$PROJ/conflict.txt")" == "ours" ]] &&
+  [[ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no)" ]]; then
+  pass "Q: the conflicted merge is aborted (no MERGE_HEAD, no markers)"
+else
+  fail "Q: the conflicted merge was left in place: $(git -C "$PROJ" status --short) / $(cat "$PROJ/conflict.txt")"
+fi
+
+# pull.sh leaves the conflict in place for the developer to resolve, as
+# a plain git merge does.
+PROJ="$(make_project projQ2)"
+cp "$REPO_ROOT/pull.sh" "$PROJ/pull.sh"
+BARE="$(fresh_bare)"
+TPL="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+echo "base" > "$PROJ/conflict.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "shared base"
+git -C "$PROJ" push -q "file://$BARE" main
+git -C "$PROJ" push -q "file://$TPL" main
+git -C "$PROJ" remote add origin "file://$TPL"
+git -C "$PROJ" remote add infra "file://$BARE"
+mate="$WORKDIR/projQ2-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "theirs" > "$mate/conflict.txt"
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -am "their edit"
+git -C "$mate" push -q origin main
+echo "ours" > "$PROJ/conflict.txt"
+git -C "$PROJ" commit -q -am "our edit"
+set +e
+outQ2="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
+rcQ2=$?
+set -e
+if [[ "$rcQ2" -ne 0 ]] && [[ -e "$PROJ/.git/MERGE_HEAD" ]] && grep -q '<<<<<<<' "$PROJ/conflict.txt"; then
+  pass "Q: pull.sh fails on a conflict and leaves it to resolve (MERGE_HEAD stays)"
+else
+  fail "Q: pull.sh rc=$rcQ2, MERGE_HEAD=$([[ -e "$PROJ/.git/MERGE_HEAD" ]] && echo yes || echo no). Output: $outQ2"
+fi
+# The developer resolves the conflict; commit.sh concludes the merge.
+cp "$REPO_ROOT/commit.sh" "$PROJ/commit.sh"
+echo "resolved" > "$PROJ/conflict.txt"
+git -C "$PROJ" add conflict.txt
+set +e
+outQ3="$(cd "$PROJ" && HOME="$WORKDIR" bash ./commit.sh "resolve" 2>&1)"
+rcQ3=$?
+set -e
+if [[ "$rcQ3" -eq 0 ]] && [[ ! -e "$PROJ/.git/MERGE_HEAD" ]] &&
+  [[ "$(git -C "$PROJ" rev-list --parents -n1 HEAD | wc -w)" -eq 3 ]]; then
+  pass "Q: commit.sh concludes a resolved merge (a merge commit)"
+else
+  fail "Q: commit.sh after resolving: rc=$rcQ3. Output: $outQ3"
+fi
+
+# =============================================================================
+# =============================================================================
+echo ""
+echo "=== Case T: destroy.sh exit codes ==="
+# =============================================================================
+# conflicted_proj <name> — a project with an infra remote and a conflicted
+# `git merge infra/main` in progress; prints its path.
+conflicted_proj() {
+  local proj bare mate
+  proj="$(make_project "$1")"
+  bare="$(fresh_bare)"
+  set_repo_clone_url "$proj" "file://$bare"
+  init_project_git "$proj"
+  echo "base" > "$proj/conflict.txt"
+  git -C "$proj" add -A
+  git -C "$proj" commit -q -m "shared base"
+  git -C "$proj" push -q "file://$bare" main
+  git -C "$proj" remote add infra "file://$bare"
+  mate="$WORKDIR/$1-mate"
+  git clone -q -b main "file://$bare" "$mate"
+  echo "theirs" > "$mate/conflict.txt"
+  git -C "$mate" -c user.email=t@l -c user.name=T commit -q -am "their edit"
+  git -C "$mate" push -q origin main
+  echo "ours" > "$proj/conflict.txt"
+  git -C "$proj" commit -q -am "our edit"
+  git -C "$proj" fetch -q infra main
+  git -C "$proj" merge -q infra/main >/dev/null 2>&1 || true
+  echo "$proj"
+}
+
+
+# destroy.sh: the destroy worked but the commit did not -> exit 3 and say so.
+PROJ="$(conflicted_proj projT6)"
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+set +e
+outT6="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT6=$?
+set -e
+if [[ "$rcT6" -eq 75 ]] && grep -q "destroy --approve" "$CMD_LOG" &&
+  grep -qi "destroyed" <<<"$outT6" && grep -q "commit.sh" <<<"$outT6"; then
+  pass "T: destroy.sh exits 75 with a clear message when the commit is refused after the destroy"
+else
+  fail "T: destroy.sh after a failed commit: rc=$rcT6. Output: $outT6"
+fi
+
+# A failing pre-commit hook: infra-commit reports the failed commit itself.
+PROJ="$(make_project projT7)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
+/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
+headT7="$(git -C "$PROJ" rev-parse HEAD)"
+set +e
+outT7="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT7=$?
+set -e
+if [[ "$rcT7" -eq 75 ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT7" ]]; then
+  pass "T: a failing pre-commit hook makes destroy.sh exit 75"
+else
+  fail "T: destroy.sh with a failing hook: rc=$rcT7. Output: $outT7"
+fi
+
+
+
+# destroy.sh: a pre-destroy step that exits 75 does not look like "destroyed,
+# commit failed".
+PROJ="$(make_project projT13)"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cat > "$PROJ/tf/run-with-creds.sh" <<OUTER
+#!/usr/bin/env bash
+echo "mars \$*" >> "$CMD_LOG"
+if [[ " \$* " == *" init "* ]]; then exit 75; fi
+OUTER
+/bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+set +e
+outT13="$(run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcT13=$?
+set -e
+if [[ "$rcT13" -ne 0 && "$rcT13" -ne 75 ]] && ! grep -q "destroy --approve" "$CMD_LOG"; then
+  pass "T: a pre-destroy step exiting 75 makes destroy.sh exit $rcT13, not 75"
+else
+  fail "T: pre-destroy 75: rc=$rcT13. Output: $outT13"
+fi
+
+
+# =============================================================================
+echo ""
+echo "=== Case U: pull.sh in an -infra clone ==="
+# =============================================================================
+# seed_infra <bare> — push a one-commit main to bare; prints the commit.
+seed_infra() {
+  local src="$WORKDIR/seed-$RANDOM$RANDOM"
+  git init -q -b main "$src"
+  echo "infra" > "$src/infra.txt"
+  git -C "$src" add -A
+  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "infra base"
+  git -C "$src" push -q "file://$1" main
+  git -C "$src" rev-parse HEAD
+}
+# An -infra clone has no origin remote: pull.sh skips the template merge and
+# still merges infra/main.
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+PROJ="$WORKDIR/projU1"
+git clone -q -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" remote rename origin infra
+git -C "$PROJ" config user.email t@l
+git -C "$PROJ" config user.name T
+cp "$REPO_ROOT/shell_utils.sh" "$REPO_ROOT/pull.sh" "$PROJ/"
+printf 'shell_utils.sh\npull.sh\n' >> "$PROJ/.git/info/exclude"
+mkdir -p "$PROJ/tf/auto-vars"
+jq -n --arg url "file://$BARE" '{"repo_clone_ssh_url":$url}' > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
+echo "tf/auto-vars/" >> "$PROJ/.git/info/exclude"
+mate="$WORKDIR/projU1-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "mate" > "$mate/mate.txt"
+git -C "$mate" add -A
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
+git -C "$mate" push -q origin main
+git -C "$PROJ" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "local"
+set +e
+outU1="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
+rcU1=$?
+set -e
+if [[ "$rcU1" -eq 0 ]] && [[ -f "$PROJ/mate.txt" ]] && grep -qi "no origin remote" <<<"$outU1"; then
+  pass "U: pull.sh in an -infra clone skips origin and merges infra/main"
+else
+  fail "U: -infra clone pull: rc=$rcU1. Output: $outU1"
+fi
+
+
+# =============================================================================
+echo ""
+echo "=== Case W: a mars without the infra-* commands stops the apply ==="
+# =============================================================================
+# ui-core's Argo jobs pin their own mars image. If it predates the infra-*
+# commands, marsInfra must fail closed: apply.sh stops before Terraform, as
+# for any failed merge, instead of applying with no -infra repo handling.
+PROJ="$(make_project projW)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+init_project_git "$PROJ"
+OLD_MARS="$WORKDIR/old-mars"
+printf '#!/usr/bin/env bash\necho "mars: error: unexpected argument $2" >&2\nexit 80\n' > "$OLD_MARS"
+/bin/chmod +x "$OLD_MARS"
+set +e
+outW="$(MARS_BIN="$OLD_MARS" run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcW=$?
+set -e
+if [[ "$rcW" -eq 1 ]] && ! grep -q "apply --approve" "$CMD_LOG" &&
+  grep -qF "has no 'mars infra-merge'" <<<"$outW"; then
+  pass "W: an old mars stops the apply before Terraform, with a loud warning"
+else
+  fail "W: old mars: rc=$rcW. Output: $outW"
+fi
+# With no .git there is no git work: an old mars must not turn a destroy of
+# a stage that never had git into 75 ("destroyed, not committed").
+PROJ="$(make_project projW2)"
+cp "$REPO_ROOT/tf/destroy.sh" "$PROJ/tf/destroy.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+set +e
+outW2="$(MARS_BIN="$OLD_MARS" run_apply "$PROJ" destroy.sh custom-stack-provision)"
+rcW2=$?
+set -e
+if [[ "$rcW2" -eq 0 ]] && grep -q "destroy --approve" "$CMD_LOG" && grep -qF "skipping infra-commit" <<<"$outW2"; then
+  pass "W: with no .git, an old mars skips the commit and the destroy exits 0"
+else
+  fail "W: old mars, no .git, destroy: rc=$rcW2. Output: $outW2"
 fi
 
 # --- Summary -----------------------------------------------------------------

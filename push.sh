@@ -6,4 +6,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
 
-gitPushInfra "$@"
+# mars infra-push: git push infra HEAD. A failure warns; it never fails.
+marsInfra infra-push

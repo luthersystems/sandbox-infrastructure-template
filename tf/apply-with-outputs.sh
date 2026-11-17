@@ -6,7 +6,7 @@
 #
 # Two modes:
 #   Simple (no flags):
-#     Delegates to apply.sh (which includes git merge/commit/push),
+#     Delegates to apply.sh (merge infra/main, apply, snapshot push),
 #     then captures terraform output -json.
 #
 #   Drift-check (--check-drift):
@@ -90,18 +90,20 @@ if [[ "$check_drift" == "true" ]]; then
   #
   # This drift-check branch — NOT apply.sh — is what ui-core actually runs for a
   # custom-stack apply (it always sets checkDrift=true), so without this call
-  # gitPushInfra is never reached and the -infra repo stays empty despite a
+  # the push to the -infra repo is never reached and the -infra repo stays empty despite a
   # SUCCESS. Scope to custom-stack-provision: that stage carries the full
   # generated stack and has the infra .git + remote wired by
   # prepare-custom-stack; earlier stages have no .git yet and would only emit
   # spurious warnings. Non-fatal by contract — a push problem must not fail an
   # already-applied deploy.
   if [[ "$lifecycle" == "custom-stack-provision" ]]; then
-    persistInfraRepo || \
-      echo "⚠️  [git-infra] WARNING: persistInfraRepo returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
+    marsInfra infra-persist || \
+      echo "⚠️  [git-infra] WARNING: mars infra-persist returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
   fi
 else
-  # Simple mode: delegate to apply.sh (includes git merge/commit/push)
+  # Simple mode: delegate to apply.sh, which merges infra/main before the
+  # apply (a stale checkout picks up teammates' edits) and pushes a snapshot
+  # of the deployed tree after it (#160).
   bash "$SCRIPT_DIR/apply.sh" "$lifecycle"
 
   # After apply.sh completes, we're in the lifecycle workspace dir.

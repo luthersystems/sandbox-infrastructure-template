@@ -117,7 +117,7 @@ for stage in $STAGES; do
       set -- "$stage"
       . ./utils.sh
       # shellcheck disable=SC2154  # tf_workspace is set by sourced utils.sh
-      $MARS ${tf_workspace} state list 2>/dev/null | grep -c '^'
+      $MARS "${tf_workspace}" state list 2>/dev/null | grep -c '^'
     )" || state_count=0
     set -e
 

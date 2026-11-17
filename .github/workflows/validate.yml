@@ -140,10 +140,27 @@ jobs:
           git config --global user.email "ci@luthersystems.com"
           git config --global user.name "CI"
 
+      # The scripts' -infra git steps are mars commands (mars infra-*), so the
+      # tests run a native mars at the pinned .mars-version. A release older
+      # than the infra-* commands fails the tests, as it would fail a deploy.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install mars at .mars-version
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go install "github.com/luthersystems/mars/cmd/mars@$(tr -d '[:space:]' < .mars-version)"
+          echo "MARS_INFRA_BIN=$(go env GOPATH)/bin/mars" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: |
-          bash tests/test-prepare-custom-stack.sh
-          bash tests/test-infra-push.sh
+          # Only these two run the real mars: the others mock it, as locally.
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-prepare-custom-stack.sh
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-infra-push.sh
           bash tests/test-apply-scripts.sh
           bash tests/test-drift-check.sh
           bash tests/test-tf-destroy-init.sh

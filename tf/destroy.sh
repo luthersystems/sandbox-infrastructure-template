@@ -16,7 +16,21 @@
 # --ignore-drift is that human decision (same end-to-end override channel as
 # the apply path: reliable API ?ignore_drift=true → workflow args → argv).
 # See tfDestroy in utils.sh for the exact semantics matrix.
+#
+# Exit codes:
+#   0   destroyed and committed.
+#   75  destroyed, but the git commit was not made (unresolved conflicts, a
+#       rebase in progress, a failing hook): the resources are gone, so fix
+#       the git state and run commit.sh. Only this case returns 75; a destroy
+#       that fails with 75 itself exits 1, so callers can rely on it.
+#   other  the destroy failed (the failing step's exit code).
 set -euo pipefail
+
+# 75 is reserved for "destroyed, commit failed". Any other step that exits
+# 75 (sourcing utils.sh, tfInit, tfDestroy) exits 1 instead. A sourced file
+# that sets its own EXIT trap later would replace this one.
+commit_failed=false
+trap 'if [[ $? -eq 75 && "$commit_failed" != true ]]; then exit 1; fi' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -71,4 +85,9 @@ if [[ "$ignore_drift" == "true" ]]; then
 else
   tfDestroy
 fi
-gitCommit
+# mars infra-commit returns 1 when it refused or failed, nothing committed.
+if ! marsInfra infra-commit; then
+  echo "⚠️  The resources are destroyed, but the git commit was not made. Fix the git state (see above), then run commit.sh." >&2
+  commit_failed=true
+  exit 75
+fi

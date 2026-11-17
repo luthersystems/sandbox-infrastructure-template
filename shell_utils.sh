@@ -66,7 +66,7 @@ getTfVar() {
   # unchanged while ui-core still writes credentials into
   # tf/auto-vars/common.auto.tfvars.json; THEN fall back to the gitignored
   # secrets/*.auto.tfvars.json credential drop. secrets/ is excluded from the
-  # persistInfraRepo `git add -A` push, so credentials placed there never leak
+  # -infra snapshot (mars infra-persist), so credentials placed there never leak
   # into the per-project -infra repo (unlike common.auto.tfvars.json). Absent or
   # empty secrets/ is a silent no-op: the `[[ -e ]]` guard (existing style, no
   # nullglob) skips the unexpanded glob, so nothing errors under callers' `set
@@ -99,418 +99,72 @@ mustGetTfVar() {
   echo "$val"
 }
 
-has_git_repo() {
-  [ -e "$MARS_PROJECT_ROOT/.git" ]
-}
+# ============================================================================
+# The per-project -infra repo
+# ============================================================================
+#
+# Every git step on the project tree and its -infra repo is a mars command
+# (luthersystems/mars docs/infra-repo.md): infra-clone, infra-merge,
+# infra-pull, infra-commit, infra-snapshot, infra-push and infra-persist.
+# They hold the rules this file used to hold in shell (the snapshot on top
+# of infra/main, the exec-bit and untrack rules, the refusal of a merge,
+# rebase, cherry-pick or revert in progress, the luther.infraSnapshotTree
+# mark; #160, #143), tested in Go against real git repos.
 
-ensure_git_identity() {
-  git config --local user.email >/dev/null 2>&1 ||
-    git config --local user.email "devbot@luthersystems.com"
-  git config --local user.name >/dev/null 2>&1 ||
-    git config --local user.name "Luther DevBot"
-}
-
-disable_filemode() {
-  git config --local core.fileMode false
-}
-
-configure_deploy_ssh() {
-  local KEY="$MARS_PROJECT_ROOT/secrets/infra_deploy_key.pem"
-  if [ ! -f "$KEY" ]; then
-    echo "Skipping SSH config: no deploy key at $KEY"
+# resolveMarsCLI prints the mars program the infra-* commands run on:
+#   - $MARS_BIN, when set: a native mars build, for example
+#     `go install github.com/luthersystems/mars/cmd/mars@<release>`. Use it
+#     on a laptop for pull.sh and push.sh, which reach GitHub: the docker
+#     wrapper below has neither your SSH keys nor a token file;
+#   - in a mars image (where ui-core's Argo jobs run the template), the
+#     image's own mars, as resolveMarsBinary finds it;
+#   - else the project's ./mars docker wrapper, at the pinned .mars-version.
+resolveMarsCLI() {
+  if [[ -n "${MARS_BIN:-}" ]]; then
+    echo "$MARS_BIN"
     return 0
   fi
-
-  git config --local core.sshCommand "ssh -i $KEY -o IdentitiesOnly=yes"
+  local mars_root="${MARS_CONTAINER_ROOT:-/opt/mars}"
+  if [[ -x "$mars_root/mars" || -e "$mars_root/run.sh" ]]; then
+    resolveMarsBinary
+    return 0
+  fi
+  echo "$MARS_PROJECT_ROOT/mars"
 }
 
-# ---------------------------------------------------------------------------
-# Git access to the -infra repo with ui-core's GitHub App
-# (luthersystems/ui-infrastructure#442).
-#
-# With the App on, ui-core gives a step a one-hour installation token for the
-# project's -infra repo only, in a file: GITHUB_GIT_TOKEN_FILE (git access
-# only, for the custom-stack apply) or GITHUB_TOKEN_FILE (the stages with the
-# github provider). The repo then lives in an org of its own, where deploy
-# keys are off (a new org cannot turn them on without Enterprise Cloud), so
-# Terraform makes no deploy key (create_infra_deploy_key = false) and git
-# clones, fetches and pushes over HTTPS with that token. Without a token
-# file, git uses the deploy key over SSH as before.
-#
-# The token never goes into .git/config, which travels in the project
-# archive: the credential helper there reads the file when git asks.
-# ---------------------------------------------------------------------------
+# MARS_INFRA_CHECKED caches, per process, the mars that answered for the
+# infra-* commands, so apply.sh's three calls start it once more, not three
+# times.
+MARS_INFRA_CHECKED=""
 
-# infra_git_token_file prints the token file of this step, if it has one.
-infra_git_token_file() {
-  local f
-  for f in "${GITHUB_GIT_TOKEN_FILE:-}" "${GITHUB_TOKEN_FILE:-}"; do
-    if [[ -n "$f" && -r "$f" ]]; then
-      echo "$f"
-      return 0
+# marsInfra <command> [args...] runs `mars default <command>` on the
+# project root and returns its exit code (docs/infra-repo.md lists them).
+# It runs in the project root with --root ., so the path is right both for
+# a native mars and inside the docker wrapper, which mounts the current
+# directory.
+#
+# A mars older than the infra-* commands fails closed (1) with a loud
+# warning when there is git work to do: the merge then stops the apply, and
+# the non-fatal steps (push, persist) warn as for any git problem. With no
+# .git, merge, commit, snapshot and push have nothing to do and return 0, as
+# the mars commands themselves would; only infra-clone and infra-persist,
+# which make the .git, still need the command.
+marsInfra() {
+  local cmd="$1" bin
+  shift
+  bin="$(resolveMarsCLI)"
+  if [[ "$MARS_INFRA_CHECKED" != "$bin" ]]; then
+    if ! "$bin" default infra-commit --help >/dev/null 2>&1; then
+      if [[ ! -e "$MARS_PROJECT_ROOT/.git" && "$cmd" != infra-clone && "$cmd" != infra-persist ]]; then
+        echo "ℹ️  [git-infra] no .git at $MARS_PROJECT_ROOT and $bin has no infra-* commands; skipping $cmd." >&2
+        return 0
+      fi
+      echo "⚠️  [git-infra] WARNING: $bin has no 'mars $cmd' (or does not run); it needs a mars release with the infra-* commands (luthersystems/mars#368). [sandbox-infrastructure-template#190]" >&2
+      return 1
     fi
-  done
-  return 1
-}
-
-# infra_https_url URL prints the HTTPS form of a git@github.com: URL, and any
-# other URL as it is.
-infra_https_url() {
-  local url="$1"
-  if [[ "$url" =~ ^git@github\.com:(.+)$ ]]; then
-    echo "https://github.com/${BASH_REMATCH[1]}"
-  else
-    echo "$url"
+    MARS_INFRA_CHECKED="$bin"
   fi
-}
-
-# infra_git_credential_helper FILE prints a git credential helper that gives
-# the token in FILE for each request.
-infra_git_credential_helper() {
-  local q
-  q=$(printf '%q' "$1")
-  echo "!f() { test \"\$1\" = get || return 0; echo username=x-access-token; echo \"password=\$(tr -d '\\n' < ${q})\"; }; f"
-}
-
-# infra_git_auth_args prints, one per line, the "-c" options that give one
-# git command the token of this step (nothing without a token file). The
-# empty helper first drops any helper from another config file.
-infra_git_auth_args() {
-  local tok
-  tok=$(infra_git_token_file) || return 0
-  printf '%s\n' -c "credential.https://github.com.helper=" \
-    -c "credential.https://github.com.helper=$(infra_git_credential_helper "$tok")"
-}
-
-# configure_infra_git_auth sets the repo's git access: the token over HTTPS
-# when the step has one, else the deploy key over SSH.
-configure_infra_git_auth() {
-  local tok
-  if tok=$(infra_git_token_file); then
-    git config --local --unset-all credential.https://github.com.helper 2>/dev/null || true
-    git config --local --add credential.https://github.com.helper ''
-    git config --local --add credential.https://github.com.helper "$(infra_git_credential_helper "$tok")"
-    # A deploy key from an earlier run must not take over.
-    git config --local --unset core.sshCommand 2>/dev/null || true
-    echo "🔑 [git-infra] using the GitHub App token over HTTPS"
-    return 0
-  fi
-  configure_deploy_ssh
-}
-
-# infra_remote_url prints the URL of the -infra repo for this step: HTTPS
-# when the step has a token, else the recorded SSH URL.
-infra_remote_url() {
-  local url
-  url=$(getTfVar "repo_clone_ssh_url")
-  if [[ -z "$url" || "$url" == "null" ]]; then
-    return 0
-  fi
-  if infra_git_token_file >/dev/null; then
-    infra_https_url "$url"
-  else
-    echo "$url"
-  fi
-}
-
-# cloneInfraRepo gives a working tree without .git (an extracted project
-# archive) the git state of the -infra repo, so that gitCommit and
-# gitPushInfra work. Non-fatal: on any problem it warns and returns 0.
-cloneInfraRepo() {
-  if has_git_repo; then
-    return 0
-  fi
-
-  local infra_url
-  infra_url=$(infra_remote_url)
-  if [[ -z "$infra_url" ]]; then
-    echo "[git-infra] No repo_clone_ssh_url set; skipping infra clone" >&2
-    return 0
-  fi
-
-  local deploy_key="$MARS_PROJECT_ROOT/secrets/infra_deploy_key.pem"
-  local git_ssh_cmd="ssh -o StrictHostKeyChecking=no"
-  local auth_args=()
-  mapfile -t auth_args < <(infra_git_auth_args)
-  if ((${#auth_args[@]} == 0)); then
-    if [[ -f "$deploy_key" ]]; then
-      chmod 600 "$deploy_key"
-      git_ssh_cmd="ssh -i $deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
-    elif [[ "$infra_url" == git@* ]]; then
-      # SSH with no deploy key and no token: the clone can only fail. A
-      # later step that has the token clones the repo (persistInfraRepo).
-      echo "[git-infra] No GitHub token or deploy key in this step; skipping infra clone" >&2
-      return 0
-    fi
-  fi
-
-  echo "[git-infra] Cloning infra repo to initialize git state: $infra_url" >&2
-  local tmp_clone
-  tmp_clone="$(mktemp -d)"
-  if ! GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$git_ssh_cmd" git "${auth_args[@]}" clone "$infra_url" "$tmp_clone/repo"; then
-    echo "⚠️  [git-infra] WARNING: failed to clone infra repo; git commit/push will be skipped" >&2
-    rm -rf "$tmp_clone"
-    return 0
-  fi
-
-  # Move .git into the working directory so the git helpers work.
-  mv "$tmp_clone/repo/.git" "$MARS_PROJECT_ROOT/.git"
-  rm -rf "$tmp_clone"
-
-  # Rename origin → infra (ensure_infra_remote expects "infra" remote)
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-  if git remote get-url origin >/dev/null 2>&1; then
-    git remote rename origin infra
-  fi
-  popd >/dev/null
-
-  echo "[git-infra] Git state initialized from infra repo" >&2
-}
-
-ensure_infra_remote() {
-  # repo_clone_ssh_url should be set via terraform auto-vars
-  url=$(infra_remote_url)
-  if [ -n "$url" ]; then
-    if git remote get-url infra >/dev/null 2>&1; then
-      git remote set-url infra "$url"
-    else
-      git remote add infra "$url"
-    fi
-    echo "🔧 [git-infra] infra remote configured → $url"
-  else
-    # LOUD, greppable signal for hypothesis (1) in
-    # sandbox-infrastructure-template#143: cloud-provision writes
-    # tf/auto-vars/git_repo.auto.tfvars.json with repo_clone_ssh_url, but if
-    # that auto-var did not reach this working tree the infra remote is never
-    # wired and the per-project -infra repo stays empty. Non-fatal: may be
-    # benign on early stages (before cloud-provision) but is a real problem on
-    # custom-stack-provision.
-    echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty in ${AUTO_VARS_DIR} — 'infra' remote NOT configured; the per-project -infra repo will NOT be populated. [sandbox-infrastructure-template#143]" >&2
-  fi
-}
-
-configure_git() {
-  if ! has_git_repo; then
-    # LOUD, greppable signal for hypothesis (2) in #143: no .git at the project
-    # root means cloneInfraRepo never ran (or its
-    # clone failed), so nothing can be committed or pushed to the -infra repo.
-    echo "⚠️  [git-infra] WARNING: configure_git: no .git at ${MARS_PROJECT_ROOT} — commit/push to the -infra repo will be SKIPPED. [sandbox-infrastructure-template#143]" >&2
-    return 1
-  fi
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-  ensure_git_identity
-  disable_filemode
-  configure_infra_git_auth
-  ensure_infra_remote
-  popd >/dev/null
-}
-
-# untrackIgnoredFiles stages the removal from git of every tracked file that
-# the repo's .gitignore files ignore. The files stay on disk. gitCommit calls it
-# just before `git add -A`, so the removal goes into that same commit.
-#
-# Why it exists (sandbox-infrastructure-template#160): .gitignore only stops
-# git from ADDING an untracked file. A file that is already tracked stays
-# tracked, and `git add -A` commits each new version of it. The template once
-# tracked tf/auto-vars/common.auto.tfvars.json as a `{}` seed, so every project
-# tree cloned from it (and every -infra repo built from that tree) still tracks
-# the file. At deploy time ui-core writes the cloud credentials into it, and
-# gitCommit committed them and gitPushInfra pushed them to the -infra repo.
-#
-# Why all ignored files and not one name: .gitignore is the one list of what
-# must not reach an -infra repo. Untracking every tracked file it matches makes
-# that list true for files committed before a rule was added (for example
-# outputs/ from before #160), with no second list to keep in step.
-#
-# Why only the repo's .gitignore files: --exclude-per-directory reads them and
-# not core.excludesFile or .git/info/exclude, so a developer's global ignore
-# (such as .idea/) never untracks a repo file from commit.sh.
-#
-# Why only in gitCommit and not before the merges: a commit of the removal
-# before `git merge infra/main` turns an infra/main edit of the same file into a
-# modify/delete conflict, and git then writes infra's old copy over the current
-# credentials on disk. Left alone, the merges behave as before.
-#
-# Non-fatal: it warns and returns 0, so a git problem never fails a deploy that
-# already applied. The old versions stay in the -infra repo history; this
-# function does not rewrite history.
-untrackIgnoredFiles() {
-  local files
-  files="$(git ls-files --cached --ignored --exclude-per-directory=.gitignore)"
-  if [[ -z "$files" ]]; then
-    return 0
-  fi
-
-  echo "🔒 [git-infra] Untracking file(s) that .gitignore ignores (#160):" >&2
-  sed 's/^/    /' <<<"$files" >&2
-  # -z with xargs keeps odd names intact and splits a long list. Literal
-  # pathspecs, so a name with * or [ ] untracks only itself.
-  if ! git ls-files -z --cached --ignored --exclude-per-directory=.gitignore |
-    xargs -0 -r git --literal-pathspecs rm --cached --quiet --ignore-unmatch --; then
-    echo "⚠️  [git-infra] WARNING: git rm --cached failed; ignored files may still be committed. [sandbox-infrastructure-template#160]" >&2
-  fi
-  return 0
-}
-
-gitCommit() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-
-  if ! configure_git; then
-    echo "⚠️  configure_git failed, skipping commit."
-    popd >/dev/null
-    return 0
-  fi
-
-  msg="${1:-auto-commit: infrastructure changes [ci skip]}"
-  # Before `git add -A`: add -A commits new versions of TRACKED files even when
-  # .gitignore matches them. #160
-  untrackIgnoredFiles
-  git add -A
-
-  if git diff --cached --quiet; then
-    echo "No changes to commit."
-  else
-    git commit -m "$msg"
-    echo "✅ Git commit created."
-  fi
-
-  popd >/dev/null
-}
-
-gitMergeOriginMain() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-
-  if ! configure_git; then
-    echo "⚠️  configure_git failed, skipping git merge."
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "🔄 Fetching origin/main…"
-  git fetch origin main
-
-  echo "🔀 Merging (no‐ff, auto‐edit) origin/main…"
-  if git merge origin/main --no-ff --no-edit; then
-    echo "✅ Merge commit created."
-  else
-    echo_error "⚠️  Merge failed or conflicts detected."
-    popd >/dev/null
-    return 1
-  fi
-
-  popd >/dev/null
-}
-
-gitPushInfra() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-
-  if ! git remote get-url infra >/dev/null 2>&1; then
-    # Previously this returned 0 silently ("Skipping gitPushInfra: no infra
-    # remote configured"), which is exactly how #143 went unnoticed: a
-    # successful apply left the -infra repo empty and reported SUCCESS. Warn
-    # LOUDLY (greppable) instead. Still non-fatal — a push problem must never
-    # turn an already-successful deploy into a failure.
-    echo "⚠️  [git-infra] WARNING: no 'infra' remote configured — NOT pushing; the per-project -infra repo will stay EMPTY. [sandbox-infrastructure-template#143]" >&2
-    popd >/dev/null
-    return 0
-  fi
-
-  # A freshly-cloned empty infra repo has no HEAD until gitCommit runs. If there
-  # is still nothing to push, say so loudly rather than pushing nothing.
-  if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
-    echo "⚠️  [git-infra] WARNING: no HEAD/commit to push (nothing was committed) — the per-project -infra repo will stay EMPTY. [sandbox-infrastructure-template#143]" >&2
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "🚀 [git-infra] Pushing HEAD to infra remote…"
-  if git push infra HEAD; then
-    echo "✅ [git-infra] Pushed to infra remote — per-project -infra repo populated."
-  else
-    echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the GitHub token or deploy key and the remote URL. [sandbox-infrastructure-template#143]" >&2
-  fi
-
-  popd >/dev/null
-}
-
-# persistInfraRepo commits the applied working tree and pushes it to the
-# per-project -infra GitHub repo. It is the durable-persistence entry point for
-# the apply code paths that ACTUALLY run in production — apply-with-outputs.sh
-# (--check-drift) and apply-plan.sh — which, unlike apply.sh, never otherwise
-# reach gitPushInfra. That gap is the root cause of #143: ui-core always sets
-# checkDrift=true on custom-stack applies, so the git merge/commit/push in
-# apply.sh was dead code and 89/89 -infra repos were left empty.
-#
-# Contract: NON-FATAL and LOUD. A deploy that already applied must never be
-# turned into a failure by a git/push problem, and every skip/failure is logged
-# with a greppable "[git-infra] WARNING:" prefix so a silent no-op can never
-# regress unnoticed again. Always returns 0.
-persistInfraRepo() {
-  echo "📦 [git-infra] Persisting applied stack to the per-project -infra repo…"
-
-  # Up-front LOUD signals for the two silent-failure hypotheses in #143. These
-  # are pure diagnostics; the helper calls below also degrade gracefully.
-  # prepare-custom-stack clones the -infra repo when it can. With the GitHub
-  # App it cannot (that step gets no token), so clone it here, in the step
-  # that has one.
-  cloneInfraRepo || true
-  if ! has_git_repo; then
-    echo "⚠️  [git-infra] WARNING: no .git at ${MARS_PROJECT_ROOT} at persist time — cloneInfraRepo (prepare-custom-stack, or this step) could not clone the -infra repo. Stack will NOT be pushed. [sandbox-infrastructure-template#143]" >&2
-  fi
-  if [ -z "$(getTfVar repo_clone_ssh_url)" ]; then
-    echo "⚠️  [git-infra] WARNING: repo_clone_ssh_url is empty at persist time — cloud-provision's git_repo.auto.tfvars.json did not reach the apply working tree. [sandbox-infrastructure-template#143]" >&2
-  fi
-
-  # Each helper is individually guarded with `|| echo` so persistInfraRepo
-  # honors its "Always returns 0" contract in EVERY caller context — not only
-  # when the call site adds its own `|| …` (which suspends `set -e` across the
-  # whole body). Without these guards a hard git failure (gitMergeInfraMain's
-  # merge-conflict `return 1`, or a gitCommit/gitPushInfra that aborts mid-body
-  # under an active `set -e`, e.g. a rejecting pre-commit hook) could brick an
-  # already-applied deploy if a future caller ever invoked persistInfraRepo bare.
-  # Belt-and-suspenders on the exact #143 brick path.
-  gitMergeInfraMain || echo "⚠️  [git-infra] WARNING: gitMergeInfraMain returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
-  gitCommit "auto-commit: deployed infrastructure [ci skip]" || echo "⚠️  [git-infra] WARNING: gitCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
-  gitPushInfra || echo "⚠️  [git-infra] WARNING: gitPushInfra returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#143]" >&2
-
-  return 0
-}
-
-gitMergeInfraMain() {
-  pushd "$MARS_PROJECT_ROOT" >/dev/null
-
-  if ! configure_git; then
-    echo "⚠️  configure_git failed, skipping git merge."
-    popd >/dev/null
-    return 0
-  fi
-
-  if ! git remote get-url infra >/dev/null 2>&1; then
-    echo "Skipping gitMergeInfraMain: no infra remote configured"
-    popd >/dev/null
-    return 0
-  fi
-
-  echo "🔄 Fetching infra/main…"
-  # Check if main branch exists on remote before fetching
-  if ! git ls-remote --heads infra main | grep -q main; then
-    echo "ℹ️  infra/main does not exist yet (new repo) - skipping merge"
-    popd >/dev/null
-    return 0
-  fi
-
-  git fetch infra main
-
-  echo "🔀 Merging (no-ff, auto-edit) infra/main…"
-  if git merge infra/main --no-ff --no-edit; then
-    echo "✅ Merge commit created."
-  else
-    echo_error "⚠️  Merge failed or conflicts detected."
-    popd >/dev/null
-    return 1
-  fi
-
-  popd >/dev/null
+  (cd "$MARS_PROJECT_ROOT" && "$bin" default "$cmd" --root . "$@")
 }
 
 # ============================================================================

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Luther Systems "Mars" infrastructure template. Deploys complete sandbox environments on AWS or GCP using Terraform and Ansible, orchestrated by the Mars CLI. Supports Hyperledger Fabric blockchain networks, EKS clusters, and application Helm charts.
 
-**Languages/tools:** HCL (Terraform >= 1.7.5), YAML (Ansible), Bash, Mars CLI (v0.92.0)
+**Languages/tools:** HCL (Terraform >= 1.7.5), YAML (Ansible), Bash, Mars CLI (pinned in `.mars-version`)
 
 ## Architecture
 
@@ -46,7 +46,7 @@ Variables in `ansible/vars/` and `ansible/inventories/default/group_vars/all/`.
 
 ### Shell Utilities
 
-`shell_utils.sh` provides: cloud provider detection (`getCloudProvider`, `isAWS`, `isGCP`), GCP credential management (`setupCloudEnv`/`cleanupCloudEnv`), git helpers (`gitCommit`, `gitMergeOriginMain`, `gitPushInfra`), and tfvar access (`getTfVar`, `mustGetTfVar`).
+`shell_utils.sh` provides: cloud provider detection (`getCloudProvider`, `isAWS`, `isGCP`), GCP credential management (`setupCloudEnv`/`cleanupCloudEnv`), the `marsInfra` call to the mars `infra-*` commands that hold every -infra repo git step (luthersystems/mars `docs/infra-repo.md`), and tfvar access (`getTfVar`, `mustGetTfVar`).
 
 `tf/utils.sh` provides: `tfInit`, `tfPlan`, `tfApply`, `tfDestroy` wrappers that use Mars CLI. Also handles workspace setup, auto-vars copying, and plugin caching.
 
@@ -87,6 +87,8 @@ bash run-ansible.sh ansible/app.yaml default true 2
 
 There is no general test suite. Validation happens through `terraform plan` (dry run), Ansible `--check` mode, and the inspector IAM test script.
 
+The `tests/` scripts run in CI (`.github/workflows/validate.yml`). The ones that reach the -infra repo (`test-infra-push.sh`, `test-prepare-custom-stack.sh`) need `MARS_BIN` set to a mars build with the `infra-*` commands, for example `go build -o /tmp/mars ./cmd/mars` in a luthersystems/mars checkout; the git rules themselves are tested in mars (`internal/infrarepo`).
+
 ## CI/CD
 
 GitHub Actions workflow (`.github/workflows/deploy.yml`):
@@ -110,7 +112,7 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
 | `.mars-version` | Pinned Mars CLI version |
-| `mars` | Mars CLI executable wrapper |
+| `mars` | Mars CLI executable wrapper. Runs the container as the caller's uid (mars v0.147.0+), except ansible commands (mars#367), `MARS_SHELL=true`, a pin that is not a release at or after v0.147.0 (including `latest`), and rootless Docker, userns-remap or podman, which run as root (#187) |
 
 ## Conventions
 

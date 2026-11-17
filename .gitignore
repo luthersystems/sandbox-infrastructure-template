@@ -13,7 +13,7 @@ tf/auto-vars/skip_remote_state.auto.tfvars.json
 # _selectCloudFiles() (shell_utils.sh) copying each
 # tf/**/{providers-<cloud>,<cloud>-resources}.tf.tmpl onto its .tmpl-less
 # basename. They are regenerated on every deploy and must never ride the
-# persistInfraRepo() `git add -A` snapshot push to the per-project -infra repo.
+# `git add -A` snapshot push (mars infra-persist) to the per-project -infra repo.
 #
 # NARROWED from the historic over-broad `tf/*/providers-*.tf` glob — a
 # snapshot-fidelity gap caught by the bridge team's e2e. That glob ALSO matched
@@ -50,13 +50,12 @@ tf/*/*-resources.tf
 # sandbox-infrastructure-template#160 — keep deploy-time tfvars, cloud
 # credentials, and terraform outputs OUT of the per-project -infra repo.
 #
-# persistInfraRepo() (shell_utils.sh) runs `git add -A` against the -infra
-# clone after every custom-stack apply. `git add -A` skips an UNTRACKED file
-# matched here, but it still commits new versions of a TRACKED one, so
-# gitCommit first untracks every tracked file matched here
-# (untrackIgnoredFiles). Every pipeline read of these files is on-disk
-# (getTfVar / terraform auto-load), so excluding them from git is
-# zero-deployment-risk.
+# mars infra-persist (luthersystems/mars docs/infra-repo.md) runs `git add
+# -A` against the -infra clone after every custom-stack apply. `git add -A`
+# skips an UNTRACKED file matched here, but it still commits new versions of
+# a TRACKED one, so its staging first untracks every tracked file matched
+# here. Every pipeline read of these files is on-disk (getTfVar / terraform
+# auto-load), so excluding them from git is zero-deployment-risk.
 # ===========================================================================
 
 # tf/auto-vars/ holds the deploy-time common.auto.tfvars.json (cloud
