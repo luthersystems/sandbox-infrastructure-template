@@ -92,14 +92,64 @@ mkdir -p "$TF_PLUGIN_CACHE_DIR"
 mkdir -p "$ANSIBLE_HYPERLEDGER_DIR"
 mkdir -p "$ANSIBLE_CHARTS_DIR"
 
-# Start the container as root. The mars image's default user is not root
-# from luthersystems/mars#362 on, and its entrypoint refuses USER_ID=0 when
-# the container did not start as root (#187).
+# Run mars as the caller, so what it writes to the checkout and the caches
+# mounted below stays the caller's, not root's (#187). The image runs as any
+# uid from luthersystems/mars#363 (v0.147.0) on: mars-entrypoint gives the
+# uid a passwd entry, so ssh works. USER_ID/GROUP_ID are not passed: they
+# only ask a root-started container to switch user, which is no longer
+# needed, and the entrypoint refuses them when the container did not start
+# as root. Root (0:0, with no USER_ID, so mars stays root) is kept for:
+#   - an image older than v0.147.0, which cannot run as another uid;
+#   - rootless Docker, where container root already is the caller;
+#   - MARS_SHELL=true, whose bash entrypoint skips mars-entrypoint, so the
+#     uid would get no passwd entry;
+#   - MARS_AZ=true, which mounts the kube config at /root/.kube;
+#   - an ansible command (run-ansible.sh, deploy.yml): mars's umbrella role
+#     chowns its chart directory to root ("Create umbrella chart
+#     directory"), which a non-root uid cannot do. ui-infrastructure hit
+#     this on every deploy (luthersystems/ui-infrastructure#611).
+# So in practice Terraform runs as the caller and ansible as root.
+RUN_USER="$(id -u):$(id -g)"
+if [[ "$MARS_VERSION" != latest ]] &&
+  [[ "$(printf '%s\n' "$MARS_VERSION" v0.147.0 | sort -V | head -n1)" != v0.147.0 ]]; then
+  RUN_USER=0:0
+elif docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+  RUN_USER=0:0
+elif [[ "$MARS_SHELL" == "true" || "$MARS_AZ" == "true" ]]; then
+  RUN_USER=0:0
+elif [[ "${2:-}" == ansible* ]]; then
+  RUN_USER=0:0
+fi
+
+# Before #187 this wrapper ran every command as root, so a checkout or cache
+# it wrote to can hold root-owned files (tf/*/.terraform, provider and tfenv
+# caches) that a run as the caller cannot overwrite. Give them back to the
+# caller from a root container (the caller can run docker, so no sudo is
+# needed). Only uid 0's files: another user's files stay theirs. A failure
+# warns and mars still runs.
+reclaim() {
+  local dir
+  for dir in "$@"; do
+    [ -d "$dir" ] || continue
+    if [ -n "$(find "$dir" -user 0 -print -quit 2>/dev/null)" ]; then
+      echo >&2 "mars: giving root-owned files that an earlier run left in $dir to $(id -u):$(id -g)"
+      docker run --rm --user 0:0 --entrypoint find \
+        --mount "type=bind,src=$dir,dst=/reclaim" \
+        "$DOCKER_IMAGE:$MARS_VERSION" /reclaim -user 0 -exec chown -h "$(id -u):$(id -g)" {} + ||
+        echo >&2 "mars: could not give every file in $dir back; continuing"
+    fi
+  done
+}
+if [[ "$RUN_USER" != "0:0" ]]; then
+  # The checkout only when it is a git checkout: outside one, PROJECT_PATH
+  # is just the current directory.
+  reclaim ${GIT_ROOT:+"$PROJECT_PATH"} "$TFENV_CACHE_PATH" "$TF_PLUGIN_CACHE_DIR" \
+    "$ANSIBLE_HYPERLEDGER_DIR" "$ANSIBLE_CHARTS_DIR"
+fi
+
 docker run --rm $DOCKER_TERM_VARS \
   --network host \
-  --user 0:0 \
-  -e USER_ID=0 \
-  -e GROUP_ID=0 \
+  --user "$RUN_USER" \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
   -e TF_PLUGIN_CACHE_DIR=/opt/tf-plugin-cache-dir \
   $ENV_VARS \

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Luther Systems "Mars" infrastructure template. Deploys complete sandbox environments on AWS or GCP using Terraform and Ansible, orchestrated by the Mars CLI. Supports Hyperledger Fabric blockchain networks, EKS clusters, and application Helm charts.
 
-**Languages/tools:** HCL (Terraform >= 1.7.5), YAML (Ansible), Bash, Mars CLI (v0.92.0)
+**Languages/tools:** HCL (Terraform >= 1.7.5), YAML (Ansible), Bash, Mars CLI (pinned in `.mars-version`)
 
 ## Architecture
 
@@ -110,7 +110,7 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
 | `.mars-version` | Pinned Mars CLI version |
-| `mars` | Mars CLI executable wrapper |
+| `mars` | Mars CLI executable wrapper. Runs the container as the caller's uid (mars v0.147.0+), except ansible commands, `MARS_SHELL=true` and older images, which run as root (#187) |
 
 ## Conventions
 
