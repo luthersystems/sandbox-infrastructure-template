@@ -696,19 +696,31 @@ set +e
 run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift >/dev/null
 first_rcM=$?
 set -e
-first_headM="$(git -C "$BARE" rev-parse --verify -q main || echo "")"
+first_headM="$(git -C "$BARE" rev-parse --verify -q refs/heads/main || echo "")"
 
-# The customer adds their own file on infra/main, which the deploy tree does
-# not have: the snapshot must keep it. They also edit a template-managed file
-# that the deploy has: the snapshot takes the deployed version.
+# infra/main gets a file the deploy tree does not have, and an edit to a file
+# the deploy has. The -infra repo is an output copy of the deployed state, so
+# the snapshot drops the first and takes the deployed version of the second.
+# It also gets an executable script that the deploy tree holds as 0644 (an
+# archive or mount can lose the bit): the snapshot keeps infra/main's
+# 100755, because only a new file's mode is read from disk.
 stale_clone="$WORKDIR/projM-stale"
 git clone -q -b main "file://$BARE" "$stale_clone"
-echo "customer file" > "$stale_clone/stale-infra-only.txt"
-echo "# customer edit" >> "$stale_clone/shell_utils.sh"
-git -C "$stale_clone" add stale-infra-only.txt shell_utils.sh
+echo "infra-only file" > "$stale_clone/stale-infra-only.txt"
+echo "# infra-only edit" >> "$stale_clone/shell_utils.sh"
+printf '#!/bin/sh\n' > "$stale_clone/existing-hook.sh"
+/bin/chmod 0755 "$stale_clone/existing-hook.sh"
+git -C "$stale_clone" add stale-infra-only.txt shell_utils.sh existing-hook.sh
 git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q -m "infra-only edit"
 git -C "$stale_clone" push -q origin main
-stale_headM="$(git -C "$BARE" rev-parse main)"
+stale_headM="$(git -C "$BARE" rev-parse refs/heads/main)"
+# A tag named main on another commit: fetching "main" would resolve to the
+# tag (refs/tags wins over refs/heads), the snapshot would sit on the wrong
+# base, and the push would be rejected. fetchInfraMain asks for
+# refs/heads/main.
+git -C "$stale_clone" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "tagged, not on main"
+git -C "$stale_clone" tag main HEAD
+git -C "$stale_clone" push -q origin refs/tags/main
 
 # The ui-core squash: a new root commit with no shared history. Like the
 # trees of projects built from the old template, it tracks the credentials
@@ -722,11 +734,13 @@ jq -n --arg url "file://$BARE" \
   '{"cloud_provider":"aws","repo_clone_ssh_url":$url,"aws_secret_access_key":"FAKE-SECRET-M"}' \
   > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
 echo "third-deploy-change" > "$PROJ/tf/custom-stack-provision/main.tf"
+printf '#!/bin/sh\n' > "$PROJ/existing-hook.sh"
+/bin/chmod 0644 "$PROJ/existing-hook.sh"
 # A new executable script: configure_git sets core.fileMode=false, and the
 # snapshot must still record it as 100755. /bin/chmod: chmod is mocked.
 printf '#!/bin/sh\necho hi\n' > "$PROJ/tf/custom-stack-provision/new-hook.sh"
 /bin/chmod 0755 "$PROJ/tf/custom-stack-provision/new-hook.sh"
-git -C "$PROJ" fetch -q "file://$BARE" main
+git -C "$PROJ" fetch -q "file://$BARE" refs/heads/main
 if git -C "$PROJ" merge-base HEAD FETCH_HEAD >/dev/null 2>&1; then
   fail "M: fixture error — the squashed history shares a commit with infra/main"
 else
@@ -737,7 +751,7 @@ set +e
 outM="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision --check-drift)"
 rcM=$?
 set -e
-headM="$(git -C "$BARE" rev-parse main)"
+headM="$(git -C "$BARE" rev-parse refs/heads/main)"
 
 if [[ "$first_rcM" -eq 0 && "$rcM" -eq 0 && -n "$first_headM" ]]; then
   pass "M: both applies exit 0 and the first one pushed"
@@ -749,33 +763,38 @@ if [[ "$headM" != "$stale_headM" ]] && git -C "$BARE" merge-base --is-ancestor "
 else
   fail "M: infra/main did not fast-forward ($stale_headM → $headM). Output: $outM"
 fi
-if [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "third-deploy-change" ]]; then
+if [[ "$(git -C "$BARE" show refs/heads/main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "third-deploy-change" ]]; then
   pass "M: the pushed snapshot carries the deployed change"
 else
   fail "M: the pushed main.tf is not the deployed one"
 fi
-if [[ "$(git -C "$BARE" show main:stale-infra-only.txt 2>/dev/null)" == "customer file" ]]; then
-  pass "M: a file only on infra/main (the customer's own) is kept"
+if git -C "$BARE" cat-file -e refs/heads/main:stale-infra-only.txt 2>/dev/null; then
+  fail "M: a file only on infra/main survived — the snapshot is not the deployed tree"
 else
-  fail "M: the customer's infra-only file was deleted by the snapshot"
+  pass "M: the snapshot is the deployed tree (the infra-only file is gone)"
 fi
-if git -C "$BARE" show main:shell_utils.sh | grep -qF "# customer edit"; then
+if git -C "$BARE" show refs/heads/main:shell_utils.sh | grep -qF "# infra-only edit"; then
   fail "M: a file in both places kept the infra/main version, not the deployed one"
 else
   pass "M: a file in both places takes the deployed version"
 fi
-if [[ "$(git -C "$BARE" ls-tree main tf/custom-stack-provision/new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
+if [[ "$(git -C "$BARE" ls-tree refs/heads/main tf/custom-stack-provision/new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
   pass "M: a new 0755 script is pushed as 100755"
 else
-  fail "M: the new script lost its exec bit: $(git -C "$BARE" ls-tree main tf/custom-stack-provision/new-hook.sh)"
+  fail "M: the new script lost its exec bit: $(git -C "$BARE" ls-tree refs/heads/main tf/custom-stack-provision/new-hook.sh)"
 fi
-if [[ "$(git -C "$BARE" rev-list --count "$stale_headM..main")" -eq 1 ]]; then
+if [[ "$(git -C "$BARE" ls-tree refs/heads/main existing-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
+  pass "M: an existing 100755 file that is 0644 on disk stays 100755"
+else
+  fail "M: the disk mode replaced infra/main's: $(git -C "$BARE" ls-tree refs/heads/main existing-hook.sh)"
+fi
+if [[ "$(git -C "$BARE" rev-list --count "$stale_headM..refs/heads/main")" -eq 1 ]]; then
   pass "M: the snapshot is one commit on top of infra/main"
 else
   fail "M: expected exactly one new commit on infra/main"
 fi
 # The #160 canary on the snapshot push.
-pushed_tree="$(git -C "$BARE" ls-tree -r --name-only main 2>/dev/null || echo "")"
+pushed_tree="$(git -C "$BARE" ls-tree -r --name-only refs/heads/main 2>/dev/null || echo "")"
 if echo "$pushed_tree" | grep -qE '\.auto\.tfvars\.json$|^outputs/|^secrets/|\.tfplan$'; then
   fail "M: a tfvars, outputs, secrets or plan file rode the snapshot push (#160). Tree: $pushed_tree. Output: $outM"
 else
@@ -886,6 +905,114 @@ for wf in quality security; do
     fail "O: $wf.yml has no repository guard, so every -infra repo runs it"
   fi
 done
+
+# =============================================================================
+echo ""
+echo "=== Case P: apply.sh from a stale checkout merges teammates' edits first ==="
+# =============================================================================
+# A developer's checkout shares history with infra/main but is behind it.
+# apply.sh merges infra/main before Terraform runs, so the apply includes the
+# teammate's change, then pushes the snapshot.
+PROJ="$(make_project projP)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "shared base"
+git -C "$PROJ" push -q "file://$BARE" main
+mate="$WORKDIR/projP-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "teammate change" > "$mate/teammate.txt"
+git -C "$mate" add teammate.txt
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "teammate edit"
+git -C "$mate" push -q origin main
+mate_headP="$(git -C "$BARE" rev-parse main)"
+# Record whether the teammate's file is in the tree when Terraform runs.
+cat > "$PROJ/tf/run-with-creds.sh" <<OUTER
+#!/usr/bin/env bash
+echo "mars \$*" >> "$CMD_LOG"
+if [[ -f "$PROJ/teammate.txt" ]]; then echo "teammate-present" >> "$CMD_LOG"; fi
+OUTER
+/bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+
+set +e
+outP="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcP=$?
+set -e
+if [[ "$rcP" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG" && grep -q "teammate-present" "$CMD_LOG"; then
+  pass "P: the stale checkout merged infra/main before Terraform ran"
+else
+  fail "P: rc=$rcP, or Terraform ran without the teammate's edit. Output: $outP"
+fi
+if git -C "$BARE" merge-base --is-ancestor "$mate_headP" main &&
+  git -C "$BARE" cat-file -e main:teammate.txt 2>/dev/null; then
+  pass "P: the push fast-forwards and keeps the teammate's edit"
+else
+  fail "P: infra/main lost the teammate's edit or did not fast-forward"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case Q: apply.sh stops on a real merge conflict, before Terraform ==="
+# =============================================================================
+PROJ="$(make_project projQ)"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
+cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+echo "base" > "$PROJ/conflict.txt"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m "shared base"
+git -C "$PROJ" push -q "file://$BARE" main
+mate="$WORKDIR/projQ-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "theirs" > "$mate/conflict.txt"
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -am "their edit"
+git -C "$mate" push -q origin main
+echo "ours" > "$PROJ/conflict.txt"
+git -C "$PROJ" commit -q -am "our edit"
+
+set +e
+outQ="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
+rcQ=$?
+set -e
+if [[ "$rcQ" -ne 0 ]] && ! grep -q "apply --approve" "$CMD_LOG"; then
+  pass "Q: a merge conflict stops the apply before Terraform runs"
+else
+  fail "Q: rc=$rcQ; a conflicted checkout must not apply. Output: $outQ"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case R: gitCommit (commit.sh, destroy.sh) uses the same staging rules ==="
+# =============================================================================
+PROJ="$(make_project projR)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+mkdir -p "$PROJ/.github"
+echo "version: 2" > "$PROJ/.github/dependabot.yml"
+printf '#!/bin/sh\n' > "$PROJ/r-new-hook.sh"
+/bin/chmod 0755 "$PROJ/r-new-hook.sh"
+outR="$(
+  cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash -c '
+    . ./shell_utils.sh
+    gitCommit "commit.sh run"
+  ' 2>&1
+)"
+if git -C "$PROJ" cat-file -e HEAD:.github/dependabot.yml 2>/dev/null; then
+  fail "R: gitCommit committed .github/dependabot.yml in a project tree. Output: $outR"
+else
+  pass "R: gitCommit leaves .github/dependabot.yml out of a project tree"
+fi
+if [[ "$(git -C "$PROJ" ls-tree HEAD r-new-hook.sh | cut -d' ' -f1)" == "100755" ]]; then
+  pass "R: gitCommit records a new 0755 script as 100755"
+else
+  fail "R: gitCommit lost the new script's exec bit: $(git -C "$PROJ" ls-tree HEAD r-new-hook.sh)"
+fi
 
 # --- Summary -----------------------------------------------------------------
 echo ""

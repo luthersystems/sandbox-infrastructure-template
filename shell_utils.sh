@@ -352,6 +352,58 @@ untrackIgnoredFiles() {
   return 0
 }
 
+# Paths that belong to the template repo only and never go into a project
+# tree's commits, so they never reach an -infra repo. .github/dependabot.yml
+# configures Dependabot for the template; in an -infra repo it would open
+# weekly PRs that the next deploy reverts. (The workflows ride along but
+# guard themselves with `if: github.repository == ...`.) The files stay on
+# disk.
+SNAPSHOT_TEMPLATE_ONLY_PATHS=(
+  .github/dependabot.yml
+)
+
+# gitStageTree <base> stages the worktree for a commit, with the rules every
+# commit of a project tree follows. gitCommit (commit.sh, destroy.sh) and
+# gitSnapshotCommit (persistInfraRepo, apply.sh) both use it, so the rules
+# live in one place. <base> is the commit the index was reset to (HEAD, or
+# infra/main for a snapshot); empty means none (an unborn branch).
+#   1. untrackIgnoredFiles, before `git add -A`: add -A commits new versions
+#      of TRACKED files even when .gitignore matches them (#160).
+#   2. `git add -A` with core.fileMode as configure_git set it (off). Off,
+#      git keeps the mode the index already has for a file the base has, so
+#      a lost exec bit on disk (an archive or a mount can drop it) never
+#      turns a 100755 script into 100644. But off, a NEW file is staged as
+#      100644 even when it is 0755 on disk, so:
+#   3. for each path that is new against <base>, set the disk mode
+#      (`git update-index --chmod=+x`) when the file is executable. Only new
+#      paths: their disk mode is the only one there is.
+#   4. In a project tree (one with an infra remote), drop
+#      SNAPSHOT_TEMPLATE_ONLY_PATHS from the index. Not in the template
+#      repo itself, which has no infra remote and tracks them.
+# Run it in the project root.
+gitStageTree() {
+  local base="$1" path
+  untrackIgnoredFiles
+  git add -A
+
+  local new_paths=()
+  if [[ -n "$base" ]]; then
+    while IFS= read -r -d '' path; do new_paths+=("$path"); done \
+      < <(git diff --cached --name-only -z --no-renames --diff-filter=A "$base")
+  else
+    while IFS= read -r -d '' path; do new_paths+=("$path"); done < <(git ls-files -z)
+  fi
+  for path in "${new_paths[@]+"${new_paths[@]}"}"; do
+    if [[ -f "$path" && ! -L "$path" && -x "$path" ]]; then
+      git --literal-pathspecs update-index --chmod=+x -- "$path"
+    fi
+  done
+
+  if git remote get-url infra >/dev/null 2>&1; then
+    git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}"
+  fi
+}
+
 gitCommit() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
@@ -362,10 +414,9 @@ gitCommit() {
   fi
 
   msg="${1:-auto-commit: infrastructure changes [ci skip]}"
-  # Before `git add -A`: add -A commits new versions of TRACKED files even when
-  # .gitignore matches them. #160
-  untrackIgnoredFiles
-  git add -A
+  local base=""
+  base="$(git rev-parse -q --verify HEAD || true)"
+  gitStageTree "$base"
 
   if git diff --cached --quiet; then
     echo "No changes to commit."
@@ -475,18 +526,20 @@ persistInfraRepo() {
   return 0
 }
 
-# fetchInfraMain fetches infra/main into FETCH_HEAD (and infra/main). It
-# prints one word: "fetched", "absent" (the remote has no main yet: a new,
+# fetchInfraMain fetches infra/main into FETCH_HEAD and refs/remotes/infra/main.
+# It prints one word: "fetched", "absent" (the remote has no main yet: a new,
 # empty -infra repo) or "error" (the remote could not be listed or fetched).
-# It asks for refs/heads/main exactly: `git ls-remote --heads infra main`
-# also matches a branch such as feature/main, and then a repo with no main
-# looked like it had one. Run it in the project root, with an infra remote.
+# It names refs/heads/main in full both times: `git ls-remote --heads infra
+# main` also matches a branch such as feature/main, and `git fetch infra main`
+# takes a tag named main over the branch (refs/tags comes first), so the
+# snapshot would sit on the wrong commit and its push be rejected. Run it in
+# the project root, with an infra remote.
 fetchInfraMain() {
   local rc=0
   git ls-remote --exit-code infra refs/heads/main >/dev/null 2>&1 || rc=$?
   case "$rc" in
     0)
-      if git fetch infra main >&2; then
+      if git fetch infra +refs/heads/main:refs/remotes/infra/main >&2; then
         echo fetched
       else
         echo error
@@ -497,10 +550,16 @@ fetchInfraMain() {
   esac
 }
 
-# gitMergeInfraMain merges infra/main into the project tree. Only pull.sh uses
-# it: a developer pulling infra/main wants its changes in their tree. The
-# deploy paths (persistInfraRepo, apply.sh) use gitSnapshotCommit, because
-# ui-core's squashed history makes this merge fail (#160).
+# gitMergeInfraMain merges infra/main into the project tree: pull.sh, and
+# apply.sh before it applies, so a developer's stale checkout gets teammates'
+# edits before Terraform runs. Returns:
+#   0  merged, nothing to merge, or nothing to fetch from;
+#   1  a real merge failure (conflicts), or infra/main could not be fetched;
+#   2  the histories are unrelated: ui-core squashes the project tree's
+#      history on every dispatch, so its tree never shares a commit with
+#      infra/main and the merge would always fail. That tree is the deploy's
+#      source of truth, so apply.sh goes on and gitSnapshotCommit pushes it
+#      on top of infra/main afterwards (#160). Nothing is merged.
 gitMergeInfraMain() {
   pushd "$MARS_PROJECT_ROOT" >/dev/null
 
@@ -530,6 +589,13 @@ gitMergeInfraMain() {
       ;;
   esac
 
+  if git rev-parse -q --verify HEAD >/dev/null &&
+    ! git merge-base HEAD infra/main >/dev/null; then
+    echo "ℹ️  The project history and infra/main are unrelated (ui-core's squashed tree) - not merging"
+    popd >/dev/null
+    return 2
+  fi
+
   echo "🔀 Merging (no-ff, auto-edit) infra/main…"
   if git merge infra/main --no-ff --no-edit; then
     echo "✅ Merge commit created."
@@ -542,51 +608,37 @@ gitMergeInfraMain() {
   popd >/dev/null
 }
 
-# Paths that belong to the template repo only and never go into an -infra
-# repo snapshot. .github/dependabot.yml configures Dependabot for the
-# template; in an -infra repo it would open weekly PRs that the next deploy
-# reverts. (The workflows ride along but guard themselves with
-# `if: github.repository == ...`.) The files stay on disk.
-SNAPSHOT_TEMPLATE_ONLY_PATHS=(
-  .github/dependabot.yml
-)
-
 # gitSnapshotCommit commits the deployed project tree as one snapshot commit
 # on top of infra/main, so gitPushInfra fast-forwards
 # (sandbox-infrastructure-template#160, Phase 5). persistInfraRepo and
 # apply.sh call it after the apply.
 #
+# The -infra repo is an output copy of the deployed state; ui-core (its
+# project archive) is the source of truth. So the snapshot is exactly the
+# deployed tree: a file only infra/main has is removed (it stays in the
+# history), and a file in both takes the deployed version. Keeping
+# infra-only files would bring back what a deploy removes on purpose, such
+# as a removed component's .tf, and the -infra repo would keep declaring
+# destroyed resources. Every -infra repo's only collaborator is
+# sam-at-luther, so no customer work lives only there.
+#
 # Why not a merge: ui-core squashes the project tree's git history on every
 # dispatch, so from a project's second deploy on the local history and
-# infra/main share no commit. `git merge` refuses unrelated histories, the push
-# was rejected non-fast-forward, and every push after the first was lost
-# (warn-only). A merge would also bring infra/main edits into the tree after
-# the apply, so the pushed tree would not be what was deployed.
+# infra/main share no commit. `git merge` refuses unrelated histories, the
+# push was rejected non-fast-forward, and every push after the first was lost
+# (warn-only).
 #
-# Steps:
-#   1. `git reset --mixed FETCH_HEAD`: HEAD and the index become infra/main;
-#      the worktree (the tree the apply just deployed) is not touched.
-#      Not the --soft of the issue's design: --soft keeps a local index that
-#      can track an ignored file (the squashed tree of a project built from
-#      the old template tracks tf/auto-vars/common.auto.tfvars.json). That
-#      entry then differs from HEAD and from disk, untrackIgnoredFiles'
-#      `git rm --cached` refuses it, and `git add -A` commits the deploy-time
-#      credentials in it (tests/test-infra-push.sh Case M).
-#   2. Stage the worktree: untrackIgnoredFiles, then `git add -A` with
-#      core.fileMode=true. configure_git turns fileMode off for the project
-#      tree, and with it off a file infra/main lacks is staged as 100644, so
-#      a new script lost its exec bit. The snapshot records the deployed
-#      modes.
-#   3. Keep what only infra/main has: a path on infra/main that is not in the
-#      deployed tree and not ignored goes back into the index. It is the
-#      customer's own (their workflows, a README); the deploy never had it,
-#      so dropping it would delete their work on every deploy. A path in both
-#      places takes the deployed version, so a customer edit to a
-#      template-managed file is still replaced by the deploy. A file the
-#      template stops shipping also stays in the -infra repo.
-#   4. Drop SNAPSHOT_TEMPLATE_ONLY_PATHS from the index.
+# How: `git reset --mixed` onto infra/main moves HEAD and the index and does
+# not touch the worktree (the tree the apply just deployed); gitStageTree
+# then stages that tree. Not the --soft of the issue's design: --soft keeps a
+# local index that can track an ignored file (the squashed tree of a project
+# built from the old template tracks tf/auto-vars/common.auto.tfvars.json).
+# That entry then differs from HEAD and from disk, untrackIgnoredFiles'
+# `git rm --cached` refuses it, and `git add -A` commits the deploy-time
+# credentials in it (tests/test-infra-push.sh Case M). With --mixed the index
+# is infra/main's tree, and infra/main's modes stand for the files it has.
 #
-# A missing infra/main (a new repo) skips steps 1 and 3, and the first push
+# A missing infra/main (a new repo) skips the reset, and the first push
 # creates main. Returns 1 when infra/main cannot be fetched or the reset
 # fails; callers treat that as non-fatal.
 gitSnapshotCommit() {
@@ -622,21 +674,11 @@ gitSnapshotCommit() {
         ;;
     esac
   fi
-
-  untrackIgnoredFiles
-  git -c core.fileMode=true add -A
-
-  if [[ -n "$base" ]]; then
-    local path
-    while IFS= read -r -d '' path; do
-      if [[ ! -e "$path" && ! -L "$path" ]] &&
-        ! git check-ignore -q --no-index -- "$path"; then
-        git --literal-pathspecs reset -q "$base" -- "$path"
-      fi
-    done < <(git diff --cached --name-only -z --diff-filter=D "$base")
+  if [[ -z "$base" ]]; then
+    base="$(git rev-parse -q --verify HEAD || true)"
   fi
 
-  git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}"
+  gitStageTree "$base"
 
   if git diff --cached --quiet; then
     echo "No changes to commit."
