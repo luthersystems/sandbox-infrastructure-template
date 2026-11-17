@@ -262,6 +262,10 @@ cloneInfraRepo() {
   if git remote get-url origin >/dev/null 2>&1; then
     git remote rename origin infra
   fi
+  # The deploy archive now lies over an old infra/main commit and is the
+  # source of truth. Mark the checkout so gitMergeInfraMain never merges
+  # infra/main content into it; the snapshot commit replaces infra/main.
+  git config luther.infraSnapshotTree true
   popd >/dev/null
 
   echo "[git-infra] Git state initialized from infra repo" >&2
@@ -365,21 +369,39 @@ SNAPSHOT_TEMPLATE_ONLY_PATHS=(
   .github/dependabot.yml
 )
 
-# markNewScriptsExecutable <base> sets the exec bit in the index on each
-# path that is new against <base> (all staged paths when <base> is empty),
-# executable on disk, and starts with "#!". core.fileMode is off
-# (configure_git), so `git add` would record a new 0755 script as 100644.
-# Existing paths keep their index mode, and the bit is never removed: an
-# archive or a mount can extract every file as 0777 (or drop the bit), and
-# that must not churn the modes of existing files. The cost: a later
-# 644->755 change of an existing script is not carried (set it with
-# `git update-index --chmod=+x`). The "#!" test keeps a new data file
-# (.tf, .json) at 100644 on such a filesystem. One batched update-index
-# call, not a process per file. Run it in the project root.
-markNewScriptsExecutable() {
-  local base="$1" path head
+# mergeInProgress succeeds when a merge is unfinished: MERGE_HEAD exists or
+# the index has unmerged entries. Run it in the project root.
+mergeInProgress() {
+  git rev-parse -q --verify MERGE_HEAD >/dev/null || [[ -n "$(git ls-files -u)" ]]
+}
+
+# markScriptsExecutable <base> [path...] sets the exec bit in the index on:
+#   - each path that is new against <base> (every staged path when <base> is
+#     empty), executable on disk, and starts with "#!"; core.fileMode is off
+#     (configure_git), so `git add` would record a new 0755 script as 100644;
+#   - each given path that is staged as 100644: the snapshot passes the paths
+#     the project tree had at 100755 before it reset onto infra/main, so its
+#     own modes win over infra/main's.
+# Other existing paths keep their index mode, and the bit is never removed:
+# an archive or a mount can extract every file as 0777 (or drop the bit),
+# and that must not churn modes. The cost: a 644->755 change of an existing
+# script on disk alone is not carried (set it with `git update-index
+# --chmod=+x`). The "#!" test keeps a new data file (.tf, .json) at 100644
+# on such a filesystem. One batched update-index call, not a process per
+# file. Run it in the project root.
+markScriptsExecutable() {
+  local base="$1" path head line
+  shift
   local -a paths=()
+  local -A staged_644=()
+  while IFS= read -r -d '' line; do
+    [[ "${line%% *}" == 100644 ]] && staged_644["${line#*$'\t'}"]=1
+  done < <(git ls-files -s -z)
+  for path in "$@"; do
+    [[ -n "${staged_644[$path]:-}" ]] && paths+=("$path")
+  done
   while IFS= read -r -d '' path; do
+    [[ -n "${staged_644[$path]:-}" ]] || continue
     [[ -f "$path" && ! -L "$path" && -x "$path" ]] || continue
     head=""
     IFS= read -r -n 2 head <"$path" || true
@@ -396,23 +418,34 @@ markNewScriptsExecutable() {
   fi
 }
 
-# gitStageTree <base> <drop_template_only> stages the worktree for a commit,
-# with the rules every commit of a project tree follows. gitCommit
-# (commit.sh, destroy.sh) and gitSnapshotCommit (persistInfraRepo, apply.sh)
-# both use it, so the rules live in one place. <base> is the commit the
-# index starts from (HEAD, or infra/main for a snapshot); empty means none.
+# gitStageTree <base> <drop_template_only> [exec path...] stages the worktree
+# for a commit, with the rules every commit of a project tree follows.
+# gitCommit (commit.sh, destroy.sh) and gitSnapshotCommit (persistInfraRepo,
+# apply.sh) both use it, so the rules live in one place. <base> is the commit
+# the index starts from (infra/main for a snapshot); empty means HEAD, or
+# none on an unborn branch. Returns 1, staging nothing:
+#   0. when a merge is in progress, so conflict markers are never committed.
+# Otherwise:
 #   1. untrackIgnoredFiles, before `git add -A`: add -A commits new versions
 #      of TRACKED files even when .gitignore matches them (#160).
 #   2. `git add -A` with core.fileMode as configure_git set it (off), then
-#      markNewScriptsExecutable for the exec bits of new scripts.
+#      markScriptsExecutable with <base> and the exec paths.
 #   3. With <drop_template_only>=1 (only gitSnapshotCommit), drop
 #      SNAPSHOT_TEMPLATE_ONLY_PATHS from the index.
 # Run it in the project root.
 gitStageTree() {
   local base="$1" drop_template_only="$2"
+  shift 2
+  if mergeInProgress; then
+    echo_error "⚠️  A merge is in progress; finish or abort it first. Nothing staged."
+    return 1
+  fi
+  if [[ -z "$base" ]]; then
+    base="$(git rev-parse -q --verify HEAD || true)"
+  fi
   untrackIgnoredFiles
   git add -A
-  markNewScriptsExecutable "$base"
+  markScriptsExecutable "$base" "$@"
   if [[ "$drop_template_only" == 1 ]]; then
     git rm --cached -q --ignore-unmatch -- "${SNAPSHOT_TEMPLATE_ONLY_PATHS[@]}"
   fi
@@ -429,9 +462,10 @@ gitCommit() {
 
   msg="${1:-auto-commit: infrastructure changes [ci skip]}"
   # gitCommit keeps the template-only paths; only the snapshot drops them.
-  local base=""
-  base="$(git rev-parse -q --verify HEAD || true)"
-  gitStageTree "$base" 0
+  if ! gitStageTree "" 0; then
+    popd >/dev/null
+    return 1
+  fi
 
   if git diff --cached --quiet; then
     echo "No changes to commit."
@@ -453,7 +487,9 @@ gitMergeOriginMain() {
   fi
 
   echo "🔄 Fetching origin/main…"
-  git fetch origin main
+  # The full ref: `git fetch origin main` takes a tag named main over the
+  # branch.
+  git fetch origin +refs/heads/main:refs/remotes/origin/main
 
   echo "🔀 Merging (no‐ff, auto‐edit) origin/main…"
   if git merge origin/main --no-ff --no-edit; then
@@ -571,12 +607,15 @@ fetchInfraMain() {
 # `git merge` (git refuses only local changes that overlap the merge), with
 # one addition. Returns:
 #   0  merged, nothing new to merge, or no infra remote or infra/main yet;
-#   1  infra/main could not be fetched, merge-base failed, or the merge
-#      failed. With --abort-on-conflict (apply.sh) the failed merge is
+#   1  a merge is already in progress (never aborted here), infra/main
+#      could not be fetched, the shallow clone could not be deepened,
+#      merge-base failed, or the merge failed. With --abort-on-conflict (apply.sh) the failed merge is
 #      aborted, so no MERGE_HEAD or conflict markers stay on disk for the
 #      snapshot to push; without it (pull.sh) the conflict stays to resolve,
 #      as gitMergeOriginMain leaves it.
-#   2  there is nothing to merge into: HEAD is unborn (the repo was cloned
+#   2  not merged: the checkout is marked luther.infraSnapshotTree
+#      (cloneInfraRepo laid the deploy archive over it), or there is nothing
+#      to merge into: HEAD is unborn (the repo was cloned
 #      while infra was empty), or the histories are unrelated (ui-core
 #      squashes the project tree's history on every dispatch, so its tree
 #      never shares a commit with infra/main). Nothing is merged; apply.sh
@@ -597,6 +636,19 @@ gitMergeInfraMain() {
     echo "Skipping gitMergeInfraMain: no infra remote configured"
     popd >/dev/null
     return 0
+  fi
+
+  # Refuse a merge someone else started, and never abort it below.
+  if mergeInProgress; then
+    echo_error "⚠️  A merge is in progress; finish or abort the merge in progress first."
+    popd >/dev/null
+    return 1
+  fi
+
+  if [[ "$(git config --bool luther.infraSnapshotTree || true)" == true ]]; then
+    echo "ℹ️  infra/main not merged: this checkout holds the deploy archive (cloneInfraRepo); the snapshot commit replaces infra/main."
+    popd >/dev/null
+    return 2
   fi
 
   if ! git rev-parse -q --verify HEAD >/dev/null; then
@@ -621,11 +673,14 @@ gitMergeInfraMain() {
 
   # In a shallow clone the common ancestor can sit below the cut, and
   # merge-base would report none for related histories. A failed deepen is
-  # only a warning: merge-base then runs as it did before.
+  # an error: rc 2 would deploy a stale tree whose snapshot reverts a
+  # teammate's commit.
   if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
     echo "🔄 Deepening the shallow clone from infra…"
     if ! git fetch --unshallow infra +refs/heads/main:refs/remotes/infra/main >&2; then
-      echo_error "⚠️  Could not deepen the shallow clone; merge-base may miss a common ancestor below the cut."
+      echo_error "⚠️  Could not deepen the shallow clone."
+      popd >/dev/null
+      return 1
     fi
   fi
 
@@ -706,12 +761,26 @@ gitSnapshotCommit() {
     return 0
   fi
 
-  local base=""
+  # Before the reset: reset --mixed would drop MERGE_HEAD and the conflict
+  # entries, and the markers on disk would then be committed.
+  if mergeInProgress; then
+    echo_error "⚠️  [git-infra] WARNING: a merge is in progress; finish or abort it first. No snapshot. [sandbox-infrastructure-template#160]"
+    popd >/dev/null
+    return 1
+  fi
+
+  local base="" line
+  local -a exec_paths=()
   if git remote get-url infra >/dev/null 2>&1; then
     echo "🔄 Fetching infra/main…"
     case "$(fetchInfraMain)" in
       fetched)
         base="$(git rev-parse FETCH_HEAD)"
+        # The project tree's own 100755 paths, before the reset replaces
+        # the index with infra/main's modes; gitStageTree sets them again.
+        while IFS= read -r -d '' line; do
+          [[ "${line%% *}" == 100755 ]] && exec_paths+=("${line#*$'\t'}")
+        done < <(git ls-files -s -z)
         echo "📸 Re-parenting the deployed tree on infra/main (snapshot commit)…"
         if ! git reset --quiet --mixed "$base"; then
           echo_error "⚠️  [git-infra] WARNING: git reset --mixed onto infra/main failed. [sandbox-infrastructure-template#160]"
@@ -729,10 +798,10 @@ gitSnapshotCommit() {
         ;;
     esac
   fi
-  if [[ -z "$base" ]]; then
-    base="$(git rev-parse -q --verify HEAD || true)"
+  if ! gitStageTree "$base" 1 "${exec_paths[@]+"${exec_paths[@]}"}"; then
+    popd >/dev/null
+    return 1
   fi
-  gitStageTree "$base" 1
 
   if git diff --cached --quiet; then
     echo "No changes to commit."

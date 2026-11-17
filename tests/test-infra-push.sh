@@ -535,6 +535,11 @@ if git -C "$BARE" ls-tree -r --name-only main | grep -qx "tf/custom-stack-provis
 else
   fail "I: custom stack missing from the pushed tree: $(git -C "$BARE" ls-tree -r --name-only main | tr "\n" " ") Output: $outI"
 fi
+if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "I: cloneInfraRepo marks the checkout as a snapshot tree"
+else
+  fail "I: cloneInfraRepo did not set luther.infraSnapshotTree"
+fi
 
 # =============================================================================
 echo ""
@@ -1227,8 +1232,9 @@ else
   fail "S: merge-base error: $outS4"
 fi
 
-# 5. A failed deepen is a warning, not an error: merge-base runs as before
-# (here it finds no common ancestor below the cut, so rc 2).
+# 5. A failed deepen stops the apply (rc 1): merge-base would miss the
+# common ancestor below the cut and report rc 2, and the apply would deploy
+# a stale tree whose snapshot reverts a teammate's commit.
 BARE="$(fresh_bare)"
 src="$WORKDIR/projS5-src"
 git init -q -b main "$src"
@@ -1258,10 +1264,206 @@ exec "$(command -v git)" "\$@"
 SHIM
 /bin/chmod +x "$shim5/git"
 outS5="$(merge_infra "$PROJ" "$shim5")"
-if [[ "$(tail -1 <<<"$outS5")" == "rc=2" ]] && grep -qi "deepen" <<<"$outS5"; then
-  pass "S: a failed deepen warns and falls through to merge-base"
+if [[ "$(tail -1 <<<"$outS5")" == "rc=1" ]] && grep -qi "deepen" <<<"$outS5"; then
+  pass "S: a failed deepen returns rc 1"
 else
   fail "S: failed deepen: $outS5"
+fi
+
+# 6. A tree that cloneInfraRepo laid the deploy archive over is marked; it
+# never merges infra/main content and never fetches for the merge.
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+PROJ="$WORKDIR/projS6"
+git clone -q -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" remote rename origin infra
+git -C "$PROJ" update-ref -d refs/remotes/infra/main
+git -C "$PROJ" config luther.infraSnapshotTree true
+cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
+echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
+mate="$WORKDIR/projS6-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "mate" > "$mate/mate.txt"
+git -C "$mate" add -A
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
+git -C "$mate" push -q origin main
+headS6="$(git -C "$PROJ" rev-parse HEAD)"
+outS6="$(merge_infra "$PROJ")"
+if [[ "$(tail -1 <<<"$outS6")" == "rc=2" ]] && [[ ! -f "$PROJ/mate.txt" ]] &&
+  [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headS6" ]] &&
+  ! git -C "$PROJ" rev-parse -q --verify refs/remotes/infra/main >/dev/null; then
+  pass "S: a marked snapshot tree skips the merge (rc 2) before any fetch"
+else
+  fail "S: marked snapshot tree: $outS6"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case T: a merge in progress is never merged over, aborted or committed ==="
+# =============================================================================
+# in_proj <proj> <code> — run code with shell_utils.sh loaded; prints output,
+# then "rc=<n>" on the last line.
+in_proj() {
+  local proj="$1" code="$2"
+  (
+    cd "$proj" && MARS_PROJECT_ROOT="$proj" HOME="$WORKDIR" bash -c "
+      . ./shell_utils.sh
+      rc=0; $code || rc=\$?; echo \"rc=\$rc\"
+    " 2>&1
+  )
+}
+# conflicted_proj <name> — a project with an infra remote and a conflicted
+# `git merge infra/main` in progress; prints its path.
+conflicted_proj() {
+  local proj bare mate
+  proj="$(make_project "$1")"
+  bare="$(fresh_bare)"
+  set_repo_clone_url "$proj" "file://$bare"
+  init_project_git "$proj"
+  echo "base" > "$proj/conflict.txt"
+  git -C "$proj" add -A
+  git -C "$proj" commit -q -m "shared base"
+  git -C "$proj" push -q "file://$bare" main
+  git -C "$proj" remote add infra "file://$bare"
+  mate="$WORKDIR/$1-mate"
+  git clone -q -b main "file://$bare" "$mate"
+  echo "theirs" > "$mate/conflict.txt"
+  git -C "$mate" -c user.email=t@l -c user.name=T commit -q -am "their edit"
+  git -C "$mate" push -q origin main
+  echo "ours" > "$proj/conflict.txt"
+  git -C "$proj" commit -q -am "our edit"
+  git -C "$proj" fetch -q infra main
+  git -C "$proj" merge -q infra/main >/dev/null 2>&1 || true
+  echo "$proj"
+}
+
+PROJ="$(conflicted_proj projT1)"
+outT1="$(in_proj "$PROJ" 'gitMergeInfraMain --abort-on-conflict')"
+if [[ "$(tail -1 <<<"$outT1")" == "rc=1" ]] && grep -q "finish or abort the merge in progress first" <<<"$outT1" &&
+  [[ -e "$PROJ/.git/MERGE_HEAD" ]]; then
+  pass "T: gitMergeInfraMain refuses a merge in progress and does not abort it"
+else
+  fail "T: merge in progress: $outT1"
+fi
+
+PROJ="$(conflicted_proj projT2)"
+headT2="$(git -C "$PROJ" rev-parse HEAD)"
+outT2="$(in_proj "$PROJ" 'gitCommit "commit.sh run"')"
+if [[ "$(tail -1 <<<"$outT2")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT2" ]]; then
+  pass "T: gitCommit refuses to commit a merge in progress"
+else
+  fail "T: gitCommit with a merge in progress: $outT2"
+fi
+
+PROJ="$(conflicted_proj projT3)"
+headT3="$(git -C "$PROJ" rev-parse HEAD)"
+outT3="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+if [[ "$(tail -1 <<<"$outT3")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT3" ]] &&
+  [[ -e "$PROJ/.git/MERGE_HEAD" ]]; then
+  pass "T: gitSnapshotCommit refuses a merge in progress before its reset"
+else
+  fail "T: gitSnapshotCommit with a merge in progress: $outT3"
+fi
+
+# The snapshot carries the project's own 100755 over infra/main's 100644
+# (repairing -infra repos that hold scripts as 100644), without trusting a
+# 0777 disk for data files.
+BARE="$(fresh_bare)"
+seedT4="$WORKDIR/projT4-seed"
+git init -q -b main "$seedT4"
+mkdir -p "$seedT4/tf"
+printf '#!/bin/sh\n' > "$seedT4/tf/apply.sh"
+echo 'x = 1' > "$seedT4/data.tf"
+git -C "$seedT4" add -A
+git -C "$seedT4" -c user.email=t@l -c user.name=T commit -q -m "infra: scripts as 100644"
+git -C "$seedT4" push -q "file://$BARE" main
+PROJ="$(make_project projT4)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+printf '#!/bin/sh\n' > "$PROJ/tf/apply.sh"
+echo 'x = 1' > "$PROJ/data.tf"
+git -C "$PROJ" add -A
+git -C "$PROJ" update-index --chmod=+x tf/apply.sh
+git -C "$PROJ" commit -q -m "project: apply.sh 100755"
+git -C "$PROJ" remote add infra "file://$BARE"
+/bin/chmod 0777 "$PROJ/tf/apply.sh" "$PROJ/data.tf"
+outT4="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot"')"
+modeT4() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
+if [[ "$(modeT4 tf/apply.sh)" == "100755" && "$(modeT4 data.tf)" == "100644" ]] &&
+  [[ "$(git -C "$PROJ" rev-parse HEAD^)" == "$(git -C "$BARE" rev-parse main)" ]]; then
+  pass "T: the snapshot carries the project's 100755 over infra/main's 100644; a 0777 .tf stays 100644"
+else
+  fail "T: snapshot modes: tf/apply.sh=$(modeT4 tf/apply.sh) data.tf=$(modeT4 data.tf). Output: $outT4"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case U: pull.sh ==="
+# =============================================================================
+# An -infra clone has no origin remote: pull.sh skips the template merge and
+# still merges infra/main.
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+PROJ="$WORKDIR/projU1"
+git clone -q -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" remote rename origin infra
+git -C "$PROJ" config user.email t@l
+git -C "$PROJ" config user.name T
+cp "$REPO_ROOT/shell_utils.sh" "$REPO_ROOT/pull.sh" "$PROJ/"
+printf 'shell_utils.sh\npull.sh\n' >> "$PROJ/.git/info/exclude"
+mkdir -p "$PROJ/tf/auto-vars"
+jq -n --arg url "file://$BARE" '{"repo_clone_ssh_url":$url}' > "$PROJ/tf/auto-vars/common.auto.tfvars.json"
+echo "tf/auto-vars/" >> "$PROJ/.git/info/exclude"
+mate="$WORKDIR/projU1-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "mate" > "$mate/mate.txt"
+git -C "$mate" add -A
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
+git -C "$mate" push -q origin main
+git -C "$PROJ" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "local"
+set +e
+outU1="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
+rcU1=$?
+set -e
+if [[ "$rcU1" -eq 0 ]] && [[ -f "$PROJ/mate.txt" ]] && grep -qi "no origin remote" <<<"$outU1"; then
+  pass "U: pull.sh in an -infra clone skips origin and merges infra/main"
+else
+  fail "U: -infra clone pull: rc=$rcU1. Output: $outU1"
+fi
+
+# gitMergeOriginMain merges the branch main, not a tag named main.
+TPL="$(fresh_bare)"
+tplsrc="$WORKDIR/projU2-tpl"
+git init -q -b main "$tplsrc"
+echo "base" > "$tplsrc/base.txt"
+git -C "$tplsrc" add -A
+git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m base
+git -C "$tplsrc" push -q "file://$TPL" main
+PROJ="$WORKDIR/projU2"
+git clone -q -b main "file://$TPL" "$PROJ"
+git -C "$PROJ" config user.email t@l
+git -C "$PROJ" config user.name T
+cp "$REPO_ROOT/shell_utils.sh" "$REPO_ROOT/pull.sh" "$PROJ/"
+printf 'shell_utils.sh\npull.sh\n' >> "$PROJ/.git/info/exclude"
+echo "origin" > "$tplsrc/origin.txt"
+git -C "$tplsrc" add -A
+git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m "template update"
+git -C "$tplsrc" push -q "file://$TPL" main
+git -C "$tplsrc" checkout -q -b side HEAD~1
+echo "tagged" > "$tplsrc/tagged.txt"
+git -C "$tplsrc" add -A
+git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m "tagged, not on main"
+git -C "$tplsrc" tag main
+git -C "$tplsrc" push -q "file://$TPL" refs/tags/main
+git -C "$PROJ" -c user.email=t@l -c user.name=T commit -q --allow-empty -m "local"
+set +e
+outU2="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash ./pull.sh 2>&1)"
+rcU2=$?
+set -e
+if [[ "$rcU2" -eq 0 ]] && [[ -f "$PROJ/origin.txt" ]] && [[ ! -f "$PROJ/tagged.txt" ]]; then
+  pass "U: pull.sh merges origin's branch main, not a tag named main"
+else
+  fail "U: origin tag main: rc=$rcU2 origin.txt=$([[ -f "$PROJ/origin.txt" ]] && echo y || echo n) tagged.txt=$([[ -f "$PROJ/tagged.txt" ]] && echo y || echo n). Output: $outU2"
 fi
 
 # --- Summary -----------------------------------------------------------------
