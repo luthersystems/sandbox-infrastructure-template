@@ -91,33 +91,54 @@ mkdir -p "$ANSIBLE_CHARTS_DIR"
 # only ask a root-started container to switch user, which is no longer
 # needed, and the entrypoint refuses them when the container did not start
 # as root. Root (0:0, with no USER_ID, so mars stays root) is kept for:
-#   - an image older than v0.147.0, which cannot run as another uid;
-#   - rootless Docker, where container root already is the caller;
 #   - MARS_SHELL=true, whose bash entrypoint skips mars-entrypoint, so the
 #     uid would get no passwd entry;
 #   - an ansible command (run-ansible.sh, deploy.yml): mars's umbrella role
 #     chowns its chart directory to root ("Create umbrella chart
 #     directory"), which a non-root uid cannot do. ui-infrastructure hit
-#     this on every deploy (luthersystems/ui-infrastructure#611).
-# So in practice Terraform runs as the caller and ansible as root.
+#     this on every deploy (luthersystems/ui-infrastructure#611). Drop this
+#     case once luthersystems/mars#367 is fixed;
+#   - a pin that is not a release vX.Y.Z at or after v0.147.0: an older
+#     image cannot run as another uid, and latest (or any other tag) may be
+#     a cached image older than v0.147.0;
+#   - rootless Docker, user namespace remapping (userns-remap) and podman's
+#     docker shim, where container root already maps to the caller (or a
+#     subordinate uid) and --user with the caller's uid would not.
+# So in practice Terraform runs as the caller and ansible as root. The
+# cheap checks come first, so a run that is root anyway makes no daemon
+# call.
+mars_version_runs_as_any_uid() {
+  [[ "$MARS_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+    [[ "$(printf '%s\n' "$MARS_VERSION" v0.147.0 | sort -V | head -n1)" == v0.147.0 ]]
+}
+# The daemon's output goes into a variable before it is matched: piping it
+# into grep -q makes docker die of SIGPIPE when grep exits early, and under
+# pipefail that failure would hide the match.
+docker_remaps_root() {
+  local version_out security_opts
+  version_out="$(docker --version 2>/dev/null || true)"
+  if [[ "$version_out" == *[Pp]odman* ]]; then
+    return 0
+  fi
+  security_opts="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null || true)"
+  [[ "$security_opts" == *rootless* || "$security_opts" == *name=userns* ]]
+}
 RUN_USER="$(id -u):$(id -g)"
-if [[ "$MARS_VERSION" != latest ]] &&
-  [[ "$(printf '%s\n' "$MARS_VERSION" v0.147.0 | sort -V | head -n1)" != v0.147.0 ]]; then
-  RUN_USER=0:0
-elif docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
-  RUN_USER=0:0
-elif [[ "$MARS_SHELL" == "true" ]]; then
+if [[ "$MARS_SHELL" == "true" ]]; then
   RUN_USER=0:0
 elif [[ "${2:-}" == ansible* ]]; then
+  RUN_USER=0:0
+elif ! mars_version_runs_as_any_uid; then
+  RUN_USER=0:0
+elif docker_remaps_root; then
   RUN_USER=0:0
 fi
 
 # Before #187 this wrapper ran every command as root, so a checkout or cache
-# it wrote to can hold root-owned files (tf/*/.terraform, provider and tfenv
-# caches) that a run as the caller cannot overwrite. Give them back to the
-# caller from a root container (the caller can run docker, so no sudo is
-# needed). Only uid 0's files: another user's files stay theirs. A failure
-# warns and mars still runs.
+# it wrote to can hold root-owned files that a run as the caller cannot
+# overwrite. Give them back to the caller from a root container (the caller
+# can run docker, so no sudo is needed). Only uid 0's files: another user's
+# files stay theirs. A failure warns and mars still runs.
 reclaim() {
   local dir
   for dir in "$@"; do
@@ -132,10 +153,15 @@ reclaim() {
   done
 }
 if [[ "$RUN_USER" != "0:0" ]]; then
-  # The checkout only when it is a git checkout: outside one, PROJECT_PATH
-  # is just the current directory.
-  reclaim ${GIT_ROOT:+"$PROJECT_PATH"} "$TFENV_CACHE_PATH" "$TF_PLUGIN_CACHE_DIR" \
-    "$ANSIBLE_HYPERLEDGER_DIR" "$ANSIBLE_CHARTS_DIR"
+  # Only what a run as the caller writes: the checkout, which an earlier
+  # root run wrote to (tf/*/.terraform, plans, auto-vars copies), and the
+  # Terraform caches. Not the ansible caches (ANSIBLE_HYPERLEDGER_DIR,
+  # ANSIBLE_CHARTS_DIR): ansible still runs as root and refills them, so
+  # reclaiming them would start a chown container on every Terraform run
+  # after an ansible run, for files Terraform never touches. The checkout
+  # only when it is a git checkout: outside one, PROJECT_PATH is just the
+  # current directory.
+  reclaim ${GIT_ROOT:+"$PROJECT_PATH"} "$TFENV_CACHE_PATH" "$TF_PLUGIN_CACHE_DIR"
 fi
 
 docker run --rm $DOCKER_TERM_VARS \

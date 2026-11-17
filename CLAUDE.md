@@ -110,7 +110,7 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
 | `.mars-version` | Pinned Mars CLI version |
-| `mars` | Mars CLI executable wrapper. Runs the container as the caller's uid (mars v0.147.0+), except ansible commands, `MARS_SHELL=true` and older images, which run as root (#187) |
+| `mars` | Mars CLI executable wrapper. Runs the container as the caller's uid (mars v0.147.0+), except ansible commands (mars#367), `MARS_SHELL=true`, a pin that is not a release at or after v0.147.0 (including `latest`), and rootless Docker, userns-remap or podman, which run as root (#187) |
 
 ## Conventions
 
