@@ -85,7 +85,17 @@ variable "vulnerability_alerts" {
 variable "collaborator_permission" {
   description = "Permission level for the GitHub collaborator (pull, triage, push, maintain, admin)"
   type        = string
-  default     = "admin"
+  # Read only (#160). The -infra repo is an output copy of the deployed state:
+  # deploys push snapshots with the repo's deploy key, not as this user. With
+  # push or admin, a customer could change settings, deploy keys or protection,
+  # or push changes that the next deploy merges in. A change applies to an
+  # existing repo at its next cloud-provision run.
+  default = "pull"
+
+  validation {
+    condition     = contains(["pull", "triage", "push", "maintain", "admin"], var.collaborator_permission)
+    error_message = "collaborator_permission must be one of pull, triage, push, maintain, admin."
+  }
 }
 
 # ============================================================================
