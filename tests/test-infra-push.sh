@@ -936,6 +936,8 @@ echo "mars \$*" >> "$CMD_LOG"
 if [[ -f "$PROJ/teammate.txt" ]]; then echo "teammate-present" >> "$CMD_LOG"; fi
 OUTER
 /bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+# A developer's checkout is committed; uncommitted changes skip the merge.
+git -C "$PROJ" commit -q -am "local mock"
 
 set +e
 outP="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
@@ -984,6 +986,14 @@ if [[ "$rcQ" -ne 0 ]] && ! grep -q "apply --approve" "$CMD_LOG"; then
 else
   fail "Q: rc=$rcQ; a conflicted checkout must not apply. Output: $outQ"
 fi
+# The failed merge is aborted: a MERGE_HEAD or conflict markers left on disk
+# would be pushed by a later snapshot.
+if [[ ! -e "$PROJ/.git/MERGE_HEAD" ]] && [[ "$(cat "$PROJ/conflict.txt")" == "ours" ]] &&
+  [[ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no)" ]]; then
+  pass "Q: the conflicted merge is aborted (no MERGE_HEAD, no markers)"
+else
+  fail "Q: the conflicted merge was left in place: $(git -C "$PROJ" status --short) / $(cat "$PROJ/conflict.txt")"
+fi
 
 # =============================================================================
 echo ""
@@ -1012,6 +1022,197 @@ if [[ "$(git -C "$PROJ" ls-tree HEAD r-new-hook.sh | cut -d' ' -f1)" == "100755"
   pass "R: gitCommit records a new 0755 script as 100755"
 else
   fail "R: gitCommit lost the new script's exec bit: $(git -C "$PROJ" ls-tree HEAD r-new-hook.sh)"
+fi
+
+# Mode rule: +x for any staged script (executable on disk and starts with
+# "#!"), new or existing; never for a data file, and never removed.
+PROJ="$(make_project projR2)"
+init_project_git "$PROJ"
+printf '#!/bin/sh\n' > "$PROJ/was-644.sh"
+printf '#!/bin/sh\n' > "$PROJ/was-755.sh"
+echo 'resource "x" "y" {}' > "$PROJ/data.tf"
+echo '{}' > "$PROJ/data.json"
+git -C "$PROJ" add was-644.sh was-755.sh data.tf data.json
+git -C "$PROJ" update-index --chmod=+x was-755.sh
+git -C "$PROJ" commit -q -m base
+/bin/chmod 0755 "$PROJ/was-644.sh"
+/bin/chmod 0644 "$PROJ/was-755.sh"
+/bin/chmod 0777 "$PROJ/data.tf" "$PROJ/data.json"
+echo "change" >> "$PROJ/data.json"
+outR2="$(
+  cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash -c '
+    . ./shell_utils.sh
+    gitCommit "commit.sh run"
+  ' 2>&1
+)"
+modeR2() { git -C "$PROJ" ls-tree HEAD "$1" | cut -d' ' -f1; }
+if [[ "$(modeR2 was-644.sh)" == "100755" ]]; then
+  pass "R: an existing 100644 script made 0755 is recorded as 100755"
+else
+  fail "R: was-644.sh is $(modeR2 was-644.sh). Output: $outR2"
+fi
+if [[ "$(modeR2 data.tf)" == "100644" && "$(modeR2 data.json)" == "100644" ]]; then
+  pass "R: 0777 data files (.tf, .json) stay 100644"
+else
+  fail "R: data files got the exec bit: data.tf=$(modeR2 data.tf) data.json=$(modeR2 data.json)"
+fi
+if [[ "$(modeR2 was-755.sh)" == "100755" ]]; then
+  pass "R: an existing 100755 script that is 0644 on disk stays 100755"
+else
+  fail "R: was-755.sh lost its exec bit: $(modeR2 was-755.sh)"
+fi
+
+# A tree that tracks the template history (origin is the template, HEAD
+# shares history with origin/main) keeps the template-only paths: dropping
+# them commits a deletion that pull.sh later hits as a modify/delete conflict.
+TPL="$(fresh_bare)"
+tplsrc="$WORKDIR/projR3-tpl"
+mkdir -p "$tplsrc/.github"
+git -C "$tplsrc" init -q -b main
+echo "version: 2" > "$tplsrc/.github/dependabot.yml"
+cp "$REPO_ROOT/shell_utils.sh" "$tplsrc/shell_utils.sh"
+git -C "$tplsrc" add -A
+git -C "$tplsrc" -c user.email=t@l -c user.name=T commit -q -m template
+git -C "$tplsrc" push -q "file://$TPL" main
+PROJ="$WORKDIR/projR3"
+git clone -q -b main "file://$TPL" "$PROJ"
+git -C "$PROJ" config user.email t@l
+git -C "$PROJ" config user.name T
+# A developer's tree has both remotes; the old rule dropped the paths whenever
+# an infra remote existed.
+git -C "$PROJ" remote add infra "file://$(fresh_bare)"
+echo "change" > "$PROJ/r3.txt"
+outR3="$(
+  cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" bash -c '
+    . ./shell_utils.sh
+    gitCommit "commit.sh run"
+  ' 2>&1
+)"
+if git -C "$PROJ" cat-file -e HEAD:.github/dependabot.yml 2>/dev/null &&
+  git -C "$PROJ" cat-file -e HEAD:r3.txt 2>/dev/null; then
+  pass "R: gitCommit keeps the template-only paths in a tree that tracks the template"
+else
+  fail "R: gitCommit deleted .github/dependabot.yml from a template-tracking tree. Output: $outR3"
+fi
+
+# =============================================================================
+echo ""
+echo "=== Case S: gitMergeInfraMain skips what it cannot or must not merge ==="
+# =============================================================================
+# merge_infra <proj> [PATH prefix] — run gitMergeInfraMain; prints output,
+# then "rc=<n>" on the last line.
+merge_infra() {
+  local proj="$1" pre="${2:-}"
+  (
+    cd "$proj" && MARS_PROJECT_ROOT="$proj" HOME="$WORKDIR" PATH="${pre:+$pre:}$PATH" bash -c '
+      . ./shell_utils.sh
+      rc=0; gitMergeInfraMain || rc=$?; echo "rc=$rc"
+    ' 2>&1
+  )
+}
+# seed_infra <bare> — push a one-commit main with infra.txt; prints its sha.
+seed_infra() {
+  local src="$WORKDIR/seed-$RANDOM$RANDOM"
+  git init -q -b main "$src"
+  echo "infra" > "$src/infra.txt"
+  git -C "$src" add -A
+  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "infra base"
+  git -C "$src" push -q "file://$1" main
+  git -C "$src" rev-parse HEAD
+}
+
+# 1. An unborn HEAD (cloned while infra was empty): nothing to merge.
+PROJ="$(make_project projS1)"
+BARE="$(fresh_bare)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+seed_infra "$BARE" >/dev/null
+outS1="$(merge_infra "$PROJ")"
+if [[ "$(tail -1 <<<"$outS1")" == "rc=2" ]] && ! git -C "$PROJ" rev-parse -q --verify HEAD >/dev/null &&
+  [[ ! -e "$PROJ/.git/MERGE_HEAD" ]]; then
+  pass "S: an unborn HEAD skips the merge with rc 2"
+else
+  fail "S: unborn HEAD: $outS1"
+fi
+
+# 2. A dirty worktree over an old infra/main commit (the cloneInfraRepo /
+# ui-core flow): skip, the snapshot after the apply replaces infra/main.
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+PROJ="$WORKDIR/projS2"
+git clone -q -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
+mate="$WORKDIR/projS2-mate"
+git clone -q -b main "file://$BARE" "$mate"
+echo "mate" > "$mate/mate.txt"
+git -C "$mate" add -A
+git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "mate edit"
+git -C "$mate" push -q origin main
+echo "archive" > "$PROJ/infra.txt"
+headS2="$(git -C "$PROJ" rev-parse HEAD)"
+outS2="$(merge_infra "$PROJ")"
+if [[ "$(tail -1 <<<"$outS2")" == "rc=2" ]] && grep -qi "snapshot" <<<"$outS2" &&
+  [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headS2" ]] && [[ "$(cat "$PROJ/infra.txt")" == "archive" ]]; then
+  pass "S: a dirty worktree skips the merge with rc 2 and says the snapshot replaces infra/main"
+else
+  fail "S: dirty worktree: $outS2"
+fi
+
+# 3. A shallow clone whose merge base is below the shallow cut: deepen, then
+# merge (rc 0), not "unrelated".
+BARE="$(fresh_bare)"
+src="$WORKDIR/projS3-src"
+git init -q -b main "$src"
+for c in c1 c2 c3; do
+  echo "$c" > "$src/$c.txt"; git -C "$src" add -A
+  git -C "$src" -c user.email=t@l -c user.name=T commit -q -m "$c"
+done
+git -C "$src" push -q "file://$BARE" main
+git -C "$src" push -q "file://$BARE" main:refs/heads/keep-c3
+PROJ="$WORKDIR/projS3"
+git clone -q --depth 1 -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" config user.email t@l
+git -C "$PROJ" config user.name T
+git -C "$PROJ" remote add infra "file://$BARE"
+cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
+echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
+# infra/main moves to a branch off c2, so the merge base (c2) is below the cut.
+git -C "$src" checkout -q -b side HEAD~1
+echo "c5" > "$src/c5.txt"; git -C "$src" add -A
+git -C "$src" -c user.email=t@l -c user.name=T commit -q -m c5
+git -C "$src" push -q -f "file://$BARE" side:main
+outS3="$(merge_infra "$PROJ")"
+if [[ "$(tail -1 <<<"$outS3")" == "rc=0" ]] && [[ -f "$PROJ/c5.txt" ]] &&
+  [[ "$(git -C "$PROJ" rev-parse --is-shallow-repository)" == "false" ]]; then
+  pass "S: a shallow clone is deepened, then merged"
+else
+  fail "S: shallow clone: $outS3"
+fi
+
+# 4. merge-base failing for any reason other than "no common ancestor"
+# (exit 1) is an error (rc 1), not "unrelated".
+BARE="$(fresh_bare)"
+seed_infra "$BARE" >/dev/null
+PROJ="$WORKDIR/projS4"
+git clone -q -b main "file://$BARE" "$PROJ"
+git -C "$PROJ" remote add infra "file://$BARE"
+cp "$REPO_ROOT/shell_utils.sh" "$PROJ/shell_utils.sh"
+echo "shell_utils.sh" >> "$PROJ/.git/info/exclude"
+shim="$WORKDIR/git-shim"
+mkdir -p "$shim"
+cat > "$shim/git" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == merge-base ]]; then exit 128; fi
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim/git"
+outS4="$(merge_infra "$PROJ" "$shim")"
+if [[ "$(tail -1 <<<"$outS4")" == "rc=1" ]]; then
+  pass "S: a merge-base error (not exit 1) returns rc 1"
+else
+  fail "S: merge-base error: $outS4"
 fi
 
 # --- Summary -----------------------------------------------------------------

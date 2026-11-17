@@ -24,7 +24,8 @@ fi
 tfInit
 tfApply
 # After the apply: the snapshot is the deployed tree, and a git problem must
-# not fail a deploy that already applied.
+# not fail a deploy that already applied. It fetches infra/main again: a
+# teammate may have pushed during the apply, and the push must fast-forward.
 gitSnapshotCommit "auto-commit: infrastructure changes [ci skip]" ||
   echo "⚠️  [git-infra] WARNING: gitSnapshotCommit returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
 gitPushInfra
