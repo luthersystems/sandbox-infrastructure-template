@@ -1679,6 +1679,70 @@ else
   fail "T: pre-destroy 75: rc=$rcT13. Output: $outT13"
 fi
 
+# A failed snapshot followed by an up-to-date push keeps the mark: only a
+# push of this run's snapshot that created infra/main clears it.
+BARE="$(fresh_bare)"
+PROJ="$(make_project projT14)"
+set_repo_clone_url "$PROJ" "file://$BARE"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+git -C "$PROJ" push -q "file://$BARE" main
+git -C "$PROJ" remote add infra "file://$BARE"
+git -C "$PROJ" config luther.infraSnapshotTree true
+echo "change" > "$PROJ/t14.txt"
+printf '#!/bin/sh\nexit 1\n' > "$PROJ/.git/hooks/pre-commit"
+/bin/chmod +x "$PROJ/.git/hooks/pre-commit"
+outT14="$(in_proj "$PROJ" 'gitSnapshotCommit "snapshot" || true; gitPushInfra')"
+if [[ "$(git -C "$PROJ" config --bool luther.infraSnapshotTree)" == "true" ]]; then
+  pass "T: a failed snapshot and an up-to-date push keep the mark"
+else
+  fail "T: the mark was cleared after a failed snapshot: $outT14"
+fi
+
+# untrackIgnoredFiles fails closed when its ls-files capture fails.
+PROJ="$(make_project projT15)"
+init_project_git "$PROJ"
+git -C "$PROJ" add -A
+git -C "$PROJ" commit -q -m base
+echo "change" > "$PROJ/t15.txt"
+headT15="$(git -C "$PROJ" rev-parse HEAD)"
+shim15="$WORKDIR/git-shim-lsignored"
+mkdir -p "$shim15"
+cat > "$shim15/git" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == ls-files && " \$* " == *" --ignored "* ]]; then exit 1; fi
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim15/git"
+outT15="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim15:$PATH" bash -c '
+  . ./shell_utils.sh
+  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
+if [[ "$(tail -1 <<<"$outT15")" == "rc=1" ]] && [[ "$(git -C "$PROJ" rev-parse HEAD)" == "$headT15" ]]; then
+  pass "T: a failed ls-files in untrackIgnoredFiles stops gitCommit"
+else
+  fail "T: failed ls-files --ignored: $outT15"
+fi
+
+# A failing `git ls-files -u` is reported as an unreadable index.
+shim16="$WORKDIR/git-shim-lsu"
+mkdir -p "$shim16"
+cat > "$shim16/git" <<SHIM
+#!/usr/bin/env bash
+if [[ "\${1:-}" == ls-files && " \$* " == *" -u "* ]]; then exit 1; fi
+exec "$(command -v git)" "\$@"
+SHIM
+/bin/chmod +x "$shim16/git"
+outT16="$(cd "$PROJ" && MARS_PROJECT_ROOT="$PROJ" HOME="$WORKDIR" PATH="$shim16:$PATH" bash -c '
+  . ./shell_utils.sh
+  rc=0; gitCommit "commit.sh run" || rc=$?; echo "rc=$rc"' 2>&1)"
+if [[ "$(tail -1 <<<"$outT16")" == "rc=1" ]] && grep -q "could not read the git index" <<<"$outT16" &&
+  ! grep -q "resolve them" <<<"$outT16"; then
+  pass "T: a failed ls-files -u says the index could not be read"
+else
+  fail "T: failed ls-files -u: $outT16"
+fi
+
 # =============================================================================
 echo ""
 echo "=== Case V: cloneInfraRepo marks the checkout as a snapshot tree ==="

@@ -310,8 +310,10 @@ configure_git() {
 }
 
 # untrackIgnoredFiles stages the removal from git of every tracked file that
-# the repo's .gitignore files ignore. The files stay on disk. gitCommit calls it
-# just before `git add -A`, so the removal goes into that same commit.
+# the repo's .gitignore files ignore. The files stay on disk. gitStageTree
+# calls it just before `git add -A`, so the removal goes into that same
+# commit. It fails closed: when it cannot list the files or untrack them, it
+# returns 1 and gitStageTree stops, so nothing is staged or committed.
 #
 # Why it exists (sandbox-infrastructure-template#160): .gitignore only stops
 # git from ADDING an untracked file. A file that is already tracked stays
@@ -340,7 +342,10 @@ configure_git() {
 # function does not rewrite history.
 untrackIgnoredFiles() {
   local files
-  files="$(git ls-files --cached --ignored --exclude-per-directory=.gitignore)"
+  if ! files="$(git ls-files --cached --ignored --exclude-per-directory=.gitignore)"; then
+    echo "⚠️  [git-infra] WARNING: git ls-files could not list the ignored files; not staging. [sandbox-infrastructure-template#160]" >&2
+    return 1
+  fi
   if [[ -z "$files" ]]; then
     return 0
   fi
@@ -372,13 +377,13 @@ SNAPSHOT_TEMPLATE_ONLY_PATHS=(
   .github/dependabot.yml
 )
 
-# unresolvedMerge succeeds when the index has unmerged (conflicted) entries.
-# A resolved merge (MERGE_HEAD, no unmerged entries) is not one: gitCommit
-# concludes it. A failing ls-files counts as unresolved (fail closed). Run it
-# in the project root.
+# unresolvedMerge returns 0 when the index has unmerged (conflicted)
+# entries, 1 when it has none, and 2 when `git ls-files -u` fails (callers
+# fail closed). A resolved merge (MERGE_HEAD, no unmerged entries) has none:
+# gitCommit concludes it. Run it in the project root.
 unresolvedMerge() {
   local out
-  out="$(git ls-files -u)" || return 0
+  out="$(git ls-files -u)" || return 2
   [[ -n "$out" ]]
 }
 
@@ -429,7 +434,11 @@ gitOperationInProgress() {
     [[ -e "${paths[$i]}" ]] && has["${names[$i]}"]=1
   done
 
-  if unresolvedMerge; then
+  local unresolved_rc=0
+  unresolvedMerge || unresolved_rc=$?
+  if [[ "$unresolved_rc" -eq 2 ]]; then
+    found+=("unknown: could not read the git index (git ls-files -u failed)")
+  elif [[ "$unresolved_rc" -eq 0 ]]; then
     found+=("unresolved merge conflicts: resolve them (git add) and commit, or run git merge --abort")
   elif [[ -n "${has[MERGE_HEAD]:-}" && "$scope" == all ]]; then
     found+=("a merge: commit it (commit.sh), or run git merge --abort")
@@ -638,12 +647,24 @@ gitPushInfra() {
     return 0
   fi
 
+  # Set by gitSnapshotCommit when this run's snapshot found no infra/main;
+  # consumed here whatever the push does.
+  local snapshot_pending=false
+  if [[ "$(git config --bool luther.snapshotPending || true)" == true ]]; then
+    snapshot_pending=true
+  fi
+  git config --unset luther.snapshotPending || true
+
   echo "🚀 [git-infra] Pushing HEAD to infra remote…"
   if git push infra HEAD; then
     echo "✅ [git-infra] Pushed to infra remote — per-project -infra repo populated."
-    # HEAD is now infra/main, so this checkout is related to it: drop
-    # cloneInfraRepo's mark (the first snapshot of a new repo leaves it).
-    git config --unset luther.infraSnapshotTree || true
+    # The push created infra/main from this run's snapshot, so the checkout
+    # is now related to it: drop cloneInfraRepo's mark. Not after any other
+    # push (an up-to-date push after a failed snapshot proves nothing).
+    if [[ "$snapshot_pending" == true ]] &&
+      [[ "$(git ls-remote infra refs/heads/main | cut -f1)" == "$(git rev-parse HEAD)" ]]; then
+      git config --unset luther.infraSnapshotTree || true
+    fi
   else
     echo "⚠️  [git-infra] WARNING: 'git push infra HEAD' FAILED — the per-project -infra repo may stay EMPTY. Deploy is NOT failed (apply already succeeded); investigate the GitHub token or deploy key and the remote URL. [sandbox-infrastructure-template#143]" >&2
   fi
@@ -888,6 +909,10 @@ gitSnapshotCommit() {
     return 1
   fi
 
+  # A pending mark from an earlier run must not let this run's push clear
+  # luther.infraSnapshotTree; only this run's snapshot sets it again.
+  git config --unset luther.snapshotPending || true
+
   local base=""
   local -a exec_paths=()
   if git remote get-url infra >/dev/null 2>&1; then
@@ -941,6 +966,10 @@ gitSnapshotCommit() {
   # creates main; with no infra remote, nothing is related, so it stays.
   if [[ -n "$base" ]]; then
     git config --unset luther.infraSnapshotTree || true
+  elif git remote get-url infra >/dev/null 2>&1; then
+    # One-shot: gitPushInfra consumes it and drops the mark only if its
+    # push of this snapshot created infra/main.
+    git config luther.snapshotPending true
   fi
 
   popd >/dev/null

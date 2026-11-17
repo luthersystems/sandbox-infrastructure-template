@@ -27,7 +27,8 @@
 set -euo pipefail
 
 # 75 is reserved for "destroyed, commit failed". Any other step that exits
-# 75 (sourcing utils.sh, tfInit, tfDestroy) exits 1 instead.
+# 75 (sourcing utils.sh, tfInit, tfDestroy) exits 1 instead. A sourced file
+# that sets its own EXIT trap later would replace this one.
 commit_failed=false
 trap 'rc=$?; if [[ "$rc" -eq 75 && "$commit_failed" != true ]]; then exit 1; fi' EXIT
 
