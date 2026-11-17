@@ -19,8 +19,8 @@ variable "short_project_id" {
 #     smaller network would delete fabric-org2 to fabric-org5, and anything
 #     in them, on every existing project's next k8s-provision run.
 # So this default is the one source for the namespaces: the ansible org list
-# (org_names, which the Fabric plays and ansible/vars/k8s_init_vars.yaml
-# read) must stay within fabric-org1 to fabric-org5.
+# (org_names, which the Fabric plays read) must stay within fabric-org1 to
+# fabric-org5.
 variable "luther_namespaces" {
   type = list(string)
   default = [

@@ -5,7 +5,6 @@
   become: no
   vars_files:
     - vars/common.yaml
-    - vars/k8s_init_vars.yaml
   roles:
     - role: eks_cluster_init
       eks_cluster_init_volume_reclaim_policy: Retain

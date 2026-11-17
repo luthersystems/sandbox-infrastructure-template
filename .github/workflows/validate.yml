@@ -140,17 +140,9 @@ jobs:
           git config --global user.email "ci@luthersystems.com"
           git config --global user.name "CI"
 
-      # test-fabric-host-rewrites.sh renders an ansible vars file with
-      # ansible itself. The version is the one the pinned mars image ships
-      # (requirements.txt at .mars-version), so the test renders as a
-      # deploy does.
-      - name: Install ansible-core
-        run: pipx install ansible-core==2.20.7
-
       - name: Run tests
         run: |
           bash tests/test-prepare-custom-stack.sh
-          bash tests/test-fabric-host-rewrites.sh
           bash tests/test-infra-push.sh
           bash tests/test-apply-scripts.sh
           bash tests/test-drift-check.sh
