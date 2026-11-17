@@ -91,7 +91,6 @@ chmod +x "$mock_bin/mars"
   export MARS_DEV_ROOT="$mock_mars_root"
   export MARS_DEBUG=false
   export MARS_SHELL=false
-  export MARS_AZ=false
   bash "$ROOT/mars" version
 )
 

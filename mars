@@ -56,14 +56,6 @@ PROJECT_PATH=$(fullpath "${PROJECT_PATH:-$(pwd)}")
 WORK_REL_PATH="${PWD#$PROJECT_PATH}" # Includes leading dir separator
 DOCKER_WORK_DIR="$DOCKER_PROJECT_PATH$WORK_REL_PATH"
 
-AZ_MOUNTS=''
-if [[ "$MARS_AZ" == "true" ]]; then
-  # TODO(luthersystems/sandbox-infrastructure-template#185): clean up these mount paths to re-use existing helm and ansible mounts
-  AZ_MOUNTS="-v ${PROJECT_PATH}/az-helm-charts:/opt/helm-charts:ro \
-  -v /home/ubuntu/.kube:/root/.kube:ro \
-  -v ${PROJECT_PATH}/az-fabric-scripts:/opt/fabric-scripts:ro"
-fi
-
 MARS_VERSION=latest
 if [ -f "$PROJECT_PATH/.mars-version" ]; then
   MARS_VERSION=$(cat "$PROJECT_PATH/.mars-version")
@@ -103,7 +95,6 @@ mkdir -p "$ANSIBLE_CHARTS_DIR"
 #   - rootless Docker, where container root already is the caller;
 #   - MARS_SHELL=true, whose bash entrypoint skips mars-entrypoint, so the
 #     uid would get no passwd entry;
-#   - MARS_AZ=true, which mounts the kube config at /root/.kube;
 #   - an ansible command (run-ansible.sh, deploy.yml): mars's umbrella role
 #     chowns its chart directory to root ("Create umbrella chart
 #     directory"), which a non-root uid cannot do. ui-infrastructure hit
@@ -115,7 +106,7 @@ if [[ "$MARS_VERSION" != latest ]] &&
   RUN_USER=0:0
 elif docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
   RUN_USER=0:0
-elif [[ "$MARS_SHELL" == "true" || "$MARS_AZ" == "true" ]]; then
+elif [[ "$MARS_SHELL" == "true" ]]; then
   RUN_USER=0:0
 elif [[ "${2:-}" == ansible* ]]; then
   RUN_USER=0:0
@@ -153,7 +144,6 @@ docker run --rm $DOCKER_TERM_VARS \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
   -e TF_PLUGIN_CACHE_DIR=/opt/tf-plugin-cache-dir \
   $ENV_VARS \
-  $AZ_MOUNTS \
   $DEV_MOUNTS \
   -v "$TFENV_CACHE_PATH:/opt/tfenv/versions" \
   -v "$TF_PLUGIN_CACHE_DIR:/opt/tf-plugin-cache-dir" \

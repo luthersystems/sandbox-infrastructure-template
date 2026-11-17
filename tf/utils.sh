@@ -17,7 +17,13 @@ fi
 
 workspace=$1
 
-tf_workspace=default # TODO(luthersystems/sandbox-infrastructure-template#185): make variable
+# The mars environment each stage runs in: mars selects the Terraform
+# workspace of that name (terraform workspace select) and reads
+# vars/<env>/. Every stage uses "default"; MARS_TF_WORKSPACE overrides it
+# (#185). The name is not TF_WORKSPACE on purpose: Terraform itself reads
+# TF_WORKSPACE, and with it set the `workspace select` that mars runs
+# fails, because the variable overrides the selection.
+tf_workspace="${MARS_TF_WORKSPACE:-default}"
 
 export TF_PLUGIN_CACHE_DIR="$HOME/.tf-plugin-cache"
 mkdir -p "$TF_PLUGIN_CACHE_DIR"

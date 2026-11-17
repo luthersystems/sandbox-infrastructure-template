@@ -357,6 +357,17 @@ else
 fi
 rm -f "$STAGE_DIR/default/imported.tf"
 
+# --- Test 10b: MARS_TF_WORKSPACE picks the mars environment (#185) ---
+echo ""
+echo "Testing MARS_TF_WORKSPACE overrides the default mars environment..."
+MARS_TF_WORKSPACE=staging run_tf_func tfInit
+ws_call="$(sed -n '1p' "$MOCK_LOG")"
+if [[ "$ws_call" == "staging init --reconfigure" ]]; then
+  pass "tfInit(MARS_TF_WORKSPACE=staging): runs 'staging init --reconfigure'"
+else
+  fail "tfInit(MARS_TF_WORKSPACE=staging): expected 'staging init --reconfigure', got: $ws_call"
+fi
+
 # --- Test 11: old mars + no removed{} keeps legacy destroy (warn, no gate) (#2048) ---
 echo ""
 echo "Testing tfDestroy keeps legacy behavior on old mars without removed{}..."
