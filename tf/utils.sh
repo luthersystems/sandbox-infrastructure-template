@@ -18,12 +18,19 @@ fi
 workspace=$1
 
 # The mars environment each stage runs in: mars selects the Terraform
-# workspace of that name (terraform workspace select) and reads
-# vars/<env>/. Every stage uses "default"; MARS_TF_WORKSPACE overrides it
-# (#185). The name is not TF_WORKSPACE on purpose: Terraform itself reads
-# TF_WORKSPACE, and with it set the `workspace select` that mars runs
-# fails, because the variable overrides the selection.
-tf_workspace="${MARS_TF_WORKSPACE:-default}"
+# workspace of that name and reads vars/<env>/. It is fixed at "default" on
+# purpose (#185): the scripts that call terraform directly
+# (apply-with-outputs.sh in drift mode, drift-refresh.sh, apply-plan.sh),
+# ui-core and its Argo jobs all use the default workspace. A second
+# environment per project would need a vars/<env>/ directory, the workspace
+# created, mars's --skip-prompt for its environment switch prompt, and
+# changes to those scripts, so it is not a setting.
+# readonly fails on a second assignment, and some scripts source utils.sh
+# twice, so assign only when it is not already the constant. A tf_workspace
+# from the environment is overwritten, not honored.
+if [[ "${tf_workspace:-}" != default ]]; then
+  readonly tf_workspace=default
+fi
 
 export TF_PLUGIN_CACHE_DIR="$HOME/.tf-plugin-cache"
 mkdir -p "$TF_PLUGIN_CACHE_DIR"
@@ -80,7 +87,7 @@ cd "$workspace"
 tfBootstrap
 
 tfInit() {
-  $MARS ${tf_workspace} init --reconfigure
+  $MARS "${tf_workspace}" init --reconfigure
 }
 
 tfPlan() {
@@ -99,7 +106,7 @@ tfPlan() {
   if [[ -n "${TF_CLI_ARGS_plan:-}" ]]; then
     args="${TF_CLI_ARGS_plan} ${args}"
   fi
-  TF_CLI_ARGS_plan="${args}" $MARS ${tf_workspace} plan
+  TF_CLI_ARGS_plan="${args}" $MARS "${tf_workspace}" plan
 }
 
 tfApply() {
@@ -113,9 +120,9 @@ tfApply() {
     if [[ -n "${TF_CLI_ARGS_apply:-}" ]]; then
       args="${TF_CLI_ARGS_apply} ${args}"
     fi
-    TF_CLI_ARGS_apply="${args}" $MARS ${tf_workspace} apply --approve
+    TF_CLI_ARGS_apply="${args}" $MARS "${tf_workspace}" apply --approve
   else
-    $MARS ${tf_workspace} apply --approve
+    $MARS "${tf_workspace}" apply --approve
   fi
 }
 
@@ -188,13 +195,13 @@ tfDestroy() {
     # guards set -e if an old wrapper errors on --help.
     local guard_supported=false
     local mars_apply_help
-    mars_apply_help=$($MARS ${tf_workspace} apply --help 2>&1 || true)
+    mars_apply_help=$($MARS "${tf_workspace}" apply --help 2>&1 || true)
     if grep -q -- '--forbid-resource-changes' <<<"$mars_apply_help"; then
       guard_supported=true
     fi
     if [[ "$guard_supported" == true ]]; then
       echo "tfDestroy: pre-destroy convergence gate (apply --forbid-resource-changes) [#2048]"
-      ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS ${tf_workspace} apply --forbid-resource-changes )
+      ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS "${tf_workspace}" apply --forbid-resource-changes )
     elif [[ "$removed_present" == true ]]; then
       echo "ERROR: tfDestroy: archive carries removed{} blocks (adopted imports) but this mars image lacks 'apply --forbid-resource-changes'." >&2
       echo "ERROR: destroying now would DELETE the adopted resources. Bump the mars image, or re-run with --ignore-drift to apply the forgets unguarded. [#2048]" >&2
@@ -203,5 +210,5 @@ tfDestroy() {
       echo "WARNING: tfDestroy: mars image lacks 'apply --forbid-resource-changes'; skipping pre-destroy convergence gate (legacy destroy) [#2048]"
     fi
   fi
-  $MARS ${tf_workspace} destroy --approve
+  $MARS "${tf_workspace}" destroy --approve
 }

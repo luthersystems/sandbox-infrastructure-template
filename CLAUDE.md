@@ -66,10 +66,6 @@ cd tf/cloud-provision && bash ../destroy.sh
 
 # Enable debug logging
 TF_LOG=DEBUG bash ../plan.sh
-
-# Run in another mars environment (Terraform workspace + vars/<env>/; default "default").
-# Not TF_WORKSPACE: Terraform reads that itself and it breaks mars's workspace select.
-MARS_TF_WORKSPACE=<env> bash ../plan.sh
 ```
 
 ### Ansible (via GitHub Actions or locally)
