@@ -218,6 +218,8 @@ jobs:
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh
           bash tests/test-gcp-management-identity.sh
+          bash tests/test-provider-selection.sh
+          bash tests/test-template-version.sh
 
   # The one check the main ruleset requires from this workflow. It needs
   # every job, so "terraform validate (cloud-provision GCP)" and each matrix
