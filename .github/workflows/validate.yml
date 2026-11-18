@@ -6,12 +6,43 @@ on:
       - main
   # The merge queue runs the required checks on the merged result.
   merge_group:
+  # No paths filter: the gate job below is a required check, so every PR
+  # must start a run. The changes job skips the other jobs on docs-only PRs.
   pull_request:
     branches:
       - main
 
 jobs:
+  # Decides whether the validate and test jobs must run
+  # (scripts/ci-changes.sh).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+    steps:
+      # On a pull request this checks out the merge commit. Its first parent
+      # is the base branch tip, so depth 2 is enough for the diff.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Test the decision script and the gate's needs list
+        run: bash scripts/ci-changes-test.sh
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            bash scripts/ci-changes.sh HEAD^1 HEAD | tee -a "$GITHUB_OUTPUT"
+          else
+            bash scripts/ci-changes.sh | tee -a "$GITHUB_OUTPUT"
+          fi
+
   terraform-validate:
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     name: "terraform validate (${{ matrix.dir }})"
     runs-on: ubuntu-latest
     strategy:
@@ -51,6 +82,8 @@ jobs:
         working-directory: tf/${{ matrix.dir }}
 
   terraform-validate-gcp:
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     name: "terraform validate (cloud-provision GCP)"
     runs-on: ubuntu-latest
     steps:
@@ -78,6 +111,8 @@ jobs:
         working-directory: tf/cloud-provision
 
   terraform-fmt:
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     name: terraform fmt
     runs-on: ubuntu-latest
     steps:
@@ -94,6 +129,8 @@ jobs:
         working-directory: tf
 
   shell-lint:
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     name: shell lint
     runs-on: ubuntu-latest
     steps:
@@ -123,6 +160,8 @@ jobs:
           shellcheck -x -S warning "${files[@]}"
 
   tests:
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
     name: tests
     runs-on: ubuntu-latest
     steps:
@@ -179,3 +218,35 @@ jobs:
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh
           bash tests/test-gcp-management-identity.sh
+
+  # The one check the main ruleset requires from this workflow. It needs
+  # every job, so "terraform validate (cloud-provision GCP)" and each matrix
+  # leg of "terraform validate" are required through it.
+  ci-all:
+    name: CI (all required checks)
+    # always(), so the gate reports on every run. A cancelled or failed job
+    # then fails the gate below. A gate that did not run, or was skipped,
+    # could count as passing for the required check.
+    if: always()
+    needs: [changes, terraform-validate, terraform-validate-gcp, terraform-fmt, shell-lint, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Pass only if the changes job succeeded and every other job succeeded,
+      # or was skipped because the changes job said the PR is docs-only
+      # (code=false). Any other skip fails, so a job skipped by mistake
+      # cannot pass the gate.
+      - name: Fail unless every required job passed
+        if: >-
+          needs.changes.result != 'success'
+          || contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
+          || (needs.changes.outputs.code != 'false' && contains(needs.*.result, 'skipped'))
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS_JSON"
+          echo "::error::A required CI job failed, was cancelled or was skipped."
+          exit 1
+      - name: Every required job passed or was skipped as docs-only
+        run: echo "ok"
