@@ -12,8 +12,7 @@ set -euo pipefail
 # Bump PRESETS_REF with the presets version reliable composes with, and run
 # this script to update the files in the same PR.
 
-# TODO(#194): pin a release tag once luthersystems/insideout-terraform-presets#946 is released.
-PRESETS_REF="5f02d08"
+PRESETS_REF="v0.15.0"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/tf/account-setup/policies"
