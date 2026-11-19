@@ -225,6 +225,7 @@ jobs:
           bash tests/test-preflight-binary-swap.sh
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh
+          bash tests/test-deploy-policy-mode.sh
           bash tests/test-gcp-management-identity.sh
           bash tests/test-provider-selection.sh
           bash tests/test-template-version.sh

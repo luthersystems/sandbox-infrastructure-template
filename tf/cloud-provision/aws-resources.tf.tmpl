@@ -34,12 +34,11 @@ locals {
 #     (module defaults) and re-apply — the module re-attaches
 #     arn:aws:iam::aws:policy/AdministratorAccess and drops the boundary.
 #
-# Phase 2 later narrows only the BODY of the module-created policy (an
-# in-place CreatePolicyVersion — never a role/ARN change) to the
-# generator-owned allowlist kept as
-# tf/account-setup/policies/insideout-write.json. Do NOT wire that scoped
-# body yet: enforcement is gated on the §8.2 CloudTrail shadow phase and the
-# §6(b) preflight companion change (iam:CreatePolicyVersion / iam:TagPolicy).
+# deploy_policy_mode = "scoped" (#194, below) narrows only the BODY of the
+# module-created policy (an in-place CreatePolicyVersion, never a role/ARN
+# change) to the generated tf/account-setup/policies/insideout-write.json. It
+# is opt-in per project; admin stays the default until the §8.2 CloudTrail
+# shadow phase accepts the scoped policy.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Deny-only boundary body — read cross-stage from account-setup, whose
@@ -66,6 +65,120 @@ resource "aws_iam_policy" "insideout_deploy_boundary" {
     ManagedBy = "terraform"
     Purpose   = "insideout-deploy-boundary"
   }
+
+  # Here because this policy is always created on AWS; the workload boundary
+  # is not created without stack_project (#194).
+  lifecycle {
+    precondition {
+      condition     = var.deploy_policy_mode != "scoped" || var.stack_project != ""
+      error_message = "deploy_policy_mode = \"scoped\" needs stack_project, the composer project name (io-<session>)."
+    }
+  }
+}
+
+# ============================================================================
+# Deploy policy mode (#194)
+# ============================================================================
+#
+# admin (default): the Phase-0 admin-equivalent body, as before.
+#
+# scoped: the policy cmd/policygen of the presets generates
+# (../account-setup/policies/insideout-write.json, checked by
+# scripts/policygen.sh -check). It grants the services the presets use, and
+# IAM writes only under /insideout/<stack_project>/, only for roles that carry
+# the workload boundary below. The deploy role cannot change its own role,
+# its policy or the boundary. This stage fills the policy's placeholders.
+#
+# The composed stack's presets put their IAM on that path with that boundary
+# when they get iam_scope; this stage writes it to
+# ../auto-vars/iam_scope.auto.tfvars.json, which custom-stack-provision loads.
+#
+# Limits:
+#   * custom-stack sequence only: vm-provision and k8s-provision make roles
+#     off the project path, which the scoped policy refuses.
+#   * The composed archive must come from a presets version that declares
+#     the iam_scope root variable (insideout-terraform-presets#946).
+#   * Moving to scoped replaces the stack's preset roles (new path and
+#     boundary).
+#
+# The boundary exists whenever stack_project is set, in either mode. So a
+# project moved back to admin keeps it while its roles still use it; IAM
+# refuses to delete a boundary in use.
+
+data "aws_caller_identity" "current" {}
+
+data "aws_partition" "current" {}
+
+locals {
+  # Without stack_project, scoped mode fails the precondition on
+  # aws_iam_policy.insideout_deploy_boundary; until then nothing reads the
+  # missing boundary.
+  scoped_deploy  = var.deploy_policy_mode == "scoped" && var.stack_project != ""
+  iam_arn_prefix = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:"
+
+  admin_deploy_policy_json = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AdminEquivalentPhase0"
+        Effect   = "Allow"
+        Action   = "*"
+        Resource = "*"
+      }
+    ]
+  })
+
+  # jsonencode(jsondecode()) drops the whitespace. IAM does not count it
+  # against the 6,144-character limit, but the stored body is smaller.
+  scoped_deploy_policy_json = local.scoped_deploy ? jsonencode(jsondecode(templatefile("${path.module}/../account-setup/policies/insideout-write.json", {
+    project               = var.stack_project
+    workload_boundary_arn = aws_iam_policy.workload_boundary[0].arn
+    # tf-modules aws-platform-ui-bootstrap names them so, at path "/".
+    deploy_role_arn   = "${local.iam_arn_prefix}role/${local.admin_role_name}"
+    deploy_policy_arn = "${local.iam_arn_prefix}policy/${local.admin_role_name}-deploy"
+  }))) : ""
+
+  iam_scope = local.scoped_deploy ? {
+    path                 = "/insideout/${var.stack_project}/"
+    permissions_boundary = aws_iam_policy.workload_boundary[0].arn
+  } : null
+}
+
+# The cap on every role the composed stack makes in scoped mode. It is off
+# the project path, so the deploy role's project IAM grants do not reach it,
+# and the deploy policy denies changing it. Tagged with project_id like this
+# stage's other IAM, not with stack_project: the deploy policy may delete
+# IAM that carries the stack's Project tag.
+resource "aws_iam_policy" "workload_boundary" {
+  count = var.stack_project != "" ? 1 : 0
+
+  name        = "${var.stack_project}-workload-boundary"
+  path        = "/"
+  description = "Permission boundary on the roles of InsideOut stack ${var.stack_project} (#147)."
+  policy      = jsonencode(jsondecode(templatefile("${path.module}/../account-setup/policies/insideout-workload-boundary.json", { project = var.stack_project })))
+
+  tags = {
+    Project   = var.project_id
+    ManagedBy = "terraform"
+    Purpose   = "insideout-workload-boundary"
+  }
+}
+
+resource "local_file" "iam_scope_tfvars" {
+  count = local.scoped_deploy ? 1 : 0
+
+  filename = "${path.module}/../auto-vars/iam_scope.auto.tfvars.json"
+  content  = jsonencode({ iam_scope = local.iam_scope })
+}
+
+output "deploy_policy_mode" {
+  description = "Deploy policy on the terraform role: admin or scoped (#194)."
+  value       = var.deploy_policy_mode
+}
+
+output "iam_scope" {
+  description = "IAM path and permissions boundary for the composed stack in scoped mode; null in admin mode (#194)."
+  value       = local.iam_scope
 }
 
 module "bootstrap" {
@@ -86,23 +199,9 @@ module "bootstrap" {
   # body, header comment above) replaces the module's AdministratorAccess
   # attachment on the durable terraform role.
   #
-  # The Phase-0 body is inline and admin-equivalent ON PURPOSE. The checked-in
-  # tf/account-setup/policies/insideout-write.json is the NARROWER
-  # generator-output placeholder for Phase 2 — inlining here (instead of
-  # file()-ing that JSON) keeps the scoped body un-attached until the
-  # shadow/audit phase validates it; wiring it early risks mid-apply 403s
-  # (the reliable#2243 failure class).
-  deploy_policy_json = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid      = "AdminEquivalentPhase0"
-        Effect   = "Allow"
-        Action   = "*"
-        Resource = "*"
-      }
-    ]
-  })
+  # deploy_policy_mode = "scoped" (#194) attaches the generated policy
+  # instead; see "Deploy policy mode" above.
+  deploy_policy_json = local.scoped_deploy ? local.scoped_deploy_policy_json : local.admin_deploy_policy_json
 
   # #147 Phase 0 (design doc §8.1): deny-only permission boundary — a hard cap
   # that removes only provably-out-of-scope surface (Organizations/Billing
