@@ -56,10 +56,12 @@ runs use it too. So on platform-cust3:
    merge applies `platform-cust3` (it maps to the `test` environment). Events
    before the trail starts logging are not in the bucket; `-source lookup`
    reads the last 90 days of management events without it.
-2. **Template ref.** Deploys must use a `SandboxTemplateRef` with Phase 0
-   (reliable `tf_start.go`, `500f156` or later), so `terraform_role` (and,
-   on a Luther-provisioned account, `…-account-admin-0`) holds
-   `InsideOutWrite` and the boundary. Note the ref; it goes in the results.
+2. **Template ref.** Deploys must use a `SandboxTemplateRef` (reliable
+   `tf_start.go`) of `a468b1d` or later. From that ref, `terraform_role`
+   (and, on a Luther-provisioned account, `…-account-admin-0`) holds
+   `InsideOutWrite` and the boundary, and a session can opt in to the scoped
+   policy (section 2a) with the RDS monitoring fix of presets v0.15.1. Note
+   the ref; it goes in the results.
 3. **Tool.** `iamaudit` lives in insideout-terraform-presets (`cmd/iamaudit`,
    package `pkg/iamaudit`), next to the composer metadata the allowlist is
    generated from. Build it at the commit you will record:
@@ -116,12 +118,36 @@ anything time-based. The window starts at the first deploy of pass 1 and ends
 an hour after the last destroy of pass 2 (CloudTrail delivers a log file
 within about 15 minutes). Expect at least 14 days.
 
+## 2a. Shadow runs of the scoped policy
+
+A matrix row can also run with the scoped policy on its deploy role, so a
+missing permission fails the job at once instead of waiting for the audit.
+Set the session's mode before its first deploy (admin bearer, staging):
+
+```bash
+$DT session deploy-policy <session> scoped   # admin moves it back
+```
+
+The next deploy sends `deploy_policy_mode=scoped`, and `cloud-provision`
+attaches the generated `insideout-write.json` in place of the
+admin-equivalent body. A job that fails with `AccessDenied` is a finding: note
+the action in `runs.md`, fix the generator in presets
+(`pkg/policygen`), and run the row again. A shadow run does not replace the
+audit of section 3: it shows only what one stack needs.
+
+If a destroy is refused by the pre-destroy check after a partial apply, run it
+with `POST /api/tf/destroy?session_id=<session>&ignore_drift=1`.
+
+The first shadow runs (2026-11-20) are in
+[least-privilege-phase1/2026-11-20/runs.md](least-privilege-phase1/2026-11-20/runs.md).
+
 ## 3. Run the audit
 
 Once per role, over the whole window, against the policy Phase 2 will attach
-and the boundary. Until the presets generator lands, that policy is this
-repo's placeholder `tf/account-setup/policies/insideout-write.json`; after it
-lands, the generated artifact.
+and the boundary. That policy is the generated
+`tf/account-setup/policies/insideout-write.json`: `scripts/policygen.sh` writes
+it from presets `cmd/policygen` at `PRESETS_REF`. Audit against the file of
+the template ref the matrix ran on.
 
 List every region a matrix stack deployed to, plus us-east-1: IAM, the global
 STS endpoint, CloudFront and Route 53 log there.
