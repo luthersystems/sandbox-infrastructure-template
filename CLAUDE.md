@@ -87,7 +87,7 @@ bash run-ansible.sh ansible/app.yaml default true 2
 
 There is no general test suite. Validation happens through `terraform plan` (dry run), Ansible `--check` mode, and the inspector IAM test script.
 
-The `tests/` scripts run in CI (`.github/workflows/validate.yml`). The ones that reach the -infra repo (`test-infra-push.sh`, `test-prepare-custom-stack.sh`) need `MARS_BIN` set to a mars build with the `infra-*` commands, for example `go build -o /tmp/mars ./cmd/mars` in a luthersystems/mars checkout; the git rules themselves are tested in mars (`internal/infrarepo`).
+The `tests/` scripts run in CI (`.github/workflows/validate.yml`). The ones that reach the -infra repo or run the stage scripts (`test-infra-push.sh`, `test-prepare-custom-stack.sh`, `test-plan-all.sh`, `test-apply-scripts.sh`, `test-drift-check.sh`, `test-drift-refresh-preflight-skip.sh`) need `MARS_BIN` set to a mars build with the `infra-*` and stage commands (v0.149.0+), for example `go build -o /tmp/mars ./cmd/mars` in a luthersystems/mars checkout; the git rules themselves are tested in mars (`internal/infrarepo`).
 
 ## CI/CD
 
@@ -104,10 +104,14 @@ GitHub Actions workflow (`.github/workflows/deploy.yml`):
 | `shell_utils.sh` | Cloud detection, credential management, git helpers |
 | `tf/utils.sh` | Terraform wrapper functions (init/plan/apply/destroy) |
 | `tf/run-with-creds.sh` | Mars CLI credential injection wrapper |
-| `tf/drift-check.sh` | Check plan file for resource drift, write drift.json |
-| `tf/drift-refresh.sh` | Refresh-only plan + drift check (standalone) |
-| `tf/apply-with-outputs.sh` | Apply + capture terraform outputs (simple or drift-checked) |
-| `tf/apply-plan.sh` | Apply saved .tfplan file + capture outputs |
+| `mars-stages.yaml` | The stages and output file names for the mars stage commands (`plan-all`, `plan-stage`, `apply-stage`; mars v0.149.0+, mars `docs/stages.md`). The file names are the ones ui-core and reliable read; do not rename them (#114) |
+| `tf/stages.sh` | `marsStages` and the per-stage setup the scripts share (stage files, credentials, -infra git steps around an apply) |
+| `tf/stage-setup.sh` | Setup hook of `mars-stages.yaml`: stage files and bootstrap preflight for each stage mars runs |
+| `tf/plan-all.sh`, `tf/plan.sh` | Entrypoints over `mars plan-all` and `mars plan-stage` |
+| `tf/drift-check.sh` | Wrapper over `mars drift-check`: check a plan file for resource drift, write drift.json |
+| `tf/drift-refresh.sh` | Refresh-only plan + drift check (`mars plan-stage --refresh-only --check-drift --strict`) |
+| `tf/apply-with-outputs.sh` | Apply + capture terraform outputs (simple or drift-checked; `mars apply-stage --outputs`) |
+| `tf/apply-plan.sh` | Apply saved .tfplan file + capture outputs (`mars apply-stage --plan`) |
 | `tf/auto-vars/common.auto.tfvars.json` | Shared Terraform variables across stages, with the cloud credentials. ui-core writes it at deploy time; git does not track it (#160) |
 | `ansible/inventories/default/group_vars/all/env.yaml` | Core Ansible environment config |
 | `ansible/inventories/default/group_vars/all/version.yaml` | Version tracking (triggers CI deploys) |
