@@ -1,41 +1,48 @@
-# Deploy-role policy artifacts (issue #147)
+# Deploy-role policy artifacts (issues #147, #194)
 
-**Status: Phase 0 of the staged rollout is LIVE in `../main.tf`** — the deploy
-role attaches a customer-managed, **admin-equivalent** `InsideOutWrite` policy
-(inline in `main.tf`) in place of the AWS-managed `AdministratorAccess`, plus
-the deny-only permission boundary below. Phase 0 is permission-neutral: the
-attached body still allows `*` on `*`; only the policy *object* (the identity)
-changed, and the role name/ARN is untouched.
-
-Full rationale, options analysis, migration/rollout, blast radius, and test plan:
+The design, the rollout and the test plan are in
 [`docs/design/least-privilege-deploy-role.md`](../../../docs/design/least-privilege-deploy-role.md).
 
-| File | Status | What it is |
+| File | Made by | Used by |
 |---|---|---|
-| `insideout-deploy-boundary.json` | **LIVE (Phase 0)** — attached as the role's `permissions_boundary` via `aws_iam_policy.insideout_deploy_boundary` in `../main.tf` | Defense-in-depth **permission boundary** (deny-only): `Allow *` minus the provably out-of-scope surface (Organizations, Account/Billing, IAM-user/credential creation, security-monitoring teardown). A strict superset of real deploy usage → non-enforcing for any real deploy. |
-| `insideout-write.json` | **PLACEHOLDER — NOT attached** (Phase-2 target; surfaced only as an unused output by `../least_privilege_scaffold.tf`) | The derived scoped `InsideOutWrite` deploy policy body: a per-service allowlist covering every AWS service the composer can provision, plus bounded IAM + `iam:PassRole` (scoped by `iam:PassedToService`). Phase 2 narrows the live admin-equivalent body down to this. |
+| `insideout-deploy-boundary.json` | hand, deny-only | Both deploy roles, as their permission boundary (`../main.tf`, `../../cloud-provision/aws-resources.tf.tmpl`). Live: a change here changes every project on its next apply. |
+| `insideout-write.json` | `scripts/policygen.sh` | The scoped `InsideOutWrite` body. `tf/cloud-provision` attaches it to the terraform role when `deploy_policy_mode = "scoped"`. |
+| `insideout-workload-boundary.json` | `scripts/policygen.sh` | The boundary on every role the composed stack makes in scoped mode (`<stack_project>-workload-boundary`). |
+| `policygen-report.json` | `scripts/policygen.sh` | Review aid: the services per preset, the extra services, and the write policy's statement names in order (the policy has no Sids, to fit the IAM size limit). |
+| `extra-services.txt` | hand | Services the template's own Terraform needs outside the presets. `scripts/policygen.sh` passes it with `-extra-services`. |
 
-## `insideout-write.json` is a placeholder — do not hand-maintain, do not attach as-is
+## The generated files
 
-- **Generator-owned.** The real `insideout-write.json` must be **generated from
-  `insideout-terraform-presets/pkg/composer/iam_actions.go`** (the same metadata
-  that already drives the deploy permission preflight), so the policy and the
-  preflight cannot drift as components are added. See the design doc §4.1 and the
-  drafted presets-side generator ticket. The service allowlist here was derived
-  by hand from that metadata **only as a stand-in** until the generator lands.
-- **The service list is `AWSIAMActions` create-only seed + a transitive-apply
-  delta.** The composer's per-component actions are representative *create* verbs
-  (enough to fail the preflight fast); a real `apply`/`destroy` needs the full
-  `Describe/Get/List/Modify/Delete/Tag` lifecycle — hence `<service>:*` — plus
-  transitive services (`autoscaling`, `ecr`, `sns`, `events`, `tag`, …) that
-  never appear in the create-only seed. That delta is confirmed empirically in
-  the **shadow / CloudTrail phase** before enforcement (design doc §8.2).
-- **Attaching it requires the staged rollout + broad apply testing** in the
-  design doc (§8 migration, §10 test plan) — plus the §6(b) preflight companion
-  change (`iam:CreatePolicyVersion` / `iam:TagPolicy`) so the bootstrap
-  credential can *update* this customer-managed policy on re-provision.
-  Attaching a too-tight grant breaks every customer deploy — worse than the
-  status quo.
-- **Editing `insideout-deploy-boundary.json` is a live change** (it is
-  `file()`-read into the attached boundary policy). Keep it deny-only; any new
-  Deny must be provably outside real deploy usage (§4 option 3).
+- Do not edit them. Run `scripts/policygen.sh` and commit the result. CI runs
+  `scripts/policygen.sh -check` and fails when they differ from the generator.
+- The generator is `cmd/policygen` of luthersystems/insideout-terraform-presets
+  at `PRESETS_REF` in `scripts/policygen.sh`. Bump it with the presets version
+  reliable composes with, so the policy covers what the stack can create.
+- The files hold Terraform template placeholders. `tf/cloud-provision` fills
+  them with `templatefile()`:
+
+| Placeholder | Value |
+|---|---|
+| `${project}` | `stack_project`, the composer project name (`io-<session>`) |
+| `${workload_boundary_arn}` | ARN of `<stack_project>-workload-boundary` (path `/`) |
+| `${deploy_role_arn}` | ARN of `<short_project_id>-luther-terraform` |
+| `${deploy_policy_arn}` | ARN of `<short_project_id>-luther-terraform-deploy` |
+
+## Scoped mode
+
+| Item | Value |
+|---|---|
+| Switch | `deploy_policy_mode = "scoped"` and `stack_project`, sent by reliable through ui-core in `common.auto.tfvars.json`. The default is `admin`. |
+| IAM the stack may write | Roles, policies and instance profiles under `/insideout/<stack_project>/`. A role must carry the workload boundary. |
+| Composed stack input | `tf/auto-vars/iam_scope.auto.tfvars.json`: `iam_scope = {path, permissions_boundary}`. The presets put their IAM there. |
+| Denied | Changes to the terraform role, its deploy policy and the workload boundary. |
+
+Limits:
+
+- Custom-stack sequence only. vm-provision and k8s-provision make roles off
+  the project path, so the scoped policy refuses them.
+- The composed archive must come from a presets version that declares the
+  `iam_scope` root variable (luthersystems/insideout-terraform-presets#946).
+- Moving a project to scoped mode replaces the stack's preset roles (new path
+  and boundary). The workload boundary exists whenever `stack_project` is set,
+  so a project moved back to admin keeps it while its roles still use it.

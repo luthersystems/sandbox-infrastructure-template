@@ -80,3 +80,21 @@ variable "gcp_deploy_service_account" {
   type    = string
   default = ""
 }
+
+# Used by cloud-provision only (the deploy policy mode, #194). Declared here
+# because ui-core writes them into common.auto.tfvars.json, and cloud-provision
+# writes iam_scope into tf/auto-vars, which this stage loads too.
+variable "deploy_policy_mode" {
+  type    = string
+  default = "admin"
+}
+
+variable "stack_project" {
+  type    = string
+  default = ""
+}
+
+variable "iam_scope" {
+  type    = any
+  default = null
+}

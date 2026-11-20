@@ -195,6 +195,14 @@ jobs:
           go install "github.com/luthersystems/mars/cmd/mars@$(tr -d '[:space:]' < .mars-version)"
           echo "MARS_INFRA_BIN=$(go env GOPATH)/bin/mars" >> "$GITHUB_ENV"
 
+      # The scoped deploy policy is generated from the presets
+      # (scripts/policygen.sh, #194). This fails when the committed files
+      # differ from the generator at the pinned presets version.
+      - name: Check the generated deploy policies
+        env:
+          GOTOOLCHAIN: auto
+        run: bash scripts/policygen.sh -check
+
       - name: Run tests
         run: |
           # Only these two run the real mars: the others mock it, as locally.
@@ -217,6 +225,7 @@ jobs:
           bash tests/test-preflight-binary-swap.sh
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh
+          bash tests/test-deploy-policy-mode.sh
           bash tests/test-gcp-management-identity.sh
           bash tests/test-provider-selection.sh
           bash tests/test-template-version.sh

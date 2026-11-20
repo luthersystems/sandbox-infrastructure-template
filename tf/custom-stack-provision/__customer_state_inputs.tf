@@ -218,3 +218,18 @@ variable "repo_org" {
   type        = string
   default     = "luthersystems"
 }
+
+# Used by cloud-provision only (the deploy policy mode, #194). Declared here
+# because ui-core writes them into common.auto.tfvars.json, which this stage
+# loads too. iam_scope is not declared here: the composed root declares it.
+variable "deploy_policy_mode" {
+  description = "Not used in this stage; see tf/cloud-provision/vars.tf"
+  type        = string
+  default     = "admin"
+}
+
+variable "stack_project" {
+  description = "Not used in this stage; see tf/cloud-provision/vars.tf"
+  type        = string
+  default     = ""
+}

@@ -1,0 +1,12 @@
+# IAM service prefixes the template's own Terraform needs under the scoped
+# deploy policy, outside the presets (#194). cmd/policygen reads this file
+# with -extra-services and adds <service>:* to the policy and the workload
+# boundary. One per line.
+#
+# The custom-stack-provision root runs as the terraform role and keeps its
+# state in the stage's S3 bucket, encrypted with its KMS key, and reads
+# cloud-provision's state the same way.
+s3
+kms
+# S3 state locking of older backends.
+dynamodb
