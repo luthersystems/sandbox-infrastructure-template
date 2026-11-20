@@ -14,6 +14,12 @@
 # Configurable via environment:
 #   PLAN_STAGES        Space-separated stages to plan, in order
 #                      (default: "cloud-provision custom-stack-provision").
+#                      Each must be a stage of mars-stages.yaml. A stage
+#                      whose bootstrap.sh exports JUMP_ROLE_ARN
+#                      (account-setup) fails here: mars runs the stage setup
+#                      in a child process, so the export cannot reach
+#                      terraform. Plan it with plan.sh. ui-core plans only
+#                      cloud-provision and custom-stack-provision here.
 #   PLAN_ALL_CONTINUE  true: this run continues a plan-all that an earlier
 #                      step of the same workflow started, and keeps that
 #                      step's plan JSON and summary rows. ui-core plans the
@@ -50,6 +56,10 @@ logTemplateVersion
 logPresetsVersion
 
 read -ra stages <<<"${PLAN_STAGES:-cloud-provision custom-stack-provision}"
+if [[ ${#stages[@]} -eq 0 ]]; then
+  echo "ERROR: PLAN_STAGES names no stage" >&2
+  exit 1
+fi
 args=(--stages "$(IFS=,; echo "${stages[*]}")")
 if [[ "${PLAN_ALL_CONTINUE:-false}" == "true" ]]; then
   args+=(--continue)
