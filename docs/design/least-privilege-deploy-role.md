@@ -550,6 +550,11 @@ is measured against the exact policy body Phase 2 will narrow:
   in the generator, so the artifact is empirically grounded, not guessed.
 - Keep the drift-guard test green throughout (preflight ⊆ deploy policy).
 
+How to run it: [Phase 1 runbook](least-privilege-phase1-runbook.md). The
+recorder is `iamaudit` in insideout-terraform-presets (`cmd/iamaudit`), and the
+trail is ui-infrastructure `platform-cust3/deploy_audit_trail.tf`. The runbook
+also holds the acceptance rule Phase 2 waits on.
+
 ### 8.3 Phase 2 — chip the `InsideOutWrite` policy down (enforce the scoped grant)
 
 Narrow the body of the already-attached `InsideOutWrite` policy from the Phase-0
