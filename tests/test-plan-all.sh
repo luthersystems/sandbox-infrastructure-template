@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # Tests for tf/plan-all.sh.
-# Uses mock terraform to verify multi-stage planning and summary aggregation.
+# Runs the real mars plan-all (MARS_BIN, tests/mars-infra.sh) on a fake
+# terraform, to verify multi-stage planning and summary aggregation end to
+# end through the template's entrypoint, config and setup hook (#114).
 
 PASS=0
 FAIL=0
@@ -20,6 +22,9 @@ if ! command -v jq &>/dev/null; then
   echo "SKIP: jq is required for these tests" >&2
   exit 0
 fi
+# shellcheck source=tests/mars-infra.sh
+. "$REPO_ROOT/tests/mars-infra.sh"
+requireMarsStages
 
 # --- Build a fake project tree ---
 PROJECT="$WORKDIR/project"
@@ -33,13 +38,28 @@ cat > "$PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
 environment: test
 EOF
 
-echo '{"cloud_provider": "aws"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+# Access-key mode: the cloud-provision bootstrap preflight that the setup
+# hook runs is skipped (ui-core checks the keys before dispatch), so no aws
+# CLI is needed.
+echo '{"cloud_provider": "aws", "aws_access_key_id": "AKIATEST"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+# mars needs vars/default/ in each stage; tfSetup copies it from auto-vars,
+# where the template tracks it.
+mkdir -p "$PROJECT/tf/auto-vars/vars/default"
 
 # Copy real scripts
 cp "$REPO_ROOT/shell_utils.sh" "$PROJECT/shell_utils.sh"
 cp "$REPO_ROOT/tf/utils.sh" "$PROJECT/tf/utils.sh"
 cp "$REPO_ROOT/tf/plan.sh" "$PROJECT/tf/plan.sh"
 cp "$REPO_ROOT/tf/plan-all.sh" "$PROJECT/tf/plan-all.sh"
+cp "$REPO_ROOT/tf/stages.sh" "$PROJECT/tf/stages.sh"
+cp "$REPO_ROOT/tf/stage-setup.sh" "$PROJECT/tf/stage-setup.sh"
+cp "$REPO_ROOT/mars-stages.yaml" "$PROJECT/mars-stages.yaml"
+# The extra stages of the PLAN_STAGES and failure tests. stages: is the last
+# key of the config, so appended entries join its list.
+for s in stage-a stage-b failing-stage; do
+  mkdir -p "$PROJECT/tf/$s"
+  printf '  - name: %s\n    dir: tf/%s\n' "$s" "$s" >> "$PROJECT/mars-stages.yaml"
+done
 
 # Create mock run-with-creds.sh (utils.sh sets MARS to this unconditionally)
 # MARS is called as: $MARS <workspace> <command> [args...]
@@ -97,7 +117,10 @@ if [[ "\$1" == "show" && "\$2" == "-json" ]]; then
   fi
 elif [[ "\$1" == "init" ]]; then
   : # success
+elif [[ "\$1" == "workspace" && "\$2" == "show" ]]; then
+  echo default
 elif [[ "\$1" == "plan" ]]; then
+  echo "plan env TF_CLI_ARGS_plan=\${TF_CLI_ARGS_plan:-}" >> "$CMD_LOG"
   # Create a fake plan file if -out is specified
   for arg in "\$@"; do
     if [[ "\$arg" == -out=* ]]; then
@@ -640,7 +663,7 @@ else
   fail "apply-failure: expected exit 1, got $exit_code. Output: $output"
 fi
 
-if echo "$output" | grep -q "Failed to apply cloud-provision"; then
+if echo "$output" | grep -q "stage cloud-provision: terraform apply failed"; then
   pass "apply-failure: error message logged"
 else
   fail "apply-failure: should log apply failure. Output: $output"
@@ -819,7 +842,7 @@ else
 fi
 
 # Strip header is emitted (catches accidental removal of the block)
-if echo "$output" | grep -q "Stripping ALL .terraform/providers/"; then
+if echo "$output" | grep -q "Stripping .terraform/providers"; then
   pass "strip-all: header logged"
 else
   fail "strip-all: header not logged. Output: $output"
@@ -901,6 +924,41 @@ if jq -e '(.stages | keys) == ["custom-stack-provision"]' "$PROJECT/outputs/plan
   pass "split plan: a run without PLAN_ALL_CONTINUE drops earlier stages"
 else
   fail "split plan: stale stages kept without PLAN_ALL_CONTINUE"
+fi
+
+# ============================================================
+# Test: ui-core's -out={planID}.tfplan names every stage's saved plan.
+# apply-plan.sh --plan-file {planID} applies <stage>/{planID}.tfplan in a
+# later step, so the name must reach mars (--plan-file): mars's own -out
+# comes after TF_CLI_ARGS_plan and would win (#114).
+# ============================================================
+echo ""
+echo "Test: TF_CLI_ARGS_plan -out names the saved plans..."
+
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/cloud-provision.json"
+echo '{"resource_changes": []}' > "$STAGE_PLANS_DIR/custom-stack-provision.json"
+touch "$STAGE_PLANS_DIR/cloud-provision.has-state"
+rm -f "$PROJECT"/tf/*/*.tfplan
+set +e
+output="$(TF_CLI_ARGS_plan="-out=job42.tfplan -compact-warnings" run_plan_all 2>&1)"
+exit_code=$?
+set -e
+rm -f "$STAGE_PLANS_DIR/cloud-provision.has-state"
+
+if [[ "$exit_code" -eq 0 && -f "$PROJECT/tf/cloud-provision/job42.tfplan" && -f "$PROJECT/tf/custom-stack-provision/job42.tfplan" ]]; then
+  pass "plan file: each stage saved job42.tfplan"
+else
+  fail "plan file: exit $exit_code, plans: $(ls "$PROJECT"/tf/*/*.tfplan 2>&1). Output: $output"
+fi
+if grep -q -- "-out=job42.tfplan" "$CMD_LOG" && ! grep -q -- "-out=mars.tfplan" "$CMD_LOG"; then
+  pass "plan file: terraform plan got -out=job42.tfplan"
+else
+  fail "plan file: wrong -out. Log: $(cat "$CMD_LOG")"
+fi
+if grep -q "plan env TF_CLI_ARGS_plan=-out=job42.tfplan -compact-warnings -parallelism=20" "$CMD_LOG"; then
+  pass "plan file: ui-core's args kept, parallelism 20 added"
+else
+  fail "plan file: TF_CLI_ARGS_plan wrong. Log: $(cat "$CMD_LOG")"
 fi
 
 # --- Summary ---
