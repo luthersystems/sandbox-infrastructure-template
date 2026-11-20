@@ -25,13 +25,12 @@
 MARS_STAGES_ENV=default
 
 # marsStages <command> [args...] runs a mars stage command on the template's
-# mars-stages.yaml. It runs in the project root with a relative --config, so
-# the path is right both for a native mars and inside the ./mars docker
-# wrapper, which mounts the project. Its exit code is the command's.
+# mars-stages.yaml, from the project root. It needs a native mars
+# (resolveNativeMarsCLI says why). Its exit code is the command's.
 marsStages() {
   local cmd="$1" bin
   shift
-  bin="$(resolveMarsCLI)"
+  bin="$(resolveNativeMarsCLI)" || return 1
   (cd "$MARS_PROJECT_ROOT" && "$bin" "$MARS_STAGES_ENV" "$cmd" --config mars-stages.yaml "$@")
 }
 

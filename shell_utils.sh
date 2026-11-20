@@ -132,6 +132,25 @@ resolveMarsCLI() {
   echo "$MARS_PROJECT_ROOT/mars"
 }
 
+# resolveNativeMarsCLI prints the mars that the stage commands run on: a
+# native mars ($MARS_BIN, or the mars image's own), never the ./mars docker
+# wrapper. That wrapper forwards only AWS_* and TF_LOG into its container,
+# and a stage needs more of this shell than that: TF_CLI_ARGS_plan (ui-core's
+# -out and the parallelism), MARS_STAGE_PREPARED, TEMPLATE_VERSION,
+# PRESETS_VERSION, the SKIP_*_BOOTSTRAP_PREFLIGHT flags and the GCP
+# credential file in /tmp. Without them a stage would plan with the wrong
+# name, run the preflight twice or lose its credentials, so it fails here
+# instead (#114).
+resolveNativeMarsCLI() {
+  local bin
+  bin="$(resolveMarsCLI)"
+  if [[ "$bin" == "$MARS_PROJECT_ROOT/mars" ]]; then
+    echo "ERROR: the mars stage commands need a native mars: set MARS_BIN to a mars v0.149.0 or later (the release in .mars-version); the ./mars docker wrapper does not pass the stage's environment. [#114]" >&2
+    return 1
+  fi
+  echo "$bin"
+}
+
 # MARS_INFRA_CHECKED caches, per process, the mars that answered for the
 # infra-* commands, so apply.sh's three calls start it once more, not three
 # times.

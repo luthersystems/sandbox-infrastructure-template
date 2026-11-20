@@ -76,19 +76,26 @@ echo "template_version=${TEMPLATE_VERSION:-unknown}"
 echo "presets_version=${PRESETS_VERSION:-unknown}"
 
 OUTPUTS_DIR="$MARS_PROJECT_ROOT/outputs"
+mars_bin="$(resolveNativeMarsCLI)"
 report="$(mktemp)"
 trap 'rm -f "$report"' EXIT
 
 # mars exits 2 on actionable drift (and, with --strict, on any drift), 0
 # otherwise. Here actionable drift exits 0 (#108), so only --strict keeps 2.
 rc=0
-"$(resolveMarsCLI)" default drift-check "$plan_file" --out "$report" "${mars_args[@]+"${mars_args[@]}"}" || rc=$?
+"$mars_bin" default drift-check "$plan_file" --out "$report" "${mars_args[@]+"${mars_args[@]}"}" || rc=$?
 if [[ "$rc" -ne 0 && "$rc" -ne 2 ]]; then
   echo "ERROR: mars drift-check failed (exit $rc)" >&2
   exit 1
 fi
 
-if [[ "$(jq -r '.drift_detected' "$report")" != "true" ]]; then
+# An empty or unreadable report is an error, never "no drift".
+drift="$(jq -r '.drift_detected | booleans' "$report" 2>/dev/null || true)"
+if [[ "$drift" != "true" && "$drift" != "false" ]]; then
+  echo "ERROR: mars drift-check wrote no report to $report" >&2
+  exit 1
+fi
+if [[ "$drift" != "true" ]]; then
   echo "No resource drift detected."
   exit 0
 fi

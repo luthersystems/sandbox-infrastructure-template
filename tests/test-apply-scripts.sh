@@ -805,6 +805,46 @@ fi
 # Restore common auto-vars for any later tests (none currently, but defensive).
 echo "$COMMON_VARS" > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 
+# ============================================================
+# The stage commands refuse the ./mars docker wrapper (#114): it does not
+# forward the stage's environment into its container.
+# ============================================================
+echo ""
+echo "=== native mars required ==="
+
+echo ""
+echo "Test 16: no MARS_BIN and no mars image → the docker wrapper is refused..."
+set +e
+output="$(MARS_BIN="" MARS_CONTAINER_ROOT="$WORKDIR/no-mars-image" run_script apply-plan.sh default --plan-file myplan 2>&1)"
+exit_code=$?
+set -e
+if [[ "$exit_code" -ne 0 ]] && echo "$output" | grep -qF "need a native mars"; then
+  pass "docker fallback: refused with a clear error"
+else
+  fail "docker fallback: expected a refusal, got exit $exit_code. Output: $output"
+fi
+if grep -q "terraform apply" "$CMD_LOG"; then
+  fail "docker fallback: terraform ran"
+else
+  pass "docker fallback: nothing applied"
+fi
+
+echo ""
+echo "Test 17: drift-check.sh treats a missing mars report as an error..."
+EMPTY_MARS="$WORKDIR/empty-report-mars"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$EMPTY_MARS"
+/bin/chmod +x "$EMPTY_MARS"
+echo "fake-plan" > "$WORKDIR/some.tfplan"
+set +e
+output="$(MARS_BIN="$EMPTY_MARS" MARS_PROJECT_ROOT="$PROJECT" bash "$PROJECT/tf/drift-check.sh" "$WORKDIR/some.tfplan" 2>&1)"
+exit_code=$?
+set -e
+if [[ "$exit_code" -eq 1 ]] && ! echo "$output" | grep -q "No resource drift detected"; then
+  pass "drift-check: empty report is an error, not 'no drift'"
+else
+  fail "drift-check: expected exit 1 on an empty report, got $exit_code. Output: $output"
+fi
+
 # --- Summary ---
 echo ""
 echo "================================"
