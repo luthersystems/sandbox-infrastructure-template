@@ -12,7 +12,7 @@ set -euo pipefail
 # Bump PRESETS_REF with the presets version reliable composes with, and run
 # this script to update the files in the same PR.
 
-PRESETS_REF="v0.15.0"
+PRESETS_REF="v0.15.1"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/tf/account-setup/policies"
