@@ -49,6 +49,9 @@ runs use it too. So on platform-cust3:
    aws cloudtrail describe-trails --include-shadow-trails --region us-west-2
    ```
 
+   (If `aws_jump` cannot find `platform-cust3`, use
+   `credhop --account 031780745048 admin`, as in step 4.)
+
    If an organization trail with management events exists, read it instead
    (step 3, with `-bucket <its bucket>` and
    `-s3-prefix AWSLogs/<org-id>/031780745048`) and do not add a second trail:
@@ -57,25 +60,35 @@ runs use it too. So on platform-cust3:
    before the trail starts logging are not in the bucket; `-source lookup`
    reads the last 90 days of management events without it.
 2. **Template ref.** Deploys must use a `SandboxTemplateRef` (reliable
-   `tf_start.go`) of `a468b1d` or later. From that ref, `terraform_role`
-   (and, on a Luther-provisioned account, `…-account-admin-0`) holds
-   `InsideOutWrite` and the boundary, and a session can opt in to the scoped
-   policy (section 2a) with the RDS monitoring fix of presets v0.15.1. Note
-   the ref; it goes in the results.
+   `tf_start.go`) with Phase 0, `500f156` or later, so `terraform_role` (and,
+   on a Luther-provisioned account, `…-account-admin-0`) holds
+   `InsideOutWrite` and the boundary. A shadow run in scoped mode (section 2a,
+   `tf/account-setup/policies/README.md`) needs `a468b1d` or later: #195 adds the mode, #197 makes the policy known
+   at plan, and #198 adds the RDS pass-role fix. Note the ref; it goes in the
+   results.
 3. **Tool.** `iamaudit` lives in insideout-terraform-presets (`cmd/iamaudit`,
    package `pkg/iamaudit`), next to the composer metadata the allowlist is
    generated from. Build it at the commit you will record:
 
+   Set `PRESETS` and `SIT` to your checkouts, and record the commit the last
+   line prints:
+
    ```bash
-   PRESETS=~/src/insideout-terraform-presets   # your checkouts
+   PRESETS=~/src/insideout-terraform-presets
    SIT=~/src/sandbox-infrastructure-template
    go build -C "$PRESETS" -o /tmp/iamaudit ./cmd/iamaudit
-   git -C "$PRESETS" rev-parse --short HEAD   # record it
+   git -C "$PRESETS" rev-parse --short HEAD
    ```
+
+   The snippets on this page have no inline `#` comments, because a stock
+   interactive zsh (no `interactivecomments`) passes `#` and the words after it
+   as arguments.
 
 4. **Reader.** The audit reads the trail bucket (`s3:ListBucket`,
    `s3:GetObject`) or event history (`cloudtrail:LookupEvents`). Run it after
-   `aws_jump platform-cust3 admin`. It makes no write.
+   `aws_jump platform-cust3 admin`. If that account name does not resolve in
+   your shell helpers, use `credhop --account 031780745048 admin`. It makes
+   no write.
 
 ## 2. The deploy matrix
 
@@ -122,10 +135,11 @@ within about 15 minutes). Expect at least 14 days.
 
 A matrix row can also run with the scoped policy on its deploy role, so a
 missing permission fails the job at once instead of waiting for the audit.
-Set the session's mode before its first deploy (admin bearer, staging):
+Set the session's mode before its first deploy (admin bearer, staging).
+`admin` in place of `scoped` moves it back:
 
 ```bash
-$DT session deploy-policy <session> scoped   # admin moves it back
+$DT session deploy-policy <session> scoped
 ```
 
 The next deploy sends `deploy_policy_mode=scoped`, and `cloud-provision`
@@ -138,42 +152,85 @@ audit of section 3: it shows only what one stack needs.
 If a destroy is refused by the pre-destroy check after a partial apply, run it
 with `POST /api/tf/destroy?session_id=<session>&ignore_drift=1`.
 
-The first shadow runs (2026-11-20) are in
+After each shadow run, run the quick check in section 3 for its role and
+window. The first shadow runs (2026-11-20) are in
 [least-privilege-phase1/2026-11-20/runs.md](least-privilege-phase1/2026-11-20/runs.md).
 
 ## 3. Run the audit
 
 Once per role, over the whole window, against the policy Phase 2 will attach
-and the boundary. That policy is the generated
-`tf/account-setup/policies/insideout-write.json`: `scripts/policygen.sh` writes
-it from presets `cmd/policygen` at `PRESETS_REF`. Audit against the file of
-the template ref the matrix ran on.
+and the boundary.
+
+**`terraform_role`.** The policy is `tf/account-setup/policies/insideout-write.json`,
+which `scripts/policygen.sh` generates from the presets (#194). It holds
+Terraform placeholders (`${project}`, `${deploy_role_arn}`,
+`${deploy_policy_arn}`, `${workload_boundary_arn}`; see the policies
+`README.md`), and Resource ARNs and conditions match only once they are
+filled. Every matrix session has its own project, so a copy filled with one
+project's values refuses the others' calls. Do one of these:
+
+- Fill the placeholders with patterns that cover every matrix project:
+  `${project}` with `io-*`, the role and policy ARNs with
+  `arn:aws:iam::031780745048:role/*-luther-terraform` and
+  `arn:aws:iam::031780745048:policy/*-luther-terraform-deploy`, and the
+  boundary with `arn:aws:iam::031780745048:policy/io-*-workload-boundary`.
+- Or run one audit per project, each with that project's filled copy.
+
+Scoped mode covers the custom-stack sequence only. vm-provision and
+k8s-provision make roles off the `/insideout/<project>/` path, so the scoped
+policy refuses them (policies `README.md`, "Limits"). Gate `terraform_role`
+on the custom-stack sessions of the matrix. List what the vm and k8s stages
+called in `runs.md` as known gaps. Do not count those calls against the gate.
+
+**`bootstrap_role`.** Its Phase 2 policy is a separate, smaller subset
+(design doc §8.3), and nothing generates it yet. Until something does, audit
+it against `insideout-write.json` only to get the list of used actions. Its
+gate result is a list to explain, not a pass or fail.
 
 List every region a matrix stack deployed to, plus us-east-1: IAM, the global
 STS endpoint, CloudFront and Route 53 log there.
 
-First check that the record is whole: the trail's selectors are as
-Terraform set them (the boundary does not deny `PutEventSelectors`), and no
-log file of the window was changed or removed.
+First check that the record is whole. Three things must hold:
+
+- The trail logged the whole window: no `StopLogging` call in it.
+- Its selectors are as Terraform set them. The boundary does not deny
+  `PutEventSelectors`.
+- Log file validation is on, and no log file of the window was changed or
+  removed. `validate-logs` needs validation on: without it there are no
+  digests to check, and a gap goes unseen.
 
 ```bash
+aws cloudtrail get-trail-status --name insideout-deploy-audit --region us-west-2
+aws cloudtrail describe-trails --trail-name-list insideout-deploy-audit --region us-west-2 \
+  --query 'trailList[].LogFileValidationEnabled'
+aws cloudtrail lookup-events --region us-west-2 \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=StopLogging \
+  --start-time 2026-12-01T00:00:00Z --end-time 2026-12-16T00:00:00Z
 aws cloudtrail get-event-selectors --trail-name insideout-deploy-audit --region us-west-2
 aws cloudtrail validate-logs --region us-west-2 \
   --trail-arn arn:aws:cloudtrail:us-west-2:031780745048:trail/insideout-deploy-audit \
   --start-time 2026-12-01T00:00:00Z --end-time 2026-12-16T00:00:00Z
 ```
 
-Then run the audit. `IDS` is the matrix's short project ids, joined with `|`.
+`IsLogging` must be true. `LogFileValidationEnabled` must be true. The
+`StopLogging` lookup must return no events.
+
+Then run the audit. In the snippet:
+
+- `IDS` is the matrix's short project ids from `runs.md`, joined with `|`.
+- The `-region` flags list every region the matrix used.
+- `-start` and `-end` are the window.
+- `T` points at the filled copies of the policies (see above).
 
 ```bash
 T=$SIT/tf/account-setup/policies
-IDS='a1b2c3d4|e5f6a7b8'   # from runs.md
+IDS='a1b2c3d4|e5f6a7b8'
 COMMON=(
   -source s3
   -bucket luther-cust3-deploy-audit-trail-031780745048 -bucket-region us-west-2
   -s3-prefix AWSLogs/031780745048
-  -region us-west-2 -region us-east-1 -region us-east-2   # every region used
-  -start 2026-12-01T00:00:00Z -end 2026-12-16T00:00:00Z  # the window
+  -region us-west-2 -region us-east-1 -region us-east-2
+  -start 2026-12-01T00:00:00Z -end 2026-12-16T00:00:00Z
   -policy "$T/insideout-write.json"
   -boundary "$T/insideout-deploy-boundary.json"
 )
@@ -187,9 +244,11 @@ mkdir -p "$OUT"
 /tmp/iamaudit "${COMMON[@]}" \
   -role-arn arn:aws:iam::031780745048:role/platform-test-admin \
   -json "$OUT/bootstrap-role.json" > "$OUT/bootstrap-role.txt"
-# On a Luther-provisioned account, instead:
-#   -role-regex "^arn:aws:iam::<account>:role/($IDS)-[^/]+-account-admin-0\$"
 ```
+
+On a Luther-provisioned account, select the bootstrap role with
+`-role-regex "^arn:aws:iam::<account>:role/($IDS)-[^/]+-account-admin-0\$"`
+in place of `-role-arn`.
 
 Exit status: 0 when the Phase 2 gate passes, 3 when it fails, 1 or 2 on an
 error. A run that matched no event of the roles fails the gate: a wrong role
@@ -199,7 +258,43 @@ Without a trail, `-source lookup` with the same `-region` list reads
 event history (90 days, management events only, slow: 2 calls a second per
 region).
 
-What the report holds:
+### Quick check for a scoped run
+
+A deploy in scoped mode is the one that can be refused, and a refused call
+shows in event history within about 15 minutes. Run this check after each
+scoped deploy, before the full audit. It reads event history for one role
+and one window and prints the denied calls:
+
+```bash
+ROLE=<short_project_id>-luther-terraform
+START=2026-11-20T15:55:00Z END=2026-11-20T18:15:00Z
+export AWS_RETRY_MODE=adaptive AWS_MAX_ATTEMPTS=10
+for region in us-west-2 us-east-1; do
+  aws cloudtrail lookup-events --region "$region" \
+    --start-time "$START" --end-time "$END" \
+    --query 'Events[].CloudTrailEvent' --output json | jq -c '.[] | fromjson'
+done >raw.jsonl
+jq -r --arg r "$ROLE" 'select(.userIdentity.arn // "" | contains("assumed-role/"+$r+"/"))
+  | [.eventSource, .eventName] | @tsv' raw.jsonl | sort | uniq -c | sort -rn >used.tsv
+jq -r --arg r "$ROLE" 'select((.userIdentity.arn // "" | contains("assumed-role/"+$r+"/"))
+  and (.errorCode // "" | test("AccessDenied|Unauthorized|AuthorizationError|Forbidden")))
+  | [.eventTime, .eventSource, .eventName, .errorCode, (.errorMessage // "")] | @tsv' raw.jsonl >denied.tsv
+```
+
+The retry settings are there because `LookupEvents` allows 2 calls a second
+per region, and a second check run at the same time gets throttled.
+
+`denied.tsv` must be empty. Each line in it is a missing permission, and the
+error message names the action. For `iam:PassRole` it names the role too.
+The error codes cover the forms AWS services use for a refused call
+(`AccessDenied*`, `*Unauthorized*`, SNS's `AuthorizationError`, `Forbidden`).
+The check reads management events only, so a refused S3 object call or
+Lambda invoke (data events) does not show here. For those, read the trail
+bucket: run `iamaudit` with `-source s3`.
+The first scoped runs and their results are in
+[`least-privilege-phase1/2026-11-20/runs.md`](least-privilege-phase1/2026-11-20/runs.md).
+
+### What the report holds
 
 | Field (`.json`) | Meaning |
 |---|---|
@@ -255,7 +350,11 @@ each role, on one audit (`terraform_role` from the platform-cust3 matrix,
    was handed a role in the matrix (instance profiles to EC2, cluster and node
    roles to EKS, execution roles to Lambda, ECS, App Runner, SageMaker,
    CodeBuild, CodePipeline, Backup, Grafana, RDS monitoring) is in P's
-   `iam:PassedToService` list.
+   `iam:PassedToService` list. The value to list is the service whose API
+   receives the role, which is sometimes not the principal in the role's
+   trust policy. For example, an RDS enhanced-monitoring role trusts
+   `monitoring.rds.amazonaws.com`, but `CreateDBInstance` checks the pass
+   against `rds.amazonaws.com` (the 2026-11-20 denial, fixed in #198).
 4. **Transitive services.** Each `services_beyond_composer_seed` entry is in
    P (through the generator's `TransitiveApplyServices`) or explained in
    `runs.md` as one the roles do not need (an `already_refused` call).
