@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# apply-plan.sh — Apply a pre-generated .tfplan file.
+# apply-plan.sh — Apply a saved .tfplan file.
 #
 # Usage: bash apply-plan.sh <lifecycle> --plan-file <id> [--check-drift] [--ignore-drift]
 #
-# Applies a saved terraform plan, optionally checking for drift first.
-# Captures terraform outputs after apply.
+# A thin entrypoint over `mars default apply-stage <lifecycle> --plan
+# <id>.tfplan --outputs --clean-providers` (mars-stages.yaml, tf/stages.sh,
+# #114). The plan file is <lifecycle>/<id>.tfplan, saved by an earlier
+# plan-all.sh or plan.sh run. mars deletes the stage's cached providers
+# before init (they conflict across containers), applies, and writes
+# outputs/outputs.json and outputs/<lifecycle>.json.
 #
-# The plan file is expected at: <lifecycle>/<id>.tfplan
-#
-# Outputs are written to $MARS_PROJECT_ROOT/outputs/outputs.json.
+# --check-drift checks the plan for drift first and writes outputs/drift.json.
+# On actionable drift the report has apply_skipped=true and nothing is
+# applied (exit 0, the pod-level gate of #108); --ignore-drift is reliable's
+# force-apply, which applies anyway. Without --check-drift, mars writes an
+# empty drift.json when there is none, so consumers always get one.
 
 set -euo pipefail
 
@@ -23,7 +29,7 @@ shift
 
 plan_id=""
 check_drift=false
-ignore_drift=false
+stage_args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --plan-file)
@@ -34,8 +40,15 @@ while [[ $# -gt 0 ]]; do
       plan_id="$2"
       shift 2
       ;;
-    --check-drift)  check_drift=true; shift ;;
-    --ignore-drift) ignore_drift=true; shift ;;
+    --check-drift)
+      check_drift=true
+      stage_args+=("$1")
+      shift
+      ;;
+    --ignore-drift)
+      stage_args+=("$1")
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 1
@@ -53,88 +66,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
+. "$SCRIPT_DIR/stages.sh"
 exportTemplateVersion
 exportPresetsVersion
+exportStageParallelism
 
-# Source utils.sh (expects $1 = workspace/lifecycle)
-set -- "$lifecycle"
-. "$SCRIPT_DIR/utils.sh"
+prepareStage "$lifecycle"
+marsStages apply-stage "$lifecycle" --plan "${plan_id}.tfplan" --outputs --clean-providers \
+  "${stage_args[@]+"${stage_args[@]}"}"
 
-setupCloudEnv
-trap 'cleanupCloudEnv' EXIT
-
-plan_file="${plan_id}.tfplan"
-
-if [[ ! -f "$plan_file" ]]; then
-  echo "ERROR: plan file not found: $plan_file" >&2
-  exit 1
+# With --check-drift, mars wrote this run's drift.json before it decided to
+# apply, so its apply_skipped says whether the stack was applied.
+if [[ "$check_drift" == "true" && "$(driftApplySkipped)" == "true" ]]; then
+  exit 0
 fi
 
-# Remove cached providers to avoid conflicts across containers
-rm -rf .terraform/providers
-
-terraform init -input=false
-
-# Optional drift check before apply
-if [[ "$check_drift" == "true" ]]; then
-  drift_args=()
-  if [[ "$ignore_drift" == "true" ]]; then
-    drift_args+=("--ignore-drift")
-  fi
-  bash "$SCRIPT_DIR/drift-check.sh" "$plan_file" --stage "$lifecycle" "${drift_args[@]+"${drift_args[@]}"}"
-
-  # Pod-level apply gate (issue #108). drift-check.sh writes apply_skipped
-  # into drift.json based on actionable drift + --ignore-drift. We honor it
-  # here so the gate lives in the pod, not in drift-check's exit code.
-  # Reliable's force-apply UX flips this to false via --ignore-drift.
-  apply_skipped="$(jq -r '.apply_skipped // false' "$MARS_PROJECT_ROOT/outputs/drift.json" 2>/dev/null || echo false)"
-  if [[ "$apply_skipped" == "true" ]]; then
-    echo "INFO: apply_skipped=true in drift.json; skipping terraform apply. Re-run with --ignore-drift to force."
-    exit 0
-  fi
-fi
-
-terraform apply -input=false "$plan_file"
-
-captureOutputs() {
-  mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  terraform output -json > "$MARS_PROJECT_ROOT/outputs/outputs.json"
-  echo "Outputs written to $MARS_PROJECT_ROOT/outputs/outputs.json"
-  cp "$MARS_PROJECT_ROOT/outputs/outputs.json" "$MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
-  echo "Outputs also saved to $MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
-}
-
-captureOutputs
-
-# Persist the applied stack to the per-project -infra repo (#143).
-#
-# The saved-plan apply path (ui-core makeApplyAllFromPlanWorkflow) runs this
-# script with checkDrift=true and, like the drift-check branch of
-# apply-with-outputs.sh, never reaches apply.sh's push. Scope to
-# custom-stack-provision (the stage carrying the full generated stack, with the
-# infra .git + remote wired by prepare-custom-stack in the prior plan
-# workflow). Non-fatal by contract.
-if [[ "$lifecycle" == "custom-stack-provision" ]]; then
-  marsInfra infra-persist || \
-    echo "⚠️  [git-infra] WARNING: mars infra-persist returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
-fi
-
-# Write drift.json stub if drift-check didn't produce one (not invoked, or
-# invoked but no drift). Mirrors the full drift-check.sh schema so consumers
-# get the same shape regardless of whether drift occurred, including the
-# template_version / presets_version provenance fields.
-if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
-  mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  jq -n \
-    --arg tmpl "${TEMPLATE_VERSION:-}" \
-    --arg pres "${PRESETS_VERSION:-}" \
-    '{
-      drift_detected: false,
-      drift_count: 0,
-      actionable: false,
-      apply_skipped: false,
-      template_version: (if $tmpl == "" then null else $tmpl end),
-      presets_version: (if $pres == "" then null else $pres end),
-      resources: []
-    }' > "$MARS_PROJECT_ROOT/outputs/drift.json"
-fi
+# The saved-plan apply path (ui-core makeApplyAllFromPlanWorkflow) never
+# reaches apply.sh's push (#143).
+persistCustomStack "$lifecycle"
