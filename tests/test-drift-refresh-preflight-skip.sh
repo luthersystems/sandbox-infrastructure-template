@@ -19,8 +19,8 @@ set -uo pipefail
 # path — mirroring the destroy-path fix in tf/destroy.sh (bc942b1).
 #
 # This exercises the REAL path end-to-end — drift-refresh.sh → utils.sh →
-# setupCloudEnv → the real aws-preflight.sh → drift-check.sh — stubbing ONLY the
-# terraform binary (drift-refresh runs terraform directly, not through mars). It
+# setupCloudEnv → the real aws-preflight.sh → mars plan-stage --check-drift
+# (MARS_BIN, tests/mars-infra.sh; #114) — stubbing ONLY the terraform binary. It
 # stages a definitive FAIL-CLOSED verdict via the AWS test seam
 # (AWS_PREFLIGHT_TEST_SIMULATE_FILE), so if the skip regressed the refresh would
 # be blocked and the test would fail. No aws/terraform binary is really invoked
@@ -37,6 +37,10 @@ fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# shellcheck source=tests/mars-infra.sh
+. "$SRC_ROOT/tests/mars-infra.sh"
+requireMarsStages
+
 WORKDIR="$(mktemp -d /tmp/test-drift-refresh-preflight-XXXXXX)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -46,9 +50,12 @@ mkdir -p "$PROOT/tf/auto-vars" "$PROOT/ansible/inventories/default/group_vars/al
 echo "environment: test" > "$PROOT/ansible/inventories/default/group_vars/all/env.yaml"
 
 cp "$SRC_ROOT/shell_utils.sh" "$PROOT/shell_utils.sh"
-for f in utils.sh run-with-creds.sh drift-refresh.sh drift-check.sh aws-preflight.sh gcp-preflight.sh; do
+for f in utils.sh run-with-creds.sh drift-refresh.sh stages.sh stage-setup.sh aws-preflight.sh gcp-preflight.sh; do
   cp "$SRC_ROOT/tf/$f" "$PROOT/tf/$f"
 done
+cp "$SRC_ROOT/mars-stages.yaml" "$PROOT/mars-stages.yaml"
+# mars needs vars/default/ in the stage; tfSetup copies it from auto-vars.
+mkdir -p "$PROOT/tf/auto-vars/vars/default"
 chmod +x "$PROOT/tf/"*.sh
 
 # AWS mode with a bootstrap role configured (drives the aws-preflight role path).
@@ -56,8 +63,8 @@ cat > "$PROOT/tf/auto-vars/common.auto.tfvars.json" <<'JSON'
 {"cloud_provider":"aws","bootstrap_role":"arn:aws:iam::123456789012:role/insideout-bootstrap","aws_external_id":"ext-abc","aws_region":"us-east-1"}
 JSON
 
-# Minimal terraform stand-in for the read-only refresh path (drift-refresh runs
-# terraform DIRECTLY, not via mars). init: no-op. plan: create the -out plan
+# Minimal terraform stand-in for the read-only refresh path (mars runs it from
+# PATH). init: no-op. workspace show: the default workspace. plan: create the -out plan
 # file. show: emit a no-drift plan JSON so drift-check computes drift_count=0
 # and exits 0. Any real invocation is logged.
 TFROOT="$WORKDIR/tfbin"
@@ -70,6 +77,7 @@ echo "\$*" >> "$TF_LOG_FILE"
 subcmd="\${1:-}"
 case "\$subcmd" in
   init) exit 0 ;;
+  workspace) [[ "\${2:-}" == show ]] && echo default; exit 0 ;;
   plan)
     out="refresh.tfplan"
     for arg in "\$@"; do
@@ -115,7 +123,7 @@ echo "Test 1: drift-refresh.sh cloud-provision is NOT blocked by the preflight"
 # Run the real drift-refresh.sh from tf/ (so utils.sh's relative workspace cd
 # lands in tf/cloud-provision and the basename gate fires). The denied seam
 # would fail the preflight closed if it ran — the skip must prevent that, so the
-# read-only refresh runs to completion (drift-check reports no drift, exit 0).
+# read-only refresh runs to completion (mars reports no drift, exit 0).
 out="$(cd "$PROOT/tf" && MARS_PROJECT_ROOT="$PROOT" \
   PATH="$TFROOT:$PATH" \
   AWS_PREFLIGHT_TEST_SIMULATE_FILE="$DENIED" \
@@ -143,9 +151,9 @@ else
 fi
 
 if grep -q "No resource drift detected" <<<"$out"; then
-  pass "refresh proceeded past the preflight into drift-check (read-only path completed)"
+  pass "refresh proceeded past the preflight into the drift check (read-only path completed)"
 else
-  fail "drift-check never ran — the refresh path did not proceed past the preflight"
+  fail "the drift check never ran — the refresh path did not proceed past the preflight"
   echo "----- output -----"; echo "$out"; echo "------------------"
 fi
 
