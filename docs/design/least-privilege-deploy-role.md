@@ -574,6 +574,23 @@ re-provisioning customer 403s on the policy-version update.
   playbook re-applies `account-setup` + `cloud-provision` for opted-in existing
   projects once the scoped policy has soaked on new ones.
 
+#### 8.3.1 Opt-in per project (#194)
+
+Phase 2 starts as an opt-in, not a change for every project:
+
+| `deploy_policy_mode` | Body on the terraform role |
+|---|---|
+| `admin` (default) | the Phase-0 admin-equivalent body |
+| `scoped` | the generated `insideout-write.json`, with its placeholders filled |
+
+Scoped mode also needs `stack_project`, the composer project name. It makes the
+workload boundary `<stack_project>-workload-boundary` and writes
+`tf/auto-vars/iam_scope.auto.tfvars.json`, so the presets put their IAM under
+`/insideout/<stack_project>/` with that boundary. Reliable turns it on per
+project. The file list, the placeholders and the limits are in
+`tf/account-setup/policies/README.md`. Rollback for one project: set the mode
+back to `admin` and re-apply cloud-provision.
+
 ### 8.4 Rollback
 
 - **Phase 0:** repoint the deploy roles back to the AWS-managed `AdministratorAccess`
@@ -592,6 +609,11 @@ re-provisioning customer 403s on the policy-version update.
 ---
 
 ## 9. Implemented in this PR
+
+> **Update (#194):** the policy files are now generated (`scripts/policygen.sh`,
+> checked in CI), and `tf/cloud-provision` attaches `insideout-write.json` in
+> `deploy_policy_mode = "scoped"` (§8.3.1). The table below is the state when
+> this doc was written.
 
 **Design-only** for anything that changes authorization. To keep the option-2
 artifact concrete and reviewable *without* touching any live attachment, this PR

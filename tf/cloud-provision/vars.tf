@@ -216,3 +216,44 @@ variable "inspector_wif_principal_set" {
     error_message = "inspector_wif_principal_set must be empty or a workload identity pool principal set: principalSet://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/<attribute>."
   }
 }
+
+# ============================================================================
+# Deploy policy (#147, #194)
+# ============================================================================
+
+# Set by reliable through ui-core in tf/auto-vars/common.auto.tfvars.json.
+variable "deploy_policy_mode" {
+  description = "Deploy policy on the durable terraform role (AWS): admin (default) attaches the admin-equivalent body; scoped attaches the policy generated from the presets (tf/account-setup/policies/insideout-write.json). Scoped is for the custom-stack sequence only."
+  type        = string
+  default     = "admin"
+  nullable    = false
+
+  validation {
+    condition     = contains(["admin", "scoped"], var.deploy_policy_mode)
+    error_message = "deploy_policy_mode must be admin or scoped."
+  }
+}
+
+# The composer's project name (io-<session>), which the presets put in their
+# IAM path and Project tag. The scoped policy allows IAM writes only under
+# /insideout/<stack_project>/ and only on resources tagged with it.
+variable "stack_project" {
+  description = "Composer project name of the custom stack (io-<session>). Required when deploy_policy_mode is scoped."
+  type        = string
+  default     = ""
+  nullable    = false
+
+  validation {
+    condition     = var.stack_project == "" || can(regex("^[A-Za-z0-9+=,.@_-]{1,40}$", var.stack_project))
+    error_message = "stack_project must be empty or 1 to 40 characters of letters, digits and +=,.@_-."
+  }
+}
+
+# Written by this stage into tf/auto-vars/iam_scope.auto.tfvars.json in scoped
+# mode, for the composed custom stack. Declared here because every stage loads
+# tf/auto-vars.
+variable "iam_scope" {
+  description = "Not used in this stage; written for custom-stack-provision"
+  type        = any
+  default     = null
+}
