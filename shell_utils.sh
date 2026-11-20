@@ -415,17 +415,62 @@ assumeJumpRole() {
 # Cloud Environment Setup
 # ============================================================================
 
-# setupCloudEnv configures the environment for the target cloud provider.
+# The cloud setup has two parts:
+#   - the process part (_setupCloudCredentials, assumeJumpRole): the
+#     credential file and the exported variables terraform reads. It must
+#     run in the process that starts terraform (or mars), because an export
+#     reaches only child processes;
+#   - the stage part (_selectCloudFiles, _bootstrapPreflight): the cloud's
+#     .tf files and the bootstrap preflight, both keyed on the stage
+#     directory that is the current directory.
+# setupCloudEnv runs both, for one stage. A mars stage command that plans
+# several stages (plan-all.sh) runs setupCloudCredentials once before mars,
+# and its per-stage setup hook (tf/stage-setup.sh) runs prepareCloudStage in
+# each stage directory (#114).
+
+# setupCloudEnv configures the environment for the target cloud provider,
+# for the stage whose directory is the current directory.
 # Call this before running terraform commands.
 # Returns: 0 on success, 1 on failure
 setupCloudEnv() {
-  local cloud
-  cloud=$(getCloudProvider)
-
-  echo "Setting up environment for cloud provider: $cloud"
+  echo "Setting up environment for cloud provider: $(getCloudProvider)"
 
   # Activate cloud-specific templates (copies .tf.tmpl -> .tf)
   _selectCloudFiles
+
+  _setupCloudCredentials || return 1
+  _bootstrapPreflight || return 1
+
+  # Handle AWS jump role assumption (applies to all providers)
+  assumeJumpRole
+
+  return 0
+}
+
+# setupCloudCredentials is the process part of setupCloudEnv: the
+# credentials and exported variables, without the stage's files or its
+# preflight. Returns: 0 on success, 1 on failure
+setupCloudCredentials() {
+  echo "Setting up credentials for cloud provider: $(getCloudProvider)"
+  _setupCloudCredentials || return 1
+  assumeJumpRole
+}
+
+# prepareCloudStage is the stage part of setupCloudEnv, in the stage
+# directory that is the current directory: the cloud's .tf files and the
+# bootstrap preflight. It needs the process part to have run in a parent
+# (the GCP preflight reads GOOGLE_PROJECT and the credential file).
+# Returns: 0 on success, 1 on failure
+prepareCloudStage() {
+  _selectCloudFiles
+  _bootstrapPreflight
+}
+
+# _setupCloudCredentials writes the cloud's credential file and exports the
+# variables terraform reads. Returns: 0 on success, 1 on failure
+_setupCloudCredentials() {
+  local cloud
+  cloud=$(getCloudProvider)
 
   case "$cloud" in
     gcp)
@@ -456,7 +501,31 @@ setupCloudEnv() {
       echo "  GOOGLE_PROJECT=$GOOGLE_PROJECT"
       echo "  GOOGLE_REGION=$GOOGLE_REGION"
       echo "  GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
+      ;;
 
+    aws)
+      # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
+      # No GCP provider or credentials needed — all cloud-specific resources
+      # and providers are isolated in .tf.tmpl template files.
+      echo "AWS environment: using IRSA"
+      ;;
+
+    *)
+      echo_error "ERROR: Unknown cloud provider: $cloud"
+      return 1
+      ;;
+  esac
+}
+
+# _bootstrapPreflight runs the bootstrap permission preflight of the
+# cloud-provision stage, when the current directory is that stage.
+# Returns: 0 on success or when it does not apply, 1 on failure
+_bootstrapPreflight() {
+  local cloud
+  cloud=$(getCloudProvider)
+
+  case "$cloud" in
+    gcp)
       # Fail-fast GCP bootstrap-permission preflight (luthersystems/reliable#2243).
       # Only the cloud-provision stage creates the GCS tfstate bucket + the two
       # service accounts + the Owner grant, so scope the check to that stage
@@ -485,11 +554,6 @@ setupCloudEnv() {
       ;;
 
     aws)
-      # AWS uses IRSA (IAM Roles for Service Accounts) for AWS auth.
-      # No GCP provider or credentials needed — all cloud-specific resources
-      # and providers are isolated in .tf.tmpl template files.
-      echo "AWS environment: using IRSA"
-
       # Fail-fast AWS bootstrap-permission preflight (luthersystems/reliable#2243).
       # Twin of the GCP preflight above. Only the cloud-provision stage creates
       # the S3 tfstate bucket + KMS key + the admin/inspector IAM roles, so scope
@@ -535,16 +599,7 @@ setupCloudEnv() {
         fi
       fi
       ;;
-
-    *)
-      echo_error "ERROR: Unknown cloud provider: $cloud"
-      return 1
-      ;;
   esac
-
-  # Handle AWS jump role assumption (applies to all providers)
-  assumeJumpRole
-
   return 0
 }
 

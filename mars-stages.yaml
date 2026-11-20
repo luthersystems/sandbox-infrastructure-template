@@ -1,0 +1,71 @@
+# mars-stages.yaml — the template's Terraform stages for the mars stage
+# commands (plan-all, plan-stage, apply-stage; luthersystems/mars
+# docs/stages.md). tf/stages.sh calls them; the scripts in tf/ keep the
+# entrypoints ui-core runs (#114).
+#
+# The file names below are the ones ui-core and reliable read from
+# /marsproject/outputs, so do not rename them: tfplan-<stage>.json and the
+# tfplan.json alias (Oracle GetJobPlan, #127), plan-summary.json, drift.json
+# and drift-<stage>.json (#108), outputs.json and <stage>.json.
+version: 1
+
+outputs_dir: outputs
+
+# The default saved plan name. ui-core names the plan of a plan-all or a
+# plan.sh run with -out={planID}.tfplan; tf/stages.sh passes that name to
+# mars as --plan-file, so apply-plan.sh --plan-file {planID} finds it.
+plan_file: mars.tfplan
+
+init_args: ["-input=false", "-reconfigure"]
+
+# Plan every stage even when one fails, as plan-all.sh always did; the run
+# still exits 1.
+continue_on_error: true
+
+# Argo tars /marsproject as the workflow's output artifact. The provider
+# binaries under every .terraform/providers (about 750 MiB per stage, more
+# under outputs/reverse-import, #134) are made again from mars's
+# filesystem_mirror on the next init, so plan-all deletes them. Modules and
+# lock files stay.
+strip_providers: true
+
+# The stage files and the bootstrap preflight (tf/stage-setup.sh). A script
+# that runs one stage does this in its own shell first.
+setup: ["bash", "tf/stage-setup.sh"]
+
+files:
+  plan_json: "tfplan-{stage}.json"
+  plan_alias: tfplan.json
+  summary: plan-summary.json
+  drift: "drift-{stage}.json"
+  drift_alias: drift.json
+  outputs: "{stage}.json"
+  outputs_alias: outputs.json
+
+drift:
+  # Provenance of every drift report, as drift-check.sh wrote it
+  # (exportTemplateVersion and exportPresetsVersion set them).
+  stamp_env:
+    template_version: TEMPLATE_VERSION
+    presets_version: PRESETS_VERSION
+
+stages:
+  - name: account-provision
+    dir: tf/account-provision
+  - name: account-setup
+    dir: tf/account-setup
+  - name: cloud-provision
+    dir: tf/cloud-provision
+    # A new project has no remote state for the later stages to read:
+    # plan-all applies this stage's plan when its state is empty.
+    apply_if_no_state: true
+  - name: vm-provision
+    dir: tf/vm-provision
+  - name: k8s-provision
+    dir: tf/k8s-provision
+  - name: custom-stack-provision
+    dir: tf/custom-stack-provision
+    # The stage that carries the imports: its plan is the tfplan.json alias,
+    # whose resource_changes reliable's post-import tag-only classifier reads
+    # (#127).
+    plan_alias_preferred: true
