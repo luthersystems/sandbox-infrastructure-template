@@ -21,6 +21,14 @@ variable "kms_alias_suffix" { type = any }
 variable "deploy_policy_json" { type = string }
 variable "permissions_boundary_arn" { type = string }
 
+# The real module counts the deploy policy on deploy_policy_json, so an
+# unknown body fails the plan ("Invalid count argument"). The stub does the
+# same, so a body that is known only at apply fails this test too.
+resource "terraform_data" "deploy" {
+  count = var.deploy_policy_json != "" ? 1 : 0
+  input = var.deploy_policy_json
+}
+
 output "admin_role" { value = "arn:aws:iam::111122223333:role/${var.admin_role_name}" }
 output "aws_kms_key_id" { value = "key" }
 output "aws_s3_bucket_tfstate" { value = "bucket" }
