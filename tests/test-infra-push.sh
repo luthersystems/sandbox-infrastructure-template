@@ -50,6 +50,8 @@ fi
 # shellcheck source=tests/mars-infra.sh
 . "$REPO_ROOT/tests/mars-infra.sh"
 requireMarsInfra
+# The apply scripts also run the mars stage commands (tf/stages.sh, #114).
+requireMarsStages
 
 # --- Mock binaries (terraform / mars / chmod) ---------------------------------
 MOCK_BIN="$WORKDIR/bin"
@@ -72,12 +74,15 @@ elif [[ "\$1" == "output" && "\$2" == "-json" ]]; then
   cat "$TF_OUTPUT_JSON"
 elif [[ "\$1" == "init" ]]; then
   :
+elif [[ "\$1" == "workspace" && "\$2" == "show" ]]; then
+  echo default
 elif [[ "\$1" == "plan" ]]; then
   for arg in "\$@"; do
     if [[ "\$arg" == -out=* ]]; then touch "\${arg#-out=}"; fi
   done
 elif [[ "\$1" == "apply" ]]; then
-  :
+  # Case P: whether the teammate's file is in the tree when Terraform runs.
+  if [[ -f "\$MARS_PROJECT_ROOT/teammate.txt" ]]; then echo "teammate-present" >> "$CMD_LOG"; fi
 fi
 OUTER
 chmod +x "$MOCK_BIN/terraform"
@@ -112,15 +117,17 @@ EOF
   echo '{"dummy": true}' > "$proj/outputs/dummy.json"
   cp "$REPO_ROOT/shell_utils.sh" "$proj/shell_utils.sh"
   cp "$REPO_ROOT/tf/utils.sh" "$proj/tf/utils.sh"
-  cp "$REPO_ROOT/tf/drift-check.sh" "$proj/tf/drift-check.sh"
   cp "$REPO_ROOT/tf/apply-with-outputs.sh" "$proj/tf/apply-with-outputs.sh"
   cp "$REPO_ROOT/tf/apply-plan.sh" "$proj/tf/apply-plan.sh"
+  cp "$REPO_ROOT/tf/apply.sh" "$proj/tf/apply.sh"
+  cp "$REPO_ROOT/tf/stages.sh" "$proj/tf/stages.sh"
+  cp "$REPO_ROOT/tf/stage-setup.sh" "$proj/tf/stage-setup.sh"
+  cp "$REPO_ROOT/mars-stages.yaml" "$proj/mars-stages.yaml"
+  # mars needs vars/default/ in the stage; tfSetup copies it from auto-vars.
+  mkdir -p "$proj/tf/auto-vars/vars/default"
   # The repo's REAL .gitignore: the snapshot's `git add -A` honors the #160
   # denylist (mars tests the denylist itself: TestPersistKeepsSecretsOut).
   cp "$REPO_ROOT/.gitignore" "$proj/.gitignore"
-  # Mock apply.sh (only reached by simple mode, which these tests don't use).
-  printf '#!/usr/bin/env bash\necho "apply.sh $*" >> "%s"\n' "$CMD_LOG" > "$proj/tf/apply.sh"
-  chmod +x "$proj/tf/apply.sh"
   echo "$proj"
 }
 
@@ -313,14 +320,11 @@ fi
 echo ""
 echo "=== Case N: simple-mode apply (apply.sh) after a history squash ==="
 # =============================================================================
-# apply-with-outputs.sh without --check-drift runs apply.sh. apply.sh merged
+# apply-with-outputs.sh without --check-drift runs apply.sh's flow. It merged
 # infra/main under set -e before Terraform ran, and the merge always fails on
 # ui-core's squashed history, so the apply aborted before it applied. Now it
 # applies first and pushes a snapshot, like infra-persist.
 PROJ="$(make_project projN)"
-cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
-# utils.sh points MARS at tf/run-with-creds.sh, so that is the mock here.
-cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
 BARE="$(fresh_bare)"
 set_repo_clone_url "$PROJ" "file://$BARE"
 init_project_git "$PROJ"
@@ -342,10 +346,10 @@ outN="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
 rcN=$?
 set -e
 
-if [[ "$rcN" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG"; then
+if [[ "$rcN" -eq 0 ]] && grep -q "terraform apply -input=false mars.tfplan" "$CMD_LOG"; then
   pass "N: the simple-mode apply ran Terraform and exits 0"
 else
-  fail "N: simple-mode apply rc=$rcN, or no mars apply ran. Output: $outN"
+  fail "N: simple-mode apply rc=$rcN, or no terraform apply ran. Output: $outN"
 fi
 if git -C "$BARE" merge-base --is-ancestor "$base_headN" main &&
   [[ "$(git -C "$BARE" show main:tf/custom-stack-provision/main.tf 2>/dev/null)" == "simple-mode-change" ]]; then
@@ -411,8 +415,6 @@ echo "=== Case P: apply.sh from a stale checkout merges teammates' edits first =
 # apply.sh merges infra/main before Terraform runs, so the apply includes the
 # teammate's change, then pushes the snapshot.
 PROJ="$(make_project projP)"
-cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
-cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
 BARE="$(fresh_bare)"
 set_repo_clone_url "$PROJ" "file://$BARE"
 init_project_git "$PROJ"
@@ -426,19 +428,14 @@ git -C "$mate" add teammate.txt
 git -C "$mate" -c user.email=t@l -c user.name=T commit -q -m "teammate edit"
 git -C "$mate" push -q origin main
 mate_headP="$(git -C "$BARE" rev-parse main)"
-# Record whether the teammate's file is in the tree when Terraform runs.
-cat > "$PROJ/tf/run-with-creds.sh" <<OUTER
-#!/usr/bin/env bash
-echo "mars \$*" >> "$CMD_LOG"
-if [[ -f "$PROJ/teammate.txt" ]]; then echo "teammate-present" >> "$CMD_LOG"; fi
-OUTER
-/bin/chmod +x "$PROJ/tf/run-with-creds.sh"
+# The mock terraform records whether the teammate's file is in the tree
+# when it applies.
 
 set +e
 outP="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
 rcP=$?
 set -e
-if [[ "$rcP" -eq 0 ]] && grep -q "apply --approve" "$CMD_LOG" && grep -q "teammate-present" "$CMD_LOG"; then
+if [[ "$rcP" -eq 0 ]] && grep -q "terraform apply" "$CMD_LOG" && grep -q "teammate-present" "$CMD_LOG"; then
   pass "P: the stale checkout merged infra/main before Terraform ran"
 else
   fail "P: rc=$rcP, or Terraform ran without the teammate's edit. Output: $outP"
@@ -455,8 +452,6 @@ echo ""
 echo "=== Case Q: apply.sh stops on a real merge conflict, before Terraform ==="
 # =============================================================================
 PROJ="$(make_project projQ)"
-cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
-cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
 BARE="$(fresh_bare)"
 set_repo_clone_url "$PROJ" "file://$BARE"
 init_project_git "$PROJ"
@@ -476,7 +471,7 @@ set +e
 outQ="$(run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
 rcQ=$?
 set -e
-if [[ "$rcQ" -ne 0 ]] && ! grep -q "apply --approve" "$CMD_LOG"; then
+if [[ "$rcQ" -ne 0 ]] && ! grep -q "terraform " "$CMD_LOG"; then
   pass "Q: a merge conflict stops the apply before Terraform runs"
 else
   fail "Q: rc=$rcQ; a conflicted checkout must not apply. Output: $outQ"
@@ -684,8 +679,6 @@ echo "=== Case W: a mars without the infra-* commands stops the apply ==="
 # commands, marsInfra must fail closed: apply.sh stops before Terraform, as
 # for any failed merge, instead of applying with no -infra repo handling.
 PROJ="$(make_project projW)"
-cp "$REPO_ROOT/tf/apply.sh" "$PROJ/tf/apply.sh"
-cp "$MOCK_MARS" "$PROJ/tf/run-with-creds.sh"
 init_project_git "$PROJ"
 OLD_MARS="$WORKDIR/old-mars"
 printf '#!/usr/bin/env bash\necho "mars: error: unexpected argument $2" >&2\nexit 80\n' > "$OLD_MARS"
@@ -694,7 +687,7 @@ set +e
 outW="$(MARS_BIN="$OLD_MARS" run_apply "$PROJ" apply-with-outputs.sh custom-stack-provision)"
 rcW=$?
 set -e
-if [[ "$rcW" -eq 1 ]] && ! grep -q "apply --approve" "$CMD_LOG" &&
+if [[ "$rcW" -eq 1 ]] && ! grep -q "terraform " "$CMD_LOG" &&
   grep -qF "has no 'mars infra-merge'" <<<"$outW"; then
   pass "W: an old mars stops the apply before Terraform, with a loud warning"
 else
