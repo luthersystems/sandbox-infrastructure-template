@@ -1,30 +1,37 @@
 #!/bin/bash
+# plan.sh — Plan one stage.
+#
+# Usage: bash plan.sh <stage>
+#
+# A thin entrypoint over `mars default plan-stage` (mars-stages.yaml,
+# tf/stages.sh, #114). It writes outputs/tfplan-<stage>.json and the
+# canonical outputs/tfplan.json alias, for single-stage Argo runs and the
+# consumers that key on the unsuffixed name (Oracle GetJobPlan, reliable's
+# fetchOraclePlanJSON; #127). A -out=<name> in TF_CLI_ARGS_plan names the
+# saved plan.
 set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: plan.sh <stage>" >&2
+  exit 1
+fi
+stage="$1"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
+export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
-. ./utils.sh
+. "$SCRIPT_DIR/stages.sh"
 logTemplateVersion
 logPresetsVersion
 
-tfInit
-tfPlan
-
-# Export JSON plan for structured analysis (best-effort)
-planfile=$(find . -maxdepth 1 -name '*.tfplan' -print -quit 2>/dev/null)
-if [[ -n "$planfile" ]]; then
-  mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  # shellcheck disable=SC2154  # workspace is set by sourced utils.sh
-  local_ws="${workspace}"
-  terraform show -json "$planfile" > "$MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
-  echo "Plan JSON written to $MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json"
-  # Also write the canonical outputs/tfplan.json alias so single-stage
-  # Argo runs / consumers that key on the unsuffixed name pick this up
-  # (Argo `tf-plan-all` artifact spec, Oracle GetJobPlan, reliable's
-  # fetchOraclePlanJSON). See issue #127. plan-all.sh overwrites this
-  # alias to point at the import-bearing stage in multi-stage runs.
-  cp "$MARS_PROJECT_ROOT/outputs/tfplan-${local_ws}.json" "$MARS_PROJECT_ROOT/outputs/tfplan.json"
-  echo "Canonical tfplan.json written to $MARS_PROJECT_ROOT/outputs/tfplan.json"
+args=()
+plan_file="$(stagePlanFile)"
+if [[ -n "$plan_file" ]]; then
+  args+=(--plan-file "$plan_file")
 fi
+exportStageParallelism
+
+prepareStage "$stage"
+marsStages plan-stage "$stage" "${args[@]+"${args[@]}"}"
