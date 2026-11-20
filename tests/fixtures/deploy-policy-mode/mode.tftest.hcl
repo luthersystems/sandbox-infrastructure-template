@@ -67,6 +67,27 @@ run "admin_with_stack_project" {
   }
 }
 
+# A first deploy plans cloud-provision before any of its resources exist.
+# The scoped body must be known at plan, or the bootstrap module's count
+# fails.
+run "scoped_plan" {
+  command = plan
+
+  variables {
+    deploy_policy_mode = "scoped"
+    stack_project      = "io-abc123def456"
+  }
+
+  assert {
+    condition     = length(module.bootstrap[0].deploy_policy_json) > 0 && !strcontains(module.bootstrap[0].deploy_policy_json, "$${")
+    error_message = "the scoped policy must be known and filled at plan."
+  }
+  assert {
+    condition     = strcontains(module.bootstrap[0].deploy_policy_json, "arn:aws:iam::111122223333:policy/io-abc123def456-workload-boundary")
+    error_message = "the scoped policy must name the workload boundary at plan."
+  }
+}
+
 run "scoped" {
   command = apply
 

@@ -11,7 +11,8 @@ set -euo pipefail
 #   1. admin (default) keeps the admin-equivalent body and writes no
 #      iam_scope file; it makes the workload boundary only with stack_project
 #      (so a project moved back from scoped keeps it);
-#   2. scoped attaches the generated policy with every placeholder filled,
+#   2. scoped attaches the generated policy, known at plan (the bootstrap
+#      module counts on it), with every placeholder filled,
 #      within the IAM size limit, and denies changing the deploy role, its
 #      policy and the boundary;
 #   3. scoped makes <stack_project>-workload-boundary off the project path
@@ -50,7 +51,7 @@ fi
 sed 's#source = "github.com/luthersystems/tf-modules.git//aws-platform-ui-bootstrap?ref=[^"]*"#source = "./stub-bootstrap"#' \
   "$stage/aws-resources.tf" >"$stage/aws-resources.tf.new"
 mv "$stage/aws-resources.tf.new" "$stage/aws-resources.tf"
-# The scoped run applies (the boundary ARN is known only then), and
+# The scoped run applies (to check the boundary and the iam_scope file), and
 # `terraform test` destroys what it applied; prevent_destroy on the inspector
 # role would stop that.
 sed 's/prevent_destroy = true/prevent_destroy = false/' "$stage/aws-resources.tf" >"$stage/aws-resources.tf.new"

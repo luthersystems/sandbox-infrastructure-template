@@ -116,6 +116,11 @@ locals {
   scoped_deploy  = var.deploy_policy_mode == "scoped" && var.stack_project != ""
   iam_arn_prefix = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:"
 
+  # The boundary's ARN from its name, not from the resource: the scoped body
+  # must be known at plan, because the bootstrap module counts its deploy
+  # policy on it. On a first deploy the boundary does not exist yet.
+  workload_boundary_arn = "${local.iam_arn_prefix}policy/${var.stack_project}-workload-boundary"
+
   admin_deploy_policy_json = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -132,7 +137,7 @@ locals {
   # against the 6,144-character limit, but the stored body is smaller.
   scoped_deploy_policy_json = local.scoped_deploy ? jsonencode(jsondecode(templatefile("${path.module}/../account-setup/policies/insideout-write.json", {
     project               = var.stack_project
-    workload_boundary_arn = aws_iam_policy.workload_boundary[0].arn
+    workload_boundary_arn = local.workload_boundary_arn
     # tf-modules aws-platform-ui-bootstrap names them so, at path "/".
     deploy_role_arn   = "${local.iam_arn_prefix}role/${local.admin_role_name}"
     deploy_policy_arn = "${local.iam_arn_prefix}policy/${local.admin_role_name}-deploy"
@@ -140,7 +145,7 @@ locals {
 
   iam_scope = local.scoped_deploy ? {
     path                 = "/insideout/${var.stack_project}/"
-    permissions_boundary = aws_iam_policy.workload_boundary[0].arn
+    permissions_boundary = local.workload_boundary_arn
   } : null
 }
 
@@ -169,6 +174,10 @@ resource "local_file" "iam_scope_tfvars" {
 
   filename = "${path.module}/../auto-vars/iam_scope.auto.tfvars.json"
   content  = jsonencode({ iam_scope = local.iam_scope })
+
+  # iam_scope names the boundary by its ARN string; write the file only once
+  # the boundary exists, so the composed stack never names a missing policy.
+  depends_on = [aws_iam_policy.workload_boundary]
 }
 
 output "deploy_policy_mode" {
