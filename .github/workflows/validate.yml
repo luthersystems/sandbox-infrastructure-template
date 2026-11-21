@@ -179,9 +179,10 @@ jobs:
           git config --global user.email "ci@luthersystems.com"
           git config --global user.name "CI"
 
-      # The scripts' -infra git steps are mars commands (mars infra-*), so the
+      # The scripts' -infra git steps (mars infra-*) and their stages (mars
+      # plan-all, plan-stage, apply-stage; #114) are mars commands, so the
       # tests run a native mars at the pinned .mars-version. A release older
-      # than the infra-* commands fails the tests, as it would fail a deploy.
+      # than those commands fails the tests, as it would fail a deploy.
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -205,23 +206,23 @@ jobs:
 
       - name: Run tests
         run: |
-          # Only these two run the real mars: the others mock it, as locally.
+          # These run the real mars; the others mock it, as locally.
           MARS_BIN="$MARS_INFRA_BIN" bash tests/test-prepare-custom-stack.sh
           MARS_BIN="$MARS_INFRA_BIN" bash tests/test-infra-push.sh
-          bash tests/test-apply-scripts.sh
-          bash tests/test-drift-check.sh
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-apply-scripts.sh
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-drift-check.sh
           bash tests/test-tf-destroy-init.sh
           bash tests/test-mars-entrypoint-compat.sh
           bash tests/test-reverse-import-wrapper.sh
           bash tests/test-external-id.sh
           bash tests/test-state-backend-output-parity.sh
           bash tests/test-state-region.sh
-          bash tests/test-plan-all.sh
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-plan-all.sh
           bash tests/test-gcp-preflight.sh
           bash tests/test-gcp-keyless-credentials.sh
           bash tests/test-aws-preflight.sh
           bash tests/test-destroy-preflight-skip.sh
-          bash tests/test-drift-refresh-preflight-skip.sh
+          MARS_BIN="$MARS_INFRA_BIN" bash tests/test-drift-refresh-preflight-skip.sh
           bash tests/test-preflight-binary-swap.sh
           bash tests/test-aws-credential-guard.sh
           bash tests/test-repo-org-pin.sh

@@ -1,34 +1,29 @@
 #!/bin/bash
+# apply.sh — Apply a stage, with the -infra git steps around the apply.
+#
+# Usage: bash apply.sh <stage>
+#
+# Merges infra/main, plans and applies the stage with `mars default
+# apply-stage` (mars-stages.yaml, tf/stages.sh, #114), then snapshots and
+# pushes the deployed tree (#160). applyStageWithInfraSync in tf/stages.sh
+# has the rules of each step.
 set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: apply.sh <stage>" >&2
+  exit 1
+fi
+stage="$1"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${MARS_PROJECT_ROOT:=$(cd "$SCRIPT_DIR/.." && pwd)}"
+export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
-. ./utils.sh
-logTemplateVersion
-logPresetsVersion
+. "$SCRIPT_DIR/stages.sh"
+exportTemplateVersion
+exportPresetsVersion
+exportStageParallelism
 
-# Merge infra/main before Terraform runs, so a developer's stale checkout
-# applies with teammates' edits. A failed merge stops the apply, as it always
-# did; --abort-on-conflict cleans it up first, so the snapshot of a later run
-# cannot push conflict markers (a merge it did not start is refused, not
-# aborted). rc 2 does not stop it: a checkout infra-clone laid the deploy
-# archive over, an unborn HEAD, or ui-core's squashed tree, which shares no
-# commit with infra/main. The snapshot after the apply lands on top of
-# infra/main (#160).
-merge_rc=0
-marsInfra infra-merge --abort-on-conflict || merge_rc=$?
-if [[ "$merge_rc" -ne 0 && "$merge_rc" -ne 2 ]]; then
-  exit "$merge_rc"
-fi
-
-tfInit
-tfApply
-# After the apply: the snapshot is the deployed tree, and a git problem must
-# not fail a deploy that already applied. It fetches infra/main again: a
-# teammate may have pushed during the apply, and the push must fast-forward.
-marsInfra infra-snapshot "auto-commit: infrastructure changes [ci skip]" ||
-  echo "⚠️  [git-infra] WARNING: mars infra-snapshot returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
-marsInfra infra-push ||
-  echo "⚠️  [git-infra] WARNING: mars infra-push returned non-zero (continuing; non-fatal). [sandbox-infrastructure-template#160]" >&2
+enterStage "$stage"
+applyStageWithInfraSync "$stage"

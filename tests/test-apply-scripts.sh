@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Tests for tf/apply-with-outputs.sh, tf/apply-plan.sh, and tf/drift-refresh.sh.
-# Uses mock terraform and apply.sh binaries to verify behavior.
+# Runs the real mars stage commands (MARS_BIN, tests/mars-infra.sh) on a fake
+# terraform, through the template's entrypoints, config and setup hook (#114).
 
 PASS=0
 FAIL=0
@@ -20,6 +21,9 @@ if ! command -v jq &>/dev/null; then
   echo "SKIP: jq is required for these tests" >&2
   exit 0
 fi
+# shellcheck source=tests/mars-infra.sh
+. "$REPO_ROOT/tests/mars-infra.sh"
+requireMarsStages
 
 # --- Build a fake project tree ---
 PROJECT="$WORKDIR/project"
@@ -32,7 +36,11 @@ cat > "$PROJECT/ansible/inventories/default/group_vars/all/env.yaml" <<'EOF'
 environment: test
 EOF
 
-echo '{"cloud_provider": "aws"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+# Access-key mode skips the bootstrap preflight, so no aws CLI is needed.
+COMMON_VARS='{"cloud_provider": "aws", "aws_access_key_id": "AKIATEST"}'
+echo "$COMMON_VARS" > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+# mars needs vars/default/ in the stage; tfSetup copies it from auto-vars.
+mkdir -p "$PROJECT/tf/auto-vars/vars/default"
 
 # Copy real scripts
 cp "$REPO_ROOT/shell_utils.sh" "$PROJECT/shell_utils.sh"
@@ -41,6 +49,13 @@ cp "$REPO_ROOT/tf/drift-check.sh" "$PROJECT/tf/drift-check.sh"
 cp "$REPO_ROOT/tf/drift-refresh.sh" "$PROJECT/tf/drift-refresh.sh"
 cp "$REPO_ROOT/tf/apply-with-outputs.sh" "$PROJECT/tf/apply-with-outputs.sh"
 cp "$REPO_ROOT/tf/apply-plan.sh" "$PROJECT/tf/apply-plan.sh"
+cp "$REPO_ROOT/tf/apply.sh" "$PROJECT/tf/apply.sh"
+cp "$REPO_ROOT/tf/stages.sh" "$PROJECT/tf/stages.sh"
+cp "$REPO_ROOT/tf/stage-setup.sh" "$PROJECT/tf/stage-setup.sh"
+cp "$REPO_ROOT/mars-stages.yaml" "$PROJECT/mars-stages.yaml"
+# The tests' stage. stages: is the last key of the config, so the appended
+# entry joins its list.
+printf '  - name: default\n    dir: tf/default\n' >> "$PROJECT/mars-stages.yaml"
 
 # --- Mock binaries ---
 MOCK_BIN="$WORKDIR/bin"
@@ -49,7 +64,6 @@ mkdir -p "$MOCK_BIN"
 CMD_LOG="$WORKDIR/cmd-log.txt"
 TF_SHOW_OUTPUT="$WORKDIR/show-output.json"
 TF_OUTPUT_JSON="$WORKDIR/output-json.json"
-MOCK_APPLY_SH="$WORKDIR/mock-apply.sh"
 MOCK_MARS="$WORKDIR/mock-mars.sh"
 
 # Default: no drift, empty outputs
@@ -66,6 +80,8 @@ elif [[ "\$1" == "output" && "\$2" == "-json" ]]; then
   cat "$TF_OUTPUT_JSON"
 elif [[ "\$1" == "init" ]]; then
   : # success
+elif [[ "\$1" == "workspace" && "\$2" == "show" ]]; then
+  echo default
 elif [[ "\$1" == "plan" ]]; then
   # Create a fake plan file if -out is specified
   for arg in "\$@"; do
@@ -85,16 +101,6 @@ cat > "$MOCK_MARS" <<OUTER
 echo "mars \$*" >> "$CMD_LOG"
 OUTER
 chmod +x "$MOCK_MARS"
-
-# Mock apply.sh (for simple mode of apply-with-outputs.sh)
-cat > "$MOCK_APPLY_SH" <<OUTER
-#!/usr/bin/env bash
-echo "apply.sh \$*" >> "$CMD_LOG"
-OUTER
-chmod +x "$MOCK_APPLY_SH"
-
-# Place mock apply.sh where the real script expects it
-cp "$MOCK_APPLY_SH" "$PROJECT/tf/apply.sh"
 
 # Mock chmod (the utils.sh tries chmod on MARS)
 cat > "$MOCK_BIN/chmod" <<'OUTER'
@@ -129,10 +135,11 @@ echo "=== apply-with-outputs.sh ==="
 
 # --- Test 1: Simple mode calls apply.sh and captures outputs ---
 echo ""
-echo "Test 1: Simple mode delegates to apply.sh..."
+echo "Test 1: Simple mode plans, applies and captures outputs..."
 
-# In simple mode, it calls apply.sh then sources utils.sh for terraform output.
-# We need the mock apply.sh in place and terraform output to work.
+# Simple mode is apply.sh's flow (applyStageWithInfraSync): the infra-* git
+# steps, then mars apply-stage --outputs. The project has no .git, so the
+# git steps are no-ops.
 set +e
 output="$(run_script apply-with-outputs.sh default 2>&1)"
 exit_code=$?
@@ -144,10 +151,11 @@ else
   fail "simple mode: expected exit 0, got $exit_code. Output: $output"
 fi
 
-if grep -q "apply.sh default" "$CMD_LOG"; then
-  pass "simple mode: apply.sh called with lifecycle"
+if grep -q "terraform plan .*-out=mars.tfplan" "$CMD_LOG" &&
+   grep -q "terraform apply -input=false mars.tfplan" "$CMD_LOG"; then
+  pass "simple mode: stage planned and that plan applied"
 else
-  fail "simple mode: apply.sh not called"
+  fail "simple mode: plan or apply of mars.tfplan missing. Log: $(cat "$CMD_LOG")"
 fi
 
 if grep -q "terraform output -json" "$CMD_LOG"; then
@@ -298,7 +306,7 @@ fi
 
 # Apply must NOT run despite the exit-0 — wrapper reads drift.json and skips.
 # This is the core invariant of the new gate location.
-if grep -q "terraform apply -input=false apply.tfplan" "$CMD_LOG"; then
+if grep -q "terraform apply -input=false mars.tfplan" "$CMD_LOG"; then
   fail "drift detected: terraform apply should not run when apply_skipped:true"
 else
   pass "drift detected: terraform apply not called (wrapper honored apply_skipped)"
@@ -345,7 +353,7 @@ else
   fail "ignore-drift: expected exit 0, got $exit_code. Output: $output"
 fi
 
-if grep -q "terraform apply -input=false apply.tfplan" "$CMD_LOG"; then
+if grep -q "terraform apply -input=false mars.tfplan" "$CMD_LOG"; then
   pass "ignore-drift: terraform apply called (drift ignored)"
 else
   fail "ignore-drift: terraform apply not called"
@@ -604,7 +612,7 @@ output="$(run_script drift-refresh.sh default 2>&1)"
 exit_code=$?
 set -e
 
-if grep -q "terraform plan -refresh-only -out=refresh.tfplan" "$CMD_LOG"; then
+if grep -qE "terraform plan .*-refresh-only.*-out=refresh.tfplan" "$CMD_LOG"; then
   pass "drift-refresh: full plan command correct (-refresh-only -out=refresh.tfplan)"
 else
   fail "drift-refresh: plan command arguments wrong"
@@ -643,13 +651,13 @@ else
   fail "noop-plan drift: expected exit 0, got $exit_code. Output: $output"
 fi
 
-if grep -q "terraform apply -input=false apply.tfplan" "$CMD_LOG"; then
+if grep -q "terraform apply -input=false mars.tfplan" "$CMD_LOG"; then
   pass "noop-plan drift: terraform apply proceeded"
 else
   fail "noop-plan drift: terraform apply not called"
 fi
 
-if echo "$output" | grep -q "drift detected but no drifted resource is being applied"; then
+if echo "$output" | grep -q "No drifted resource has a change in this plan"; then
   pass "noop-plan drift: INFO line printed"
 else
   fail "noop-plan drift: expected INFO line about no drifted resource being applied"
@@ -703,7 +711,7 @@ echo ""
 echo "=== Issue #93 regression: TEMPLATE_VERSION + PRESETS_VERSION stamping ==="
 
 # Stamp both refs into auto-vars so getTfVar picks them up.
-echo '{"cloud_provider": "aws", "template_ref": "abcdef1234567890", "presets_ref": "v1.4.2"}' \
+echo '{"cloud_provider": "aws", "aws_access_key_id": "AKIATEST", "template_ref": "abcdef1234567890", "presets_ref": "v1.4.2"}' \
   > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
 
 # --- Test 14: apply-with-outputs.sh drift-check: template_version stamped ---
@@ -717,16 +725,15 @@ output="$(run_script apply-with-outputs.sh default --check-drift 2>&1)"
 exit_code=$?
 set -e
 
-# Parent script logs once via exportTemplateVersion, child drift-check.sh
-# logs once via its own template_version=${TEMPLATE_VERSION:-unknown} echo.
-# Exact count 2 guards against the parent double-logging while the child is
-# silent (which a >=2 assertion would miss). Use -F (fixed string) so the
+# The script logs once via exportTemplateVersion; mars stamps the report from
+# the exported env (mars-stages.yaml drift.stamp_env) and logs nothing.
+# Exact count 1 guards against a double log. Use -F (fixed string) so the
 # literal dots in the version ref aren't regex-interpreted.
 tv_count="$(echo "$output" | grep -cF "template_version=abcdef1234567890" || true)"
-if [[ "$tv_count" -eq 2 ]]; then
-  pass "apply-with-outputs: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
+if [[ "$tv_count" -eq 1 ]]; then
+  pass "apply-with-outputs: template_version=<sha> appears exactly once"
 else
-  fail "apply-with-outputs: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
+  fail "apply-with-outputs: expected 1 template_version=<sha> line, got $tv_count. Output: $output"
 fi
 
 if echo "$output" | grep -qF "template_version=unknown"; then
@@ -736,10 +743,10 @@ else
 fi
 
 pv_count="$(echo "$output" | grep -cF "presets_version=v1.4.2" || true)"
-if [[ "$pv_count" -eq 2 ]]; then
-  pass "apply-with-outputs: presets_version=<ref> appears exactly 2 times (parent + child drift-check)"
+if [[ "$pv_count" -eq 1 ]]; then
+  pass "apply-with-outputs: presets_version=<ref> appears exactly once"
 else
-  fail "apply-with-outputs: expected 2 presets_version=<ref> lines, got $pv_count. Output: $output"
+  fail "apply-with-outputs: expected 1 presets_version=<ref> line, got $pv_count. Output: $output"
 fi
 
 if echo "$output" | grep -qF "presets_version=unknown"; then
@@ -770,10 +777,10 @@ exit_code=$?
 set -e
 
 tv_count="$(echo "$output" | grep -cF "template_version=abcdef1234567890" || true)"
-if [[ "$tv_count" -eq 2 ]]; then
-  pass "apply-plan: template_version=<sha> appears exactly 2 times (parent + child drift-check)"
+if [[ "$tv_count" -eq 1 ]]; then
+  pass "apply-plan: template_version=<sha> appears exactly once"
 else
-  fail "apply-plan: expected 2 template_version=<sha> lines, got $tv_count. Output: $output"
+  fail "apply-plan: expected 1 template_version=<sha> line, got $tv_count. Output: $output"
 fi
 
 if echo "$output" | grep -qF "template_version=unknown"; then
@@ -783,10 +790,10 @@ else
 fi
 
 pv_count="$(echo "$output" | grep -cF "presets_version=v1.4.2" || true)"
-if [[ "$pv_count" -eq 2 ]]; then
-  pass "apply-plan: presets_version=<ref> appears exactly 2 times (parent + child drift-check)"
+if [[ "$pv_count" -eq 1 ]]; then
+  pass "apply-plan: presets_version=<ref> appears exactly once"
 else
-  fail "apply-plan: expected 2 presets_version=<ref> lines, got $pv_count. Output: $output"
+  fail "apply-plan: expected 1 presets_version=<ref> line, got $pv_count. Output: $output"
 fi
 
 if echo "$output" | grep -qF "presets_version=unknown"; then
@@ -796,7 +803,47 @@ else
 fi
 
 # Restore common auto-vars for any later tests (none currently, but defensive).
-echo '{"cloud_provider": "aws"}' > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+echo "$COMMON_VARS" > "$PROJECT/tf/auto-vars/common.auto.tfvars.json"
+
+# ============================================================
+# The stage commands refuse the ./mars docker wrapper (#114): it does not
+# forward the stage's environment into its container.
+# ============================================================
+echo ""
+echo "=== native mars required ==="
+
+echo ""
+echo "Test 16: no MARS_BIN and no mars image → the docker wrapper is refused..."
+set +e
+output="$(MARS_BIN="" MARS_CONTAINER_ROOT="$WORKDIR/no-mars-image" run_script apply-plan.sh default --plan-file myplan 2>&1)"
+exit_code=$?
+set -e
+if [[ "$exit_code" -ne 0 ]] && echo "$output" | grep -qF "need a native mars"; then
+  pass "docker fallback: refused with a clear error"
+else
+  fail "docker fallback: expected a refusal, got exit $exit_code. Output: $output"
+fi
+if grep -q "terraform apply" "$CMD_LOG"; then
+  fail "docker fallback: terraform ran"
+else
+  pass "docker fallback: nothing applied"
+fi
+
+echo ""
+echo "Test 17: drift-check.sh treats a missing mars report as an error..."
+EMPTY_MARS="$WORKDIR/empty-report-mars"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$EMPTY_MARS"
+/bin/chmod +x "$EMPTY_MARS"
+echo "fake-plan" > "$WORKDIR/some.tfplan"
+set +e
+output="$(MARS_BIN="$EMPTY_MARS" MARS_PROJECT_ROOT="$PROJECT" bash "$PROJECT/tf/drift-check.sh" "$WORKDIR/some.tfplan" 2>&1)"
+exit_code=$?
+set -e
+if [[ "$exit_code" -eq 1 ]] && ! echo "$output" | grep -q "No resource drift detected"; then
+  pass "drift-check: empty report is an error, not 'no drift'"
+else
+  fail "drift-check: expected exit 1 on an empty report, got $exit_code. Output: $output"
+fi
 
 # --- Summary ---
 echo ""

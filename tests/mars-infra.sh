@@ -25,3 +25,21 @@ hasMarsInfra() {
 requireMarsInfra() {
   hasMarsInfra || exit 1
 }
+
+# requireMarsStages stops the test unless MARS_BIN names a mars with the
+# stage commands the template's scripts call (plan-all --plan-file is the
+# newest flag they use; tf/stages.sh, #114), and exports it.
+requireMarsStages() {
+  if [[ -z "${MARS_BIN:-}" ]]; then
+    echo "FAIL: set MARS_BIN to a mars build with the stage commands (plan-all --plan-file)," >&2
+    echo "      e.g. go build -o /tmp/mars ./cmd/mars in a mars checkout." >&2
+    exit 1
+  fi
+  local help
+  help="$("$MARS_BIN" default plan-all --help 2>&1 || true)"
+  if [[ "$help" != *--plan-file* ]]; then
+    echo "FAIL: $MARS_BIN has no plan-all --plan-file; it needs a mars release with it (#114)." >&2
+    exit 1
+  fi
+  export MARS_BIN
+}

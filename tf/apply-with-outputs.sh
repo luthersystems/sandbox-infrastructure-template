@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# apply-with-outputs.sh — Run terraform apply then capture outputs.
+# apply-with-outputs.sh — Apply a stage, then capture its outputs.
 #
 # Usage: bash apply-with-outputs.sh <lifecycle> [--check-drift] [--ignore-drift]
 #
-# Two modes:
-#   Simple (no flags):
-#     Delegates to apply.sh (merge infra/main, apply, snapshot push),
-#     then captures terraform output -json.
+# A thin entrypoint over `mars default apply-stage <lifecycle> --outputs`
+# (mars-stages.yaml, tf/stages.sh, #114). mars plans, applies that plan and
+# writes outputs/outputs.json and outputs/<lifecycle>.json. Two modes:
 #
-#   Drift-check (--check-drift):
-#     Runs terraform directly: init -> plan -> drift-check -> apply.
-#     No git operations. Optionally pass --ignore-drift to continue
-#     despite detected drift.
+#   Simple (no flags): as apply.sh, with the -infra git steps around the
+#     apply: merge infra/main first, snapshot and push the deployed tree
+#     after (#160).
 #
-# Outputs are written to $MARS_PROJECT_ROOT/outputs/outputs.json.
+#   Drift-check (--check-drift): mars checks the plan for drift first and
+#     writes outputs/drift.json. On actionable drift the report has
+#     apply_skipped=true and nothing is applied (exit 0, #108);
+#     --ignore-drift applies anyway. No merge: ui-core runs this mode for
+#     every custom-stack apply, on a tree it prepared. After an apply of
+#     custom-stack-provision, the tree is persisted to the -infra repo
+#     (#143).
+#
+# Without --check-drift, mars writes an empty drift.json when there is none,
+# so consumers always get one.
 
 set -euo pipefail
 
@@ -27,11 +34,14 @@ lifecycle="$1"
 shift
 
 check_drift=false
-ignore_drift=false
+stage_args=()
 for arg in "$@"; do
   case "$arg" in
-    --check-drift)  check_drift=true ;;
-    --ignore-drift) ignore_drift=true ;;
+    --check-drift)
+      check_drift=true
+      stage_args+=("$arg")
+      ;;
+    --ignore-drift) stage_args+=("$arg") ;;
     *)
       echo "Unknown argument: $arg" >&2
       exit 1
@@ -44,96 +54,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MARS_PROJECT_ROOT
 
 . "$MARS_PROJECT_ROOT/shell_utils.sh"
+. "$SCRIPT_DIR/stages.sh"
 exportTemplateVersion
 exportPresetsVersion
+exportStageParallelism
 
-captureOutputs() {
-  mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  terraform output -json > "$MARS_PROJECT_ROOT/outputs/outputs.json"
-  echo "Outputs written to $MARS_PROJECT_ROOT/outputs/outputs.json"
-  cp "$MARS_PROJECT_ROOT/outputs/outputs.json" "$MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
-  echo "Outputs also saved to $MARS_PROJECT_ROOT/outputs/${lifecycle}.json"
-}
-
-if [[ "$check_drift" == "true" ]]; then
-  # Drift-check mode: run terraform directly, no git operations
-  . "$MARS_PROJECT_ROOT/shell_utils.sh"
-
-  # Source utils.sh (expects $1 = workspace/lifecycle)
-  set -- "$lifecycle"
-  . "$SCRIPT_DIR/utils.sh"
-
-  setupCloudEnv
-  trap 'cleanupCloudEnv' EXIT
-
-  terraform init -input=false
-  terraform plan -out=apply.tfplan -input=false
-
-  # Check drift. Drift-check exits 0 by default (issue #108) and writes
-  # apply_skipped into drift.json; we honor that here as the apply gate.
-  drift_args=()
-  if [[ "$ignore_drift" == "true" ]]; then
-    drift_args+=("--ignore-drift")
-  fi
-  bash "$SCRIPT_DIR/drift-check.sh" apply.tfplan --stage "$lifecycle" "${drift_args[@]+"${drift_args[@]}"}"
-
-  apply_skipped="$(jq -r '.apply_skipped // false' "$MARS_PROJECT_ROOT/outputs/drift.json" 2>/dev/null || echo false)"
-  if [[ "$apply_skipped" == "true" ]]; then
-    echo "INFO: apply_skipped=true in drift.json; skipping terraform apply. Re-run with --ignore-drift to force."
-    exit 0
-  fi
-
-  terraform apply -input=false apply.tfplan
-  captureOutputs
-
-  # Persist the applied stack to the per-project -infra repo (#143).
-  #
-  # This drift-check branch — NOT apply.sh — is what ui-core actually runs for a
-  # custom-stack apply (it always sets checkDrift=true), so without this call
-  # the push to the -infra repo is never reached and the -infra repo stays empty despite a
-  # SUCCESS. Scope to custom-stack-provision: that stage carries the full
-  # generated stack and has the infra .git + remote wired by
-  # prepare-custom-stack; earlier stages have no .git yet and would only emit
-  # spurious warnings. Non-fatal by contract — a push problem must not fail an
-  # already-applied deploy.
-  if [[ "$lifecycle" == "custom-stack-provision" ]]; then
-    marsInfra infra-persist || \
-      echo "⚠️  [git-infra] WARNING: mars infra-persist returned non-zero (non-fatal; deploy already applied). [sandbox-infrastructure-template#143]" >&2
-  fi
-else
-  # Simple mode: delegate to apply.sh, which merges infra/main before the
-  # apply (a stale checkout picks up teammates' edits) and pushes a snapshot
-  # of the deployed tree after it (#160).
-  bash "$SCRIPT_DIR/apply.sh" "$lifecycle"
-
-  # After apply.sh completes, we're in the lifecycle workspace dir.
-  # We need to set up workspace context to run terraform output.
-  . "$MARS_PROJECT_ROOT/shell_utils.sh"
-  set -- "$lifecycle"
-  . "$SCRIPT_DIR/utils.sh"
-
-  setupCloudEnv
-  trap 'cleanupCloudEnv' EXIT
-
-  captureOutputs
+if [[ "$check_drift" != "true" ]]; then
+  enterStage "$lifecycle"
+  applyStageWithInfraSync "$lifecycle" --outputs "${stage_args[@]+"${stage_args[@]}"}"
+  exit 0
 fi
 
-# Write drift.json stub if drift-check didn't produce one (not invoked, or
-# invoked but no drift). Mirrors the full drift-check.sh schema so consumers
-# get the same shape regardless of whether drift occurred, including the
-# template_version / presets_version provenance fields.
-if [ ! -f "$MARS_PROJECT_ROOT/outputs/drift.json" ]; then
-  mkdir -p "$MARS_PROJECT_ROOT/outputs"
-  jq -n \
-    --arg tmpl "${TEMPLATE_VERSION:-}" \
-    --arg pres "${PRESETS_VERSION:-}" \
-    '{
-      drift_detected: false,
-      drift_count: 0,
-      actionable: false,
-      apply_skipped: false,
-      template_version: (if $tmpl == "" then null else $tmpl end),
-      presets_version: (if $pres == "" then null else $pres end),
-      resources: []
-    }' > "$MARS_PROJECT_ROOT/outputs/drift.json"
+prepareStage "$lifecycle"
+marsStages apply-stage "$lifecycle" --outputs "${stage_args[@]}"
+
+# mars wrote this run's drift.json before it decided to apply, so its
+# apply_skipped says whether the stack was applied.
+if [[ "$(driftApplySkipped)" == "true" ]]; then
+  exit 0
 fi
+
+# This drift-check branch, not apply.sh, is what ui-core runs for a
+# custom-stack apply (it always sets checkDrift=true), so without this the
+# -infra repo stays empty despite a SUCCESS (#143).
+persistCustomStack "$lifecycle"
