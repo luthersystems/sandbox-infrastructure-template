@@ -334,6 +334,14 @@ _checkGCPExternalAccount() {
   return 0
 }
 
+# _scopedAWSValue <profile> <key> prints one value of a profile from the
+# shared credentials file, or nothing when the profile has no such value.
+# The AWS_* env is unset so that only the file is read.
+_scopedAWSValue() {
+  env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+    aws configure get "$2" --profile "$1" 2>/dev/null || true
+}
+
 # _exportScopedAWSSession exports the pod's scoped AWS session as AWS_* env
 # vars, for the external_account credential of a keyless GCP deploy. It reads
 # the session from the shared credentials file the scope-aws init container
@@ -360,15 +368,19 @@ _exportScopedAWSSession() {
     echo_error "ERROR: a keyless GCP deploy needs the pod's scoped AWS session, but AWS_SHARED_CREDENTIALS_FILE is unset; it needs scoped terraform credentials [ui-core#153]"
     return 1
   fi
-  local session key secret token
-  if [[ ! -r "$file" ]] || ! session=$(env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
-      aws configure export-credentials --profile "$profile" --format process 2>/dev/null); then
+  # Read each value with "aws configure get", not "export-credentials": the
+  # mars image ships AWS CLI 2.7.0, which has no export-credentials (it came
+  # in 2.9), so the first keyless deploy on test failed here. "configure get"
+  # reads the files only and is in every CLI version. A missing value exits
+  # 1, which is not an error for the session token.
+  local key secret token
+  if [[ ! -r "$file" ]]; then
     echo_error "ERROR: cannot read the AWS session of profile ${profile} from ${file} [ui-core#153]"
     return 1
   fi
-  key=$(jq -r '.AccessKeyId // ""' <<<"$session")
-  secret=$(jq -r '.SecretAccessKey // ""' <<<"$session")
-  token=$(jq -r '.SessionToken // ""' <<<"$session")
+  key=$(_scopedAWSValue "$profile" aws_access_key_id)
+  secret=$(_scopedAWSValue "$profile" aws_secret_access_key)
+  token=$(_scopedAWSValue "$profile" aws_session_token)
   if [[ -z "$key" || -z "$secret" ]]; then
     echo_error "ERROR: profile ${profile} in ${file} has no AWS access key [ui-core#153]"
     return 1

@@ -246,5 +246,31 @@ out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
 if grep -qx "rc=1" <<<"$out" && grep -q "JUMP_ROLE_ARN" <<<"$out"; then pass "refused, names JUMP_ROLE_ARN"; else fail "jump role: $out"; fi
 
 echo ""
+echo "Test 12: the session is read with the AWS CLI the mars image ships (2.7.0)"
+# The mars image pins AWS CLI 2.7.0 (mars Makefile AWSCLI_VERSION), which has
+# no "aws configure export-credentials" (added in 2.9). The first keyless
+# deploy on test failed on it: "cannot read the AWS session of profile
+# default". This shim answers that subcommand as 2.7.0 does, so a read that
+# needs a newer CLI fails here and not in a customer's deploy.
+mkdir -p "$WORKDIR/oldcli"
+REAL_AWS=$(command -v aws)
+cat >"$WORKDIR/oldcli/aws" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == configure && "\$2" == export-credentials ]]; then
+  echo "aws: error: argument subcommand: Invalid choice" >&2
+  exit 252
+fi
+exec "$REAL_AWS" "\$@"
+EOF
+chmod +x "$WORKDIR/oldcli/aws"
+out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
+  AWS_SHARED_CREDENTIALS_FILE="$CREDS_FILE" AWS_REGION=us-west-2 PATH="$WORKDIR/oldcli:$PATH")
+if grep -qx "after_setup_key=ASIAEXAMPLEKEY" <<<"$out" && grep -qx "after_setup_token=example-session-token" <<<"$out"; then
+  pass "session read without export-credentials"
+else
+  fail "old CLI: $out"
+fi
+
+echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
