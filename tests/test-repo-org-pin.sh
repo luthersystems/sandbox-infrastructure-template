@@ -25,6 +25,9 @@ set -euo pipefail
 #      repo_org name the new org) re-pins the project without -replace, keeps
 #      it on later runs, and a repo_org that differs from the recorded org
 #      still fails.
+#   9. after a first deploy (no recorded clone URL), a -target apply of the
+#      pin with the recorded URL, as tfDestroy runs before its gate (#206),
+#      leaves a full apply nothing to change in the pin.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF="${TERRAFORM:-terraform}"
@@ -65,6 +68,11 @@ terraform {
 locals {
   is_aws = true
   is_gcp = false
+}
+
+# Lets a run compare the pin's id with an earlier run's (test 9).
+output "pin_id" {
+  value = terraform_data.repo_org_pin.id
 }
 EOF
 
@@ -325,6 +333,56 @@ run "moved_project_back_to_old_org_fails" {
   expect_failures = [github_repository.infra]
 }
 EOF2
+
+# tfDestroy applies only the pin before its gate (#206). After that, the
+# gate's full apply must find nothing to change in the pin.
+cat >"$work/tests/destroy_pin.tftest.hcl" <<'EOF3'
+mock_provider "github" {}
+mock_provider "local" {}
+mock_provider "time" {}
+mock_provider "tls" {}
+
+variables {
+  domain           = "example.com"
+  short_project_id = "abcd1234"
+  project_id       = "abcd1234-project"
+  repo_org         = "luthersystems"
+}
+
+run "first_deploy_records_no_url" {
+  command = apply
+}
+
+run "destroy_pin_apply" {
+  command = apply
+
+  plan_options {
+    target = [terraform_data.repo_org_pin]
+  }
+
+  variables {
+    repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
+  }
+
+  assert {
+    condition     = terraform_data.repo_org_pin.output == "luthersystems"
+    error_message = "the pin apply changed the pinned org"
+  }
+}
+
+run "gate_apply_keeps_pin" {
+  command = apply
+
+  variables {
+    repo_clone_ssh_url = "git@github.com:luthersystems/abcd1234-infra.git"
+  }
+
+  assert {
+    condition     = output.pin_id == run.destroy_pin_apply.pin_id
+    error_message = "the full apply after the pin apply still replaced the pin (#206)"
+  }
+}
+EOF3
 
 cd "$work"
 "$TF" init -backend=false -input=false >/dev/null
