@@ -132,17 +132,25 @@ tfApply() {
 # from then on, so the next run replaces the pin with the same org. That is
 # a state-only change with no cloud resource behind it, but the gate refuses
 # any change, so a destroy right after a first deploy failed. This step makes
-# the replace first. It cannot move the pin to a new org: the trigger follows
-# only the recorded clone URL, and the precondition that guards repo_org
-# (common-infrastructure#269) is on github_repository.infra, untouched here.
-# Changing the trigger itself instead would weaken that guard when a first
-# run records no URL.
+# the replace first. It re-pins only as a normal apply would: to the org of
+# the recorded clone URL (after a move-infra-repo transfer, the new org). The
+# precondition that guards repo_org (common-infrastructure#269) is on
+# github_repository.infra, which the gate's apply still checks. Changing the
+# trigger itself instead would weaken that guard when a first run records no
+# URL.
+#
+# A failure here is not fatal: the gate then decides, as before this step.
+# For example, terraform refuses a -target apply while moved {} blocks that
+# it excludes are pending (a project last applied before repo.tf's deploy-key
+# resources took a count).
 _tfRefreshRepoOrgPin() {
   if ! grep -Eqs '^resource[[:space:]]+"terraform_data"[[:space:]]+"repo_org_pin"' ./*.tf; then
     return 0
   fi
   echo "tfDestroy: applying terraform_data.repo_org_pin before the gate [#206]"
-  ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS "${tf_workspace}" apply --approve --target=terraform_data.repo_org_pin )
+  if ! ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS "${tf_workspace}" apply --approve --target=terraform_data.repo_org_pin ); then
+    echo "WARNING: tfDestroy: the repo_org_pin apply failed; the gate decides [#206]" >&2
+  fi
 }
 
 # tfDestroy [--ignore-drift] — pre-destroy convergence gate + adopted-import
@@ -160,13 +168,15 @@ _tfRefreshRepoOrgPin() {
 # destroying on top of that deserves a human decision (--ignore-drift), not
 # an automatic teardown.
 #
+# [pin apply] is _tfRefreshRepoOrgPin, in cloud-provision only (#206).
+#
 # Semantics matrix (guard = mars supports `apply --forbid-resource-changes`,
 # probed via `apply --help` so an older pinned mars degrades gracefully
 # instead of erroring on an unknown flag):
 #
 #   guard  | removed{} | --ignore-drift | behavior
 #   -------+-----------+----------------+------------------------------------
-#   yes    | any       | no             | guarded apply (gate + forgets) -> destroy
+#   yes    | any       | no             | [pin apply] -> guarded apply (gate + forgets) -> destroy
 #   yes/no | yes       | yes            | UNguarded apply (forgets; drift accepted) -> destroy
 #   yes/no | no        | yes            | plain destroy (gate skipped)
 #   no     | no        | no             | WARN + plain destroy (legacy behavior)

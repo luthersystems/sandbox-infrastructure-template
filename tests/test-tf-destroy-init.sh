@@ -322,6 +322,36 @@ if [[ "$p1" == "default init --reconfigure" \
 else
   fail "tfDestroy(cloud-provision): expected init/pin/gate/destroy, got:"$'\n'"$(cat "$MOCK_LOG")"
 fi
+pin_calls="$(wc -l < "$MOCK_LOG" | tr -d ' ')"
+pin_env="$(sed -n '3,4p' "$MOCK_LOG.env")"
+if [[ "$pin_calls" -eq 4 && "$pin_env" == $'TF_CLI_ARGS_plan=\nTF_CLI_ARGS_apply=' ]]; then
+  pass "tfDestroy(cloud-provision): 4 calls; the pin apply runs without plan-only TF_CLI_ARGS"
+else
+  fail "tfDestroy(cloud-provision): $pin_calls calls; pin apply env: $pin_env"
+fi
+# A failed pin apply (for example terraform refusing -target while excluded
+# moved {} blocks are pending) leaves the decision to the gate.
+FAILPIN_MARS="$WORKDIR/failpin-mars.sh"
+cat > "$FAILPIN_MARS" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"--help"* ]]; then
+  echo "      --forbid-resource-changes    Fail if the plan would create, update, or delete any resource."
+  exit 0
+fi
+echo "\$*" >> "$MOCK_LOG"
+echo "TF_CLI_ARGS_plan=\${TF_CLI_ARGS_plan:-}" >> "$MOCK_LOG.env"
+echo "TF_CLI_ARGS_apply=\${TF_CLI_ARGS_apply:-}" >> "$MOCK_LOG.env"
+[[ "\$*" == *"--target="* ]] && exit 1
+exit 0
+EOF
+chmod +x "$FAILPIN_MARS"
+if run_tf_func tfDestroy "$FAILPIN_MARS" 2>/dev/null \
+  && [[ "$(sed -n '3p' "$MOCK_LOG")" == "default apply --forbid-resource-changes" ]] \
+  && [[ "$(sed -n '4p' "$MOCK_LOG")" == "default destroy --approve" ]]; then
+  pass "tfDestroy(cloud-provision): a failed pin apply falls through to the gate"
+else
+  fail "tfDestroy(cloud-provision): failed pin apply did not fall through:"$'\n'"$(cat "$MOCK_LOG")"
+fi
 run_tf_func tfDestroy "$NEW_MARS" --ignore-drift
 if ! grep -q "repo_org_pin" "$MOCK_LOG"; then
   pass "tfDestroy(cloud-provision, --ignore-drift): no pin apply (no gate to pass)"

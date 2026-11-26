@@ -13,6 +13,9 @@
 #     half-applied stack, and tearing infrastructure down on top of that
 #     deserves a human decision, not an automatic destroy.
 #
+# In cloud-provision, tfDestroy first applies only terraform_data.repo_org_pin
+# (#206): a state-only replace that the gate would otherwise refuse.
+#
 # --ignore-drift is that human decision (same end-to-end override channel as
 # the apply path: reliable API ?ignore_drift=true → workflow args → argv).
 # See tfDestroy in utils.sh for the exact semantics matrix.
