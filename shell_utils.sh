@@ -334,6 +334,30 @@ _checkGCPExternalAccount() {
   return 0
 }
 
+# _readScopedAWSProfile <file> <profile> prints the profile's access key,
+# secret key and session token, one per line (an empty line for a missing
+# value), from that one file. It exits 1 when the file has no such profile.
+# It reads the file itself, with no AWS CLI: "aws configure export-credentials"
+# is not in the AWS CLI 2.7.0 the mars image ships (it came in 2.9), which
+# failed the first keyless deploy on test, and "aws configure get" also
+# merges in values from AWS_CONFIG_FILE, which could pair this session's key
+# with another session's token. One read also sees one state of the file.
+# The file is the one scope-aws writes (ui-core aws_scope.sh): plain
+# "key = value" lines. aws_security_token is the CLI's old name of the token.
+_readScopedAWSProfile() {
+  awk -v want="$2" '
+    function trim(v) { sub(/^[ \t]+/, "", v); sub(/[ \t\r]+$/, "", v); return v }
+    /^[ \t]*\[/ { name = trim($0); gsub(/^\[|\]$/, "", name); in_p = (trim(name) == want); if (in_p) found = 1; next }
+    in_p && index($0, "=") {
+      k = trim(substr($0, 1, index($0, "=") - 1)); v = trim(substr($0, index($0, "=") + 1))
+      if (k == "aws_access_key_id") key = v
+      else if (k == "aws_secret_access_key") secret = v
+      else if (k == "aws_session_token") token = v
+      else if (k == "aws_security_token" && token == "") token = v
+    }
+    END { if (!found) exit 1; print key; print secret; print token }' "$1"
+}
+
 # _exportScopedAWSSession exports the pod's scoped AWS session as AWS_* env
 # vars, for the external_account credential of a keyless GCP deploy. It reads
 # the session from the shared credentials file the scope-aws init container
@@ -360,15 +384,12 @@ _exportScopedAWSSession() {
     echo_error "ERROR: a keyless GCP deploy needs the pod's scoped AWS session, but AWS_SHARED_CREDENTIALS_FILE is unset; it needs scoped terraform credentials [ui-core#153]"
     return 1
   fi
-  local session key secret token
-  if [[ ! -r "$file" ]] || ! session=$(env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
-      aws configure export-credentials --profile "$profile" --format process 2>/dev/null); then
+  local key secret token lines
+  if [[ ! -r "$file" ]] || ! lines=$(_readScopedAWSProfile "$file" "$profile"); then
     echo_error "ERROR: cannot read the AWS session of profile ${profile} from ${file} [ui-core#153]"
     return 1
   fi
-  key=$(jq -r '.AccessKeyId // ""' <<<"$session")
-  secret=$(jq -r '.SecretAccessKey // ""' <<<"$session")
-  token=$(jq -r '.SessionToken // ""' <<<"$session")
+  { IFS= read -r key; IFS= read -r secret; IFS= read -r token; } <<<"$lines"
   if [[ -z "$key" || -z "$secret" ]]; then
     echo_error "ERROR: profile ${profile} in ${file} has no AWS access key [ui-core#153]"
     return 1

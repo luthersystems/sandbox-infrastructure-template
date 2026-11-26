@@ -105,7 +105,7 @@ run_setup() {
   (
     cd "$PROJECT/tf/$stage"
     unset JUMP_ROLE_ARN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION
-    unset AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE GOOGLE_APPLICATION_CREDENTIALS
+    unset AWS_SHARED_CREDENTIALS_FILE AWS_PROFILE AWS_CONFIG_FILE GOOGLE_APPLICATION_CREDENTIALS
     export MARS_PROJECT_ROOT="$PROJECT"
     for kv in "$@"; do export "${kv?}"; done
     # shellcheck disable=SC1091
@@ -244,6 +244,62 @@ echo "Test 11: JUMP_ROLE_ARN is refused on a keyless deploy (it would replace th
 out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
   AWS_SHARED_CREDENTIALS_FILE="$CREDS_FILE" AWS_REGION=us-west-2 JUMP_ROLE_ARN=arn:aws:iam::111111111111:role/jump)
 if grep -qx "rc=1" <<<"$out" && grep -q "JUMP_ROLE_ARN" <<<"$out"; then pass "refused, names JUMP_ROLE_ARN"; else fail "jump role: $out"; fi
+
+echo ""
+echo "Test 12: the session is read with no AWS CLI subcommand"
+# The mars image pins AWS CLI 2.7.0 (mars Makefile AWSCLI_VERSION), which has
+# no "aws configure export-credentials" (added in 2.9). The first keyless
+# deploy on test failed on it: "cannot read the AWS session of profile
+# default". The read now parses the file itself. This shim refuses every
+# "aws configure" call, so a read that goes back to the CLI fails here and
+# not in a customer's deploy.
+mkdir -p "$WORKDIR/oldcli"
+REAL_AWS=$(command -v aws)
+cat >"$WORKDIR/oldcli/aws" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == configure ]]; then
+  echo "aws: error: argument subcommand: Invalid choice" >&2
+  exit 252
+fi
+exec "$REAL_AWS" "\$@"
+EOF
+chmod +x "$WORKDIR/oldcli/aws"
+out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
+  AWS_SHARED_CREDENTIALS_FILE="$CREDS_FILE" AWS_REGION=us-west-2 PATH="$WORKDIR/oldcli:$PATH")
+if grep -qx "after_setup_key=ASIAEXAMPLEKEY" <<<"$out" && grep -qx "after_setup_token=example-session-token" <<<"$out"; then
+  pass "session read without the AWS CLI"
+else
+  fail "old CLI: $out"
+fi
+
+echo ""
+echo "Test 13: a profile the file does not have is refused as unreadable"
+out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
+  AWS_SHARED_CREDENTIALS_FILE="$CREDS_FILE" AWS_PROFILE=nope AWS_REGION=us-west-2)
+if grep -qx "rc=1" <<<"$out" && grep -q "cannot read the AWS session of profile nope" <<<"$out"; then
+  pass "missing profile refused"
+else
+  fail "missing profile: $out"
+fi
+
+echo ""
+echo "Test 14: only the credentials file is read (no token from AWS_CONFIG_FILE), and aws_security_token is a token"
+printf '[default]\naws_session_token = config-file-token\n' >"$WORKDIR/aws-config"
+out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
+  AWS_SHARED_CREDENTIALS_FILE="$WORKDIR/multi" AWS_PROFILE=default AWS_CONFIG_FILE="$WORKDIR/aws-config" AWS_REGION=us-west-2)
+if grep -qx "after_setup_key=ASIADEFAULT" <<<"$out" && grep -qx "after_setup_token=" <<<"$out"; then
+  pass "AWS_CONFIG_FILE not merged"
+else
+  fail "config merge: $out"
+fi
+printf '[default]\naws_access_key_id=ASIAOLD\naws_secret_access_key=oldsecret\naws_security_token=old-name-token\n' >"$WORKDIR/oldname"
+out=$(run_setup vm-provision "$(tfvars "$(external_account "$SA")" "$SA")" \
+  AWS_SHARED_CREDENTIALS_FILE="$WORKDIR/oldname" AWS_REGION=us-west-2)
+if grep -qx "after_setup_token=old-name-token" <<<"$out"; then
+  pass "aws_security_token read as the token"
+else
+  fail "old token name: $out"
+fi
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
