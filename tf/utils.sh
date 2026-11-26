@@ -126,6 +126,25 @@ tfApply() {
   fi
 }
 
+# _tfRefreshRepoOrgPin applies only terraform_data.repo_org_pin, in a stage
+# that has it (cloud-provision), before tfDestroy's convergence gate (#206).
+# The pin's trigger is null on a project's first run and the recorded org
+# from then on, so the next run replaces the pin with the same org. That is
+# a state-only change with no cloud resource behind it, but the gate refuses
+# any change, so a destroy right after a first deploy failed. This step makes
+# the replace first. It cannot move the pin to a new org: the trigger follows
+# only the recorded clone URL, and the precondition that guards repo_org
+# (common-infrastructure#269) is on github_repository.infra, untouched here.
+# Changing the trigger itself instead would weaken that guard when a first
+# run records no URL.
+_tfRefreshRepoOrgPin() {
+  if ! grep -Eqs '^resource[[:space:]]+"terraform_data"[[:space:]]+"repo_org_pin"' ./*.tf; then
+    return 0
+  fi
+  echo "tfDestroy: applying terraform_data.repo_org_pin before the gate [#206]"
+  ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS "${tf_workspace}" apply --approve --target=terraform_data.repo_org_pin )
+}
+
 # tfDestroy [--ignore-drift] — pre-destroy convergence gate + adopted-import
 # protection (#2048).
 #
@@ -200,6 +219,7 @@ tfDestroy() {
       guard_supported=true
     fi
     if [[ "$guard_supported" == true ]]; then
+      _tfRefreshRepoOrgPin
       echo "tfDestroy: pre-destroy convergence gate (apply --forbid-resource-changes) [#2048]"
       ( unset TF_CLI_ARGS_plan TF_CLI_ARGS_apply; $MARS "${tf_workspace}" apply --forbid-resource-changes )
     elif [[ "$removed_present" == true ]]; then
